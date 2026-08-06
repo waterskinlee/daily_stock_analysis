@@ -983,11 +983,11 @@ describe('StockScreeningPage', () => {
 
     const strategySelect = screen.getByLabelText('策略') as HTMLSelectElement;
     expect(Array.from(strategySelect.options).map((option) => option.textContent)).toEqual([
-      '平衡选股',
-      '资金热度',
-      '双低',
-      '超跌',
-      '缩量回踩',
+      '平衡选股 · 框架',
+      '资金热度 · 动量',
+      '双低 · 价值',
+      '超跌 · 反转',
+      '缩量回踩 · 趋势',
       '自定义策略…',
     ]);
 
@@ -1046,6 +1046,123 @@ describe('StockScreeningPage', () => {
     expect(screen.queryByText('旧策略股票')).not.toBeInTheDocument();
     expect(screen.queryByText('选股完成')).not.toBeInTheDocument();
     expect(screen.getByLabelText('策略')).toHaveValue('capital_heat');
+  });
+
+  it('filters strategies by category and keeps the current selection visible', async () => {
+    getStrategies.mockResolvedValueOnce({
+      enabled: true,
+      strategies: [
+        { id: 'dual_low', name: '双低', description: 'desc', category: 'value' },
+        { id: 'capital_heat', name: '资金热度', description: 'desc', category: 'momentum' },
+        { id: 'balanced_alpha', name: '均衡', description: 'desc', category: 'framework' },
+      ],
+      strategyCount: 3,
+    });
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    const strategySelect = screen.getByLabelText('策略') as HTMLSelectElement;
+    expect(Array.from(strategySelect.options).map((option) => option.value)).toEqual([
+      'dual_low', 'capital_heat', 'balanced_alpha', '__custom_strategy__',
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: /类别筛选：动量/ }));
+    // 当前选中策略（dual_low）被保留置顶，避免筛选后当前选择消失
+    expect(Array.from(strategySelect.options).map((option) => option.value)).toEqual([
+      'dual_low', 'capital_heat', '__custom_strategy__',
+    ]);
+    expect(strategySelect.value).toBe('dual_low');
+
+    fireEvent.change(strategySelect, { target: { value: 'capital_heat' } });
+    expect(strategySelect.value).toBe('capital_heat');
+
+    fireEvent.click(screen.getByRole('button', { name: /类别筛选：全部/ }));
+    expect(Array.from(strategySelect.options).map((option) => option.value)).toEqual([
+      'dual_low', 'capital_heat', 'balanced_alpha', '__custom_strategy__',
+    ]);
+    expect(strategySelect.value).toBe('capital_heat');
+  });
+
+  it('filters strategies by risk profile and pins the current selection', async () => {
+    getStrategies.mockResolvedValueOnce({
+      enabled: true,
+      strategies: [
+        { id: 'dual_low', name: '双低', description: 'desc', category: 'value', riskProfile: 'defensive' },
+        { id: 'capital_heat', name: '资金热度', description: 'desc', category: 'momentum', riskProfile: 'aggressive' },
+        { id: 'momentum_quality', name: '趋势质量', description: 'desc', category: 'framework', riskProfile: 'balanced' },
+      ],
+      strategyCount: 3,
+    });
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('策略'), { target: { value: 'dual_low' } });
+    const strategySelect = screen.getByLabelText('策略') as HTMLSelectElement;
+    expect(strategySelect.value).toBe('dual_low');
+
+    fireEvent.click(screen.getByRole('button', { name: /风险筛选：激进/ }));
+    expect(Array.from(strategySelect.options).map((option) => option.value)).toEqual([
+      'dual_low', 'capital_heat', '__custom_strategy__',
+    ]);
+    expect(Array.from(strategySelect.options)[0].textContent).toContain('当前：双低');
+
+    fireEvent.change(strategySelect, { target: { value: 'capital_heat' } });
+    expect(strategySelect.value).toBe('capital_heat');
+  });
+
+  it('shows core logic, risk, daily requirement and key hard filters for the selected strategy', async () => {
+    getStrategies.mockResolvedValueOnce({
+      enabled: true,
+      strategies: [
+        {
+          id: 'dual_low',
+          name: '双低',
+          description: '低估值修复候选',
+          category: 'value',
+          riskProfile: 'defensive',
+          requiresDailyFeatures: false,
+          techWeight: 0.2,
+          keyFilters: ['排除 ST', 'PE ≤ 15', 'PB ≤ 2', '市值 50亿–3000亿'],
+        },
+        {
+          id: 'volume_breakout',
+          name: '放量突破',
+          description: '放量突破关键阻力位',
+          category: 'trend',
+          riskProfile: 'aggressive',
+          requiresDailyFeatures: true,
+          techWeight: 0.6,
+          keyFilters: ['换手 ≥ 3%', '量比 ≥ 2', '站上 MA20', '横盘 ≥ 8日'],
+        },
+      ],
+      strategyCount: 2,
+    });
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+
+    expect(screen.getByText('核心逻辑：低估值修复候选')).toBeInTheDocument();
+    expect(screen.getByText('关键硬过滤')).toBeInTheDocument();
+    expect(screen.getByText('排除 ST · PE ≤ 15 · PB ≤ 2 · 市值 50亿–3000亿')).toBeInTheDocument();
+    expect(screen.getAllByText('防守').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('技术面权重 20%')).toBeInTheDocument();
+    expect(screen.queryByText('需日K数据')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('策略'), { target: { value: 'volume_breakout' } });
+
+    expect(await screen.findByText('核心逻辑：放量突破关键阻力位')).toBeInTheDocument();
+    expect(screen.getByText('换手 ≥ 3% · 量比 ≥ 2 · 站上 MA20 · 横盘 ≥ 8日')).toBeInTheDocument();
+    expect(screen.getAllByText('激进').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('技术面权重 60%')).toBeInTheDocument();
+    expect(screen.getByText('需日K数据')).toBeInTheDocument();
   });
 
   it('hands a screening candidate to DSA analysis with mapped skills', async () => {

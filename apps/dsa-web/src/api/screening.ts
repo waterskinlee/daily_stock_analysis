@@ -99,6 +99,11 @@ export type ScreeningStrategy = {
   analysisSkills?: string[];
   marketScope?: string[];
   market?: string;
+  riskProfile?: string;
+  marketRegime?: string[];
+  requiresDailyFeatures?: boolean;
+  techWeight?: number;
+  keyFilters?: string[];
 };
 
 export type ScreeningStrategiesResponse = {

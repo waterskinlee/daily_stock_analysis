@@ -108,6 +108,8 @@ class StrategyInfo:
     required_daily_fields: list[str] = field(default_factory=list)
     active_filters: list[str] = field(default_factory=list)
     factor_weights: dict[str, float] = field(default_factory=dict)
+    tech_weight: float = 0.35
+    key_filters: list[str] = field(default_factory=list)
     profile_keys: dict[str, list[str]] = field(default_factory=dict)
     style: dict[str, object] = field(default_factory=dict)
 

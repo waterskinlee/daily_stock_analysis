@@ -874,6 +874,11 @@ class ScreeningStrategyResponse(BaseModel):
     market_scope: List[str] = Field(default_factory=list)
     market: str = ""
     analysis_skills: List[str] = Field(default_factory=list)
+    risk_profile: str = ""
+    market_regime: List[str] = Field(default_factory=list)
+    requires_daily_features: bool = False
+    tech_weight: float = 0.35
+    key_filters: List[str] = Field(default_factory=list)
 
 
 class ScreeningService:
@@ -1625,6 +1630,23 @@ def _normalize_strategy(raw: Any) -> Dict[str, Any]:
     if not isinstance(market_scope, list):
         market_scope = [str(market_scope)] if market_scope else []
 
+    style = item.get("style") if isinstance(item.get("style"), dict) else {}
+    market_regime = style.get("market_regime") or item.get("market_regime") or []
+    if not isinstance(market_regime, list):
+        market_regime = [str(market_regime)] if market_regime else []
+
+    key_filters = item.get("key_filters") or item.get("keyFilters") or []
+    if not isinstance(key_filters, list):
+        key_filters = [str(key_filters)] if key_filters else []
+
+    tech_weight_value = item.get("tech_weight")
+    if tech_weight_value is None:
+        tech_weight_value = 0.35
+    try:
+        tech_weight = float(tech_weight_value)
+    except (TypeError, ValueError):
+        tech_weight = 0.35
+
     strategy_id = str(
         item.get("id")
         or item.get("strategy")
@@ -1647,6 +1669,13 @@ def _normalize_strategy(raw: Any) -> Dict[str, Any]:
         analysis_skills=_list_text_values(
             item.get("analysis_skills") or item.get("analysisSkills")
         ),
+        risk_profile=str(style.get("risk_profile") or item.get("risk_profile") or ""),
+        market_regime=[str(regime) for regime in market_regime if str(regime).strip()],
+        requires_daily_features=bool(
+            item.get("requires_daily_features") or item.get("requiresDailyFeatures")
+        ),
+        tech_weight=tech_weight,
+        key_filters=[str(text) for text in key_filters if str(text).strip()],
     )
 
 

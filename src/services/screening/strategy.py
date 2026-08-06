@@ -311,6 +311,8 @@ def list_strategies(strategies_dir: Path | None = None) -> list[StrategyInfo]:
             required_daily_fields=_required_daily_fields(s.screening.hard_filters),
             active_filters=_active_hard_filters(s.screening.hard_filters),
             factor_weights={key: float(value) for key, value in s.screening.factor_weights.items()},
+            tech_weight=float(s.screening.tech_weight),
+            key_filters=_hard_filter_summary(s.screening.hard_filters),
             profile_keys=_strategy_profile_keys(s.screening),
             style=_style_to_dict(s.style),
         ))
@@ -770,6 +772,71 @@ def _nested_list_diff(
         key: _list_diff(base.get(key, []), target.get(key, []))
         for key in keys
     }
+
+
+def _fmt_cny(value: float) -> str:
+    """Format a CNY threshold to 万/亿 units for UI summaries."""
+    if value >= 1e8:
+        amount = value / 1e8
+        return f"{amount:g}亿"
+    if value >= 1e4:
+        amount = value / 1e4
+        return f"{amount:g}万"
+    return f"{value:g}"
+
+
+def _hard_filter_summary(filters_config: HardFilterConfig) -> list[str]:
+    """Human-readable summary of the active hard filters, in decision order."""
+    parts: list[str] = []
+    if filters_config.exclude_st:
+        parts.append("排除 ST")
+
+    def _range(label: str, minimum: float | None, maximum: float | None, fmt) -> None:
+        if minimum is not None and maximum is not None:
+            parts.append(f"{label} {fmt(minimum)}–{fmt(maximum)}")
+        elif minimum is not None:
+            parts.append(f"{label} ≥ {fmt(minimum)}")
+        elif maximum is not None:
+            parts.append(f"{label} ≤ {fmt(maximum)}")
+
+    _range("成交额", filters_config.amount_min, None, _fmt_cny)
+    _range("市值", filters_config.market_cap_min, filters_config.market_cap_max, _fmt_cny)
+    _range("PE", filters_config.pe_ttm_min, filters_config.pe_ttm_max, lambda value: f"{value:g}")
+    _range("PB", filters_config.pb_min, filters_config.pb_max, lambda value: f"{value:g}")
+    _range("价格", filters_config.price_min, filters_config.price_max, lambda value: f"{value:g}元")
+    _range("涨跌幅", filters_config.change_pct_min, filters_config.change_pct_max, lambda value: f"{value:g}%")
+    _range("60日涨跌幅", filters_config.change_60d_min, filters_config.change_60d_max, lambda value: f"{value:g}%")
+    if filters_config.turnover_rate_min is not None:
+        parts.append(f"换手 ≥ {filters_config.turnover_rate_min:g}%")
+    if filters_config.volume_ratio_min is not None:
+        parts.append(f"量比 ≥ {filters_config.volume_ratio_min:g}")
+    if filters_config.require_ma_bullish:
+        parts.append("均线多头")
+    if filters_config.require_price_above_ma20:
+        parts.append("站上 MA20")
+    if filters_config.signal_score_min is not None:
+        parts.append(f"信号分 ≥ {filters_config.signal_score_min:g}")
+    _range("回踩MA20", filters_config.pullback_to_ma20_pct_min, filters_config.pullback_to_ma20_pct_max, lambda value: f"{value:g}%")
+    _range("20日量比", filters_config.volume_ratio_20d_min, filters_config.volume_ratio_20d_max, lambda value: f"{value:g}")
+    if filters_config.range_20d_pct_max is not None:
+        parts.append(f"20日区间 ≤ {filters_config.range_20d_pct_max:g}%")
+    if filters_config.volatility_20d_pct_max is not None:
+        parts.append(f"20日波幅 ≤ {filters_config.volatility_20d_pct_max:g}%")
+    if filters_config.max_drawdown_20d_pct_min is not None:
+        parts.append(f"20日回撤 ≥ {filters_config.max_drawdown_20d_pct_min:g}%")
+    if filters_config.atr_20_pct_max is not None:
+        parts.append(f"ATR ≤ {filters_config.atr_20_pct_max:g}%")
+    if filters_config.breakout_20d_pct_min is not None:
+        parts.append(f"突破幅度 ≥ {filters_config.breakout_20d_pct_min:g}%")
+    if filters_config.body_pct_min is not None:
+        parts.append(f"K线实体 ≥ {filters_config.body_pct_min:g}%")
+    if filters_config.consolidation_days_20d_min is not None:
+        parts.append(f"横盘 ≥ {filters_config.consolidation_days_20d_min:g}日")
+    if filters_config.macd_status_whitelist:
+        parts.append("MACD " + "/".join(filters_config.macd_status_whitelist))
+    if filters_config.rsi_status_whitelist:
+        parts.append("RSI " + "/".join(filters_config.rsi_status_whitelist))
+    return parts
 
 
 def _active_hard_filters(filters_config: HardFilterConfig) -> list[str]:

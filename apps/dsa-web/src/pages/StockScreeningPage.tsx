@@ -55,6 +55,34 @@ const STRATEGY_CATEGORY_LABELS: Record<string, string> = {
   value: '价值',
 };
 
+const STRATEGY_RISK_LABELS: Record<string, string> = {
+  balanced: '均衡',
+  defensive: '防守',
+  aggressive: '激进',
+};
+
+const renderStrategyFilterChip = (
+  label: string,
+  active: boolean,
+  disabled: boolean,
+  ariaPrefix: string,
+  onClick: () => void,
+) => (
+  <button
+    type="button"
+    aria-label={`${ariaPrefix}：${label}`}
+    disabled={disabled}
+    className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-all active:scale-[0.96] ${
+      active
+        ? 'border-cyan bg-cyan/15 text-cyan'
+        : 'border-border bg-surface text-secondary-text hover:border-cyan/40 hover:text-foreground'
+    } ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+    onClick={onClick}
+  >
+    {label}
+  </button>
+);
+
 const formatStrategyCategory = (value?: string) => {
   const normalized = value?.trim();
   if (!normalized) {
@@ -837,6 +865,8 @@ const StockScreeningPage: React.FC = () => {
   const [strategy, setStrategy] = useState(restoredTask?.strategy || 'dual_low');
   const [strategies, setStrategies] = useState<ScreeningStrategy[]>([]);
   const [maxResults, setMaxResults] = useState(restoredTask?.maxResults || 3);
+  const [strategyCategoryFilter, setStrategyCategoryFilter] = useState('all');
+  const [strategyRiskFilter, setStrategyRiskFilter] = useState('all');
   const screenTaskContextRef = useRef({ market, strategy, maxResults });
   const [candidates, setCandidates] = useState<ScreeningCandidate[]>([]);
   const [hotspots, setHotspots] = useState<ScreeningHotspot[]>([]);
@@ -869,6 +899,38 @@ const StockScreeningPage: React.FC = () => {
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
+  const selectedStrategyCategoryLabel = selectedStrategy
+    ? STRATEGY_CATEGORY_LABELS[String(selectedStrategy.category || '').toLowerCase()] || selectedStrategy.category || ''
+    : '';
+  const selectedStrategyRiskLabel = selectedStrategy
+    ? STRATEGY_RISK_LABELS[String(selectedStrategy.riskProfile || '').toLowerCase()] || selectedStrategy.riskProfile || ''
+    : '';
+  const strategyCategories = useMemo(() => {
+    const categories = Array.from(new Set(
+      strategies.map((item) => item.category).filter((category): category is string => Boolean(category)),
+    ));
+    return categories.sort((a, b) => a.localeCompare(b));
+  }, [strategies]);
+  const strategyRisks = useMemo(() => {
+    const risks = Array.from(new Set(
+      strategies.map((item) => item.riskProfile).filter((risk): risk is string => Boolean(risk)),
+    ));
+    return risks.sort((a, b) => a.localeCompare(b));
+  }, [strategies]);
+  const filteredStrategies = useMemo(
+    () => strategies.filter((item) =>
+      (strategyCategoryFilter === 'all' || item.category === strategyCategoryFilter)
+      && (strategyRiskFilter === 'all' || item.riskProfile === strategyRiskFilter)
+    ),
+    [strategies, strategyCategoryFilter, strategyRiskFilter],
+  );
+  const visibleStrategies = useMemo(() => {
+    if (strategyCategoryFilter === 'all' && strategyRiskFilter === 'all') {
+      return strategies;
+    }
+    const current = selectedStrategy && !filteredStrategies.includes(selectedStrategy) ? selectedStrategy : null;
+    return current ? [current, ...filteredStrategies] : filteredStrategies;
+  }, [strategies, filteredStrategies, selectedStrategy, strategyCategoryFilter, strategyRiskFilter]);
   const selectedStrategyTag = formatStrategyCategory(
     selectedStrategy?.category || selectedStrategy?.tag || selectedStrategy?.tags?.[0],
   );
@@ -1326,6 +1388,14 @@ const StockScreeningPage: React.FC = () => {
     }
   };
 
+  const handleStrategyCategoryFilterChange = (nextCategory: string) => {
+    setStrategyCategoryFilter(nextCategory);
+  };
+
+  const handleStrategyRiskFilterChange = (nextRisk: string) => {
+    setStrategyRiskFilter(nextRisk);
+  };
+
   const handleStrategyChange = (nextStrategy: string) => {
     if (nextStrategy !== strategy) {
       clearScreeningResults();
@@ -1669,6 +1739,36 @@ const StockScreeningPage: React.FC = () => {
           </span>
         </div>
 
+        {strategies.length > 0 ? (
+          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-medium text-secondary-text">类别</span>
+              {renderStrategyFilterChip('全部', strategyCategoryFilter === 'all', loading, '类别筛选', () => handleStrategyCategoryFilterChange('all'))}
+              {strategyCategories.map((category) => renderStrategyFilterChip(
+                STRATEGY_CATEGORY_LABELS[String(category).toLowerCase()] || category,
+                strategyCategoryFilter === category,
+                loading,
+                '类别筛选',
+                () => handleStrategyCategoryFilterChange(category),
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-medium text-secondary-text">风险</span>
+              {renderStrategyFilterChip('全部', strategyRiskFilter === 'all', loading, '风险筛选', () => handleStrategyRiskFilterChange('all'))}
+              {strategyRisks.map((risk) => renderStrategyFilterChip(
+                STRATEGY_RISK_LABELS[String(risk).toLowerCase()] || risk,
+                strategyRiskFilter === risk,
+                loading,
+                '风险筛选',
+                () => handleStrategyRiskFilterChange(risk),
+              ))}
+            </div>
+            {strategyCategoryFilter !== 'all' || strategyRiskFilter !== 'all' ? (
+              <span className="text-[11px] text-secondary-text">{filteredStrategies.length} 个匹配策略</span>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr_180px_auto] lg:items-end">
           <label className="space-y-2 text-xs font-medium text-secondary-text">
             市场
@@ -1694,10 +1794,16 @@ const StockScreeningPage: React.FC = () => {
               disabled={loading || loadingStrategies}
               placeholder=""
               options={[
-                ...strategies.map((item) => ({
-                  value: item.id,
-                  label: item.name || item.title || item.id,
-                })),
+                ...visibleStrategies.map((item) => {
+                  const categoryLabel = STRATEGY_CATEGORY_LABELS[String(item.category || '').toLowerCase()] || item.category || '';
+                  const riskLabel = STRATEGY_RISK_LABELS[String(item.riskProfile || '').toLowerCase()] || item.riskProfile || '';
+                  const suffix = [categoryLabel, riskLabel].filter(Boolean).join('/');
+                  const pinned = !filteredStrategies.includes(item);
+                  return {
+                    value: item.id,
+                    label: `${pinned ? '当前：' : ''}${item.name || item.title || item.id}${suffix ? ` · ${suffix}` : ''}`,
+                  };
+                }),
                 { value: CUSTOM_STRATEGY_OPTION_VALUE, label: '自定义策略…' },
               ]}
               onChange={(value) =>
@@ -1747,11 +1853,44 @@ const StockScreeningPage: React.FC = () => {
           </Button>
         </div>
 
-        <div className="mt-3 rounded-xl border border-border/75 bg-surface/55 px-3 py-2 text-xs leading-5 text-secondary-text">
-          {strategyLoadError
-            ? strategyLoadError
-            : selectedStrategy?.description || '策略会先执行硬过滤和因子评分，再进行风险与组合约束。'}
-        </div>
+        {strategyLoadError ? (
+          <div className="mt-3 rounded-xl border border-border/75 bg-surface/55 px-3 py-2 text-xs leading-5 text-secondary-text">
+            {strategyLoadError}
+          </div>
+        ) : selectedStrategy ? (
+          <div className="mt-3 rounded-xl border border-border/75 bg-surface/55 px-3 py-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-sm font-semibold text-foreground">{selectedStrategyTitle}</span>
+              {selectedStrategyCategoryLabel ? (
+                <span className="rounded-full bg-cyan/10 px-2 py-0.5 text-[11px] font-semibold text-cyan">{selectedStrategyCategoryLabel}</span>
+              ) : null}
+              {selectedStrategyRiskLabel ? (
+                <span className="rounded-full bg-orange-500/10 px-2 py-0.5 text-[11px] font-semibold text-orange-500">{selectedStrategyRiskLabel}</span>
+              ) : null}
+              {selectedStrategy.requiresDailyFeatures ? (
+                <span className="rounded-full bg-purple-500/10 px-2 py-0.5 text-[11px] font-semibold text-purple-500">需日K数据</span>
+              ) : null}
+              {selectedStrategy.techWeight != null ? (
+                <span className="rounded-full bg-card px-2 py-0.5 text-[11px] font-semibold text-secondary-text">
+                  技术面权重 {Math.round(selectedStrategy.techWeight * 100)}%
+                </span>
+              ) : null}
+            </div>
+            {selectedStrategy.description ? (
+              <p className="mt-2 text-xs leading-5 text-secondary-text">核心逻辑：{selectedStrategy.description}</p>
+            ) : null}
+            {selectedStrategy.keyFilters?.length ? (
+              <div className="mt-2">
+                <p className="text-[11px] font-semibold text-secondary-text">关键硬过滤</p>
+                <p className="mt-1 text-xs leading-5 text-secondary-text">{selectedStrategy.keyFilters.join(' · ')}</p>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-xl border border-border/75 bg-surface/55 px-3 py-2 text-xs leading-5 text-secondary-text">
+            策略会先执行硬过滤和因子评分，再进行风险与组合约束。
+          </div>
+        )}
       </section>
 
       {loading || screenMeta ? (

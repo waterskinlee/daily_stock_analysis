@@ -251,6 +251,58 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["strategies"][0]["name"], "双低选股")
         self.assertEqual(payload["strategies"][1]["name"], "趋势质量")
 
+    def test_strategies_pass_through_selection_metadata(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_screening_core(
+            list_strategies=lambda: [
+                {
+                    "id": "dual_low",
+                    "name": "双低选股",
+                    "description": "低估值修复候选",
+                    "category": "value",
+                    "style": {
+                        "risk_profile": "defensive",
+                        "market_regime": ["risk_off", "range_bound"],
+                        "ui_badge": "价值",
+                    },
+                    "requires_daily_features": False,
+                    "tech_weight": 0.2,
+                    "key_filters": ["排除 ST", "PE ≤ 15", "PB ≤ 2"],
+                },
+                {
+                    "id": "volume_breakout",
+                    "name": "放量突破",
+                    "description": "放量突破关键阻力位",
+                    "category": "trend",
+                    "style": {
+                        "risk_profile": "aggressive",
+                        "market_regime": ["risk_on"],
+                        "ui_badge": "突破",
+                    },
+                    "requires_daily_features": True,
+                    "tech_weight": 0.6,
+                    "key_filters": ["换手 ≥ 3%", "量比 ≥ 2", "站上 MA20"],
+                },
+            ],
+        )
+
+        with _patch_screening_core(fake_module):
+            payload = self._strategies(config=config)
+
+        self.assertEqual(payload["strategy_count"], 2)
+        dual_low = payload["strategies"][0]
+        self.assertEqual(dual_low["risk_profile"], "defensive")
+        self.assertEqual(dual_low["market_regime"], ["risk_off", "range_bound"])
+        self.assertEqual(dual_low["tech_weight"], 0.2)
+        self.assertFalse(dual_low["requires_daily_features"])
+        self.assertEqual(dual_low["key_filters"], ["排除 ST", "PE ≤ 15", "PB ≤ 2"])
+        breakout = payload["strategies"][1]
+        self.assertEqual(breakout["risk_profile"], "aggressive")
+        self.assertEqual(breakout["market_regime"], ["risk_on"])
+        self.assertEqual(breakout["tech_weight"], 0.6)
+        self.assertTrue(breakout["requires_daily_features"])
+        self.assertEqual(breakout["key_filters"], ["换手 ≥ 3%", "量比 ≥ 2", "站上 MA20"])
+
     def test_hotspots_returns_screening_hotspot_summaries(self) -> None:
         config = self._config(enabled=True)
 
