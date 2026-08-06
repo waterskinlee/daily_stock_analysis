@@ -5,6 +5,8 @@ import StockScreeningPage from '../StockScreeningPage';
 
 const {
   enableScreening,
+  getHistory,
+  getRun,
   getScreeningStatus,
   getHotspotDetail,
   getHotspots,
@@ -42,6 +44,8 @@ const {
   });
   return {
     enableScreening: vi.fn(),
+    getHistory: vi.fn(),
+    getRun: vi.fn(),
     getScreeningStatus: vi.fn(),
     getHotspotDetail: vi.fn(),
     getHotspots: vi.fn(),
@@ -70,6 +74,8 @@ vi.mock('../../api/screening', () => ({
     getStatus: () => getScreeningStatus(),
     getHotspotDetail: (payload: unknown) => getHotspotDetail(payload),
     getHotspots: (payload: unknown) => getHotspots(payload),
+    getHistory: (payload: unknown) => getHistory(payload),
+    getRun: (runId: string) => getRun(runId),
     getStrategies: () => getStrategies(),
     getScreenTask: (taskId: string) => getScreenTask(taskId),
     screen: (payload: unknown) => screenStocks(payload),
@@ -107,6 +113,8 @@ function createDeferred<T>() {
 describe('StockScreeningPage', () => {
   beforeEach(() => {
     enableScreening.mockReset();
+    getHistory.mockReset();
+    getRun.mockReset();
     getScreeningStatus.mockReset();
     getHotspotDetail.mockReset();
     getHotspots.mockReset();
@@ -143,6 +151,8 @@ describe('StockScreeningPage', () => {
       stockCount: 1,
     });
     getHotspots.mockResolvedValue({ enabled: true, provider: 'akshare', hotspots: [], hotspotCount: 0 });
+    getHistory.mockResolvedValue({ enabled: true, runs: [], runCount: 0 });
+    getRun.mockRejectedValue(new Error('run not found'));
     window.sessionStorage.clear();
   });
 
@@ -1129,6 +1139,7 @@ describe('StockScreeningPage', () => {
         message: '任务执行完成',
         result: {
           enabled: true,
+          runId: 'history-run-1',
           candidates: [
             {
               rank: 1,
@@ -1156,7 +1167,7 @@ describe('StockScreeningPage', () => {
 
     expect(await screen.findByText('恢复后的候选')).toBeInTheDocument();
     expect(screen.getByText('选股完成')).toBeInTheDocument();
-    expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toBeNull();
+    expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toContain('history-run-1');
   });
 
   it('keeps a restored screening task recoverable when status polling times out', async () => {
@@ -1181,6 +1192,119 @@ describe('StockScreeningPage', () => {
     expect(screen.getByText('选股任务仍在后台运行，状态轮询暂时超时，将自动重试。')).toBeInTheDocument();
     expect(screen.queryByText(/连接上游服务超时/)).not.toBeInTheDocument();
     expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toContain('screen-task-1');
+  });
+
+  it('clears persisted recovery state when a restored task becomes unrecoverable', async () => {
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+    window.sessionStorage.setItem('dsa.screening.activeScreenTask.v1', JSON.stringify({
+      taskId: 'expired-task-1',
+      market: 'cn',
+      strategy: 'dual_low',
+      maxResults: 3,
+    }));
+    getScreenTask.mockRejectedValueOnce(Object.assign(new Error('选股任务不可恢复'), {
+      parsedError: {
+        title: '选股任务不可恢复',
+        message: '服务端没有找到这次选股任务，请重新运行选股。',
+        rawMessage: 'screening_screen_task_not_found',
+        category: 'http_error',
+      },
+    }));
+
+    render(<StockScreeningPage />);
+
+    await waitFor(() => expect(getScreenTask).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/选股任务不可恢复/)).toBeInTheDocument();
+    expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toBeNull();
+  });
+
+  it('loads persisted screening history and opens a completed run', async () => {
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+    getHistory.mockResolvedValue({
+      enabled: true,
+      runs: [{
+        runId: 'history-run-1',
+        strategy: 'dual_low',
+        market: 'cn',
+        candidateCount: 1,
+        snapshotCount: 5200,
+        llmRanked: true,
+        createdAt: '2026-08-06T06:01:35Z',
+      }],
+      runCount: 1,
+    });
+    getRun.mockResolvedValue({
+      enabled: true,
+      runId: 'history-run-1',
+      strategy: 'dual_low',
+      market: 'cn',
+      candidateCount: 1,
+      createdAt: '2026-08-06T06:01:35Z',
+      result: {
+        enabled: true,
+        runId: 'history-run-1',
+        strategy: 'dual_low',
+        market: 'cn',
+        candidates: [{
+          rank: 1,
+          code: '000001',
+          name: '历史候选',
+          score: 91,
+          reason: 'persisted result',
+          raw: {},
+        }],
+        candidateCount: 1,
+      },
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('历史记录')).toBeInTheDocument();
+    expect(await screen.findByText(/返回 1 只/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Dual Low.*A 股/ }));
+
+    await waitFor(() => expect(getRun).toHaveBeenCalledWith('history-run-1'));
+    expect(await screen.findByText('历史候选')).toBeInTheDocument();
+  });
+
+  it('restores a completed run from SQLite history before polling the volatile task queue', async () => {
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+    window.sessionStorage.setItem('dsa.screening.activeScreenTask.v1', JSON.stringify({
+      taskId: 'expired-task-1',
+      runId: 'history-run-1',
+      market: 'cn',
+      strategy: 'dual_low',
+      maxResults: 3,
+    }));
+    getRun.mockResolvedValue({
+      enabled: true,
+      runId: 'history-run-1',
+      strategy: 'dual_low',
+      market: 'cn',
+      candidateCount: 1,
+      createdAt: '2026-08-06T06:01:35Z',
+      result: {
+        enabled: true,
+        runId: 'history-run-1',
+        strategy: 'dual_low',
+        market: 'cn',
+        candidates: [{
+          rank: 1,
+          code: '000001',
+          name: '刷新恢复候选',
+          score: 92,
+          reason: 'restored from SQLite',
+          raw: {},
+        }],
+        candidateCount: 1,
+      },
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('刷新恢复候选')).toBeInTheDocument();
+    expect(getRun).toHaveBeenCalledWith('history-run-1');
+    expect(getScreenTask).not.toHaveBeenCalled();
   });
 
   it('surfaces Screening LLM fallback instead of showing empty LLM fields as normal', async () => {
