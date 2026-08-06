@@ -78,6 +78,9 @@ run.sh
 
 verify_*.py
 
+# 本机开发备忘（含个人环境/服务器信息，不提交）
+DEV_WORKFLOW.md
+
 # ignore Claude workspace artifacts, but keep shared repo skills versioned
 .claude/*
 !.claude/skills/

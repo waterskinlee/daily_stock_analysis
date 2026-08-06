@@ -1,291 +1,286 @@
-# AGENTS.md
+# Repository Guidelines
 
-本文件用于约束本仓库的默认开发流程，目标是减少重复沟通、减少返工，并让改动和当前项目结构保持一致。
+Guidelines for working in **daily_stock_analysis (DSA)** — the AI LLM stock-analysis system.
+This file is the canonical source for repository AI-collaboration rules; `CLAUDE.md` must remain a symlink to it
+(enforced by `scripts/check_ai_assets.py`). When this file conflicts with scripts, workflows, or code, trust the
+executable reality and fix the doc in the same change.
 
-如果本文件与仓库中的脚本、工作流、代码现状不一致，以实际可执行内容为准，并在相关改动中顺手修正文档，避免规则继续漂移。
+## Project Overview
 
-## 1. 硬规则
+- **Purpose**: LLM-driven stock analysis for A-share / HK / US / JP / KR / TW markets. Runs a daily pipeline that
+  fetches market data, performs technical/news/fundamental analysis, generates an AI "decision dashboard" report,
+  and pushes it to WeChat Work / Feishu / Telegram / Discord / Slack / email.
+- **Main flow**: `fetch data → technical analysis + news search → LLM analysis → report generation → notification`.
+- **Runtime modes** (all reachable from `main.py`): one-shot stock analysis, daily scheduled run, market review
+  (`大盘复盘`), and Web UI / API serving. Also runs as a FastAPI service, Docker containers, GitHub Actions daily
+  workflow, or Electron desktop app.
+- **Markets**: A (CN), HK, US, JP, KR, TW. Multi-market, multi-data-source with fallback chains; free sources
+  (AkShare/Baostock/YFinance) work zero-config, token sources (TickFlow/Tushare/Longbridge) add stability.
 
-- 遵循现有目录边界：
-  - 后端逻辑优先放在 `src/`、`data_provider/`、`api/`、`bot/`
-  - Web 前端改动在 `apps/dsa-web/`
-  - 桌面端改动在 `apps/dsa-desktop/`
-  - 部署与流水线改动在 `scripts/`、`.github/workflows/`、`docker/`
-- 未经明确确认，不执行 `git commit`、`git tag`、`git push`。
-- commit message 使用英文，不添加 `Co-Authored-By`。
-- 不写死密钥、账号、路径、模型名、端口或环境差异逻辑。
-- 优先复用现有模块、配置入口、脚本和测试，不新增平行实现。
-- 默认稳定性优先于“顺手优化”；非当前任务直接需要的重构、抽象和基础设施迁移一律克制。
-- 新增配置项时，必须同步更新 `.env.example` 和相关文档。
-- 涉及用户可见能力、CLI/API 行为、部署方式、通知方式、报告结构变化时，必须同步更新相关文档与 `docs/CHANGELOG.md`。
-- 修改报告格式、报告渲染效果或 Web UI 界面时，PR 描述必须附受影响报告 / 页面截图；涉及前后差异时优先附前后对比，无法截图时说明原因与替代可视证据。
-- Issue / PR 过程截图、审查截图、一次性验收截图和临时可视证据不得作为仓库文件合入；应放在 PR 描述、PR 评论、GitHub 附件、Actions artifact 或外部可访问证据链接中。产品长期文档确需保留的示意图除外，但文件名和文档语义必须脱离具体 issue / PR 编号。
-- `docs/CHANGELOG.md` 的 `[Unreleased]` 段使用**扁平格式**：每条独立一行，格式为 `- [类型] 描述`，类型取值：`新功能`/`改进`/`修复`/`文档`/`测试`/`chore`；**禁止在 `[Unreleased]` 内新增 `### 类目标题`**，以减少并发 PR 的 merge 冲突。发版时由 maintainer 汇总整理成带标题的正式格式。
-- `README.md` 只用于项目定位、核心能力总览、快速开始、主要入口、赞助/合作等首页级信息；非必要不更新 README，避免持续膨胀。
-- 更细的模块行为、页面交互、专题配置、排障说明、字段契约、实现语义和边界条件，优先更新对应 `docs/*.md` 或专题文档，不写入 README。
-- 变更中英双语文档之一时，需评估另一份是否需要同步；若未同步，交付说明里要写明原因。
-- 注释、docstring、日志文案以清晰准确为准，不强制要求英文，但应与文件语境保持一致。
+## Architecture & Data Flow
 
-## 1.1 PR 标题规范（非阻断建议）
+Monolithic Python backend with a FastAPI control plane, plus React and Electron frontends.
 
-- 推荐使用 `<类型>: <修改内容>` 作为 PR 标题，例如 `fix: 修复大盘分析历史记录丢失`，优先类型为 `fix`/`feat`/`refactor`/`docs`/`chore`/`test`/`ci`。
-- 标题应描述实际变更内容，建议不添加 `[codex]`、`codex`、`autocode`、`copilot` 或其他工具/agent 来源前缀。
-- 该规范仅用于协作可读性与一致性提示，不应单独作为 review process blocker。
+```mermaid
+flowchart LR
+    CLI[main.py CLI] --> P[StockAnalysisPipeline]
+    API[FastAPI api/] --> SVC[src/services]
+    SVC --> P
+    P --> DF[DataFetcherManager data_provider/]
+    DF --> LLM[LLM layer src/llm]
+    P --> ST[src/storage.py SQLite]
+    P --> NOT[NotificationService src/notification.py]
+    LLM --> AG[src/agent orchestrator/executor]
+    AG --> SK[strategies/*.yaml skills]
+    NOT --> CH[wechat/feishu/telegram/...]
+```
 
-## 1.2 贡献质量底线
+- **Per-stock pipeline** (`src/core/pipeline.py`, `StockAnalysisPipeline`):
+  `fetch + save daily data` → `analyze_stock` (realtime quote → chip distribution → optional agent mode →
+  trend analysis → intel news search → social sentiment (US) → LLM generation → integrity checks → guardrails) →
+  `save_analysis_history` → single-stock or merged notification. Per-stock exceptions are caught → `None`; one
+  failure never aborts the batch. Concurrency is a `ThreadPoolExecutor` with `max_workers` ≈ 3 (anti-scraping).
+- **Market review** (`src/core/market_review.py` → `src/market_analyzer.py`): multi-region (cn/hk/us/jp/kr)
+  index overview + sector/news + LLM report, persisted as `market_review_YYYYMMDD.md`, under a file lock
+  (`src/core/market_review_lock.py`) so CLI/API cannot run it concurrently. Re-raises `GenerationError`, else fail-open.
+- **LLM backends** (`src/llm/`): a `GenerationBackend` `typing.Protocol` with pluggable implementations —
+  `litellm` (default), local CLI presets (`codex_cli` / `claude_code_cli` / `opencode_cli`), and a reserved local
+  Hermes channel. Selected via env (`AGENT_BACKEND`/`GENERATION_*`), resolved by `backend_registry.resolve_*`,
+  constructed by `backend_factory.create_generation_backend`. `GenerationError` carries `error_code/stage/
+  retryable/fallbackable`.
+- **Agent layer** (`src/agent/`): two interchangeable executors chosen by `AGENT_ARCH` — legacy single-agent
+  `AgentExecutor` (ReAct) and `AgentOrchestrator` (multi-agent: Technical → Intel → Risk → Specialist → Decision).
+  Both share `run_agent_loop` (`runner.py`), a `ToolRegistry` (~30 `ToolDefinition`s across data/analysis/search/
+  market/backtest), and YAML/SKILL.md-defined skills loaded from `strategies/`. Chat streams to WebUI as SSE
+  (`stream_events.py` flat dicts over `text/event-stream` endpoints).
+- **Config system**: env-driven `Config` singleton (`src/config.py`, `get_config()`), loaded from `.env`
+  (`ENV_FILE` overrides the path). WebUI settings write through `SystemConfigService`
+  (`src/services/system_config_service.py`) → `ConfigManager.apply_updates` (`src/core/config_manager.py`, atomic
+  temp-file + `os.replace` rewrite, optimistic `config_version` token) → hot reload via `Config.reset_instance()` +
+  runtime scheduler reconciliation. UI metadata (field defs, categories, sensitivity) lives in
+  `src/core/config_registry.py` (`SCHEMA_VERSION`).
+- **Persistence**: SQLAlchemy 2.x ORM over SQLite. All ~35 ORM models are defined in `src/storage.py`
+  (`Base = declarative_base()`), accessed via the `DatabaseManager` singleton (WAL, busy timeout, write-retry loop,
+  hand-rolled idempotent `_ensure_*` migrations, UTC-naive datetimes). Repositories in `src/repositories/` are thin
+  query layers (`XxxRepository`), with `BEGIN IMMEDIATE` write serialization in `portfolio_repo.py`.
+- **Notification**: `NotificationService` (`src/notification.py`) is a mixin over 14 plain `XxxSender(config)`
+  classes; routes filtered by `notification_routing.py`, capability profiles in `notification_capabilities.py`,
+  noise control (dedup/cooldown/quiet-hours/min-severity) in `notification_noise.py`. Markdown → PNG via
+  `src/md2img.py` (wkhtmltoimage → m2f → playwright fallback) and HTML posters via `src/share_image.py`.
 
-- 本仓库不接受以堆叠代码量、扩大 diff 面、补丁式响应 review 来替代真实设计收敛的 PR。
-- 贡献质量以是否解决明确问题、是否最小化影响面、是否保持现有契约一致、是否覆盖真实风险路径为准；不以新增行数、文件数量、功能宣传或“看起来完整”为准。
-- 请不要把本仓库当作低成本试验场、简历展示场或 contribution farming 场所。任何 PR 都必须证明作者理解当前系统契约，并完成基本自审、集成和验证。
-- 使用 AI 辅助开发本身不是问题；问题是提交 AI 生成后未经人工语义审查、未验证、未收敛的代码。此类 PR 会按低质量提交处理。
-- review 反馈后，不接受只在被指出的位置追加局部 patch。作者必须重新检查同一业务语义涉及的所有入口、配置、测试、文档、workflow 和用户可见路径。
-- 如果一个 PR 在多轮 review 后仍持续出现同类契约漂移、重复 fallback、测试绕过真实风险层、PR body 与实际 diff 不一致等问题，维护者可以要求关闭重做，而不是继续逐点 review。
+## Key Directories
 
-## 2. AI 协作资产治理
+| Path | Purpose |
+|---|---|
+| `main.py` / `server.py` / `webui.py` | CLI orchestrator; uvicorn entry (`api.app:app`); web-only launcher |
+| `src/core/` | Pipeline, market review, trading calendar, config registry/manager, backtest engine |
+| `src/services/` | ~60 business services: system config, task queue, screening, agent chat, report rendering |
+| `src/llm/` | Generation backends (litellm / local CLI / hermes), provider cache, usage accounting |
+| `src/agent/` | Agent orchestrator/executor, tools registry, skills engine, SSE stream events |
+| `src/repositories/` | SQLAlchemy data-access layer over `src/storage.py` models |
+| `src/schemas/` | Pydantic v2 / Literal / frozen-dataclass contracts (decision action, report, market) |
+| `api/` | FastAPI app factory, `/api/v1` endpoint routers, auth/error middlewares, DI (`deps.py`) |
+| `data_provider/` | Market-data fetchers + `DataFetcherManager` fallback routing, field standardization |
+| `bot/` | Chat-bot webhook adapters (`platforms/`), command dispatcher, `commands/` |
+| `apps/dsa-web/` | React 19 + Vite 7 + TS frontend (builds to repo-root `static/`) |
+| `apps/dsa-desktop/` | Electron 31 desktop app wrapping a PyInstaller-frozen backend |
+| `tests/` | pytest suite (~250 files), incl. `tests/agent/`; mirrors module names |
+| `scripts/` | CI gates (`ci_gate.sh`, `test.sh`), packaging (.ps1/.sh), stock-index & data scripts, diagnostics |
+| `.github/` | Workflows (CI, daily analysis, releases, PR review), `scripts/`, `instructions/` |
+| `docs/` | Guides (zh primary, `*_EN.md` mirrors), `CHANGELOG.md`, `INDEX.md` doc hub |
+| `strategies/` | YAML strategy-skill packs (auto-loaded as agent "skills") |
+| `templates/` | Jinja2 report templates (`report_{markdown,wechat,brief}.j2`, `_macros.j2`) |
+| `docker/` | `Dockerfile` (multi-stage node→python:3.11-slim-bookworm), `docker-compose.yml`, `entrypoint.sh` |
+| `.claude/skills/` | Repo-committed collaboration skills (analyze-issue / analyze-pr / fix-issue) |
 
-- `AGENTS.md` 是仓库内 AI 协作规则的唯一真源。
-- `CLAUDE.md` 必须是指向 `AGENTS.md` 的软链接，用于兼容 Claude 生态。
-- `.github/copilot-instructions.md` 与 `.github/instructions/*.instructions.md` 是 GitHub Copilot / Coding Agent 的镜像或分层补充；若与本文件冲突，以 `AGENTS.md` 为准。
-- 仓库协作 skill 存放在 `.claude/skills/`，分析产物存放在 `.claude/reviews/`；前者可以入库，后者默认视为本地产物。
-- 根目录 `SKILL.md` 与 `docs/openclaw-skill-integration.md` 属于产品或外部集成说明，不是仓库协作规则真源。
-- 若未来新增 `.agents/skills/` 或其他 agent 专用目录，必须先明确单一真源，再通过脚本或镜像同步；禁止手工长期维护多份同义内容。
-- 修改 AI 协作治理资产时，执行：
+## Development Commands
 
 ```bash
+# Setup
+pip install -r requirements.txt
+cp .env.example .env          # then edit; config is env-driven
+
+# Run analysis (CLI)
+python main.py                                # analyze STOCK_LIST
+python main.py --stocks 600519,hk00700,AAPL   # override stock list
+python main.py --market-review                # 大盘复盘 only
+python main.py --schedule                     # daily scheduled runs (18:00)
+python main.py --serve / --serve-only         # start API server (+ keep analysis)
+python main.py --webui / --webui-only         # alias of --serve / --serve-only
+python main.py --dry-run --no-notify          # fetch data only, no LLM/notify
+python main.py --debug | --force-run | --single-notify | --no-market-review
+python main.py --backtest --backtest-code <code> --backtest-days 30
+
+# API server
+uvicorn server:app --reload --host 0.0.0.0 --port 8000
+
+# Backend validation (canonical pre-PR gate)
+./scripts/ci_gate.sh [all|syntax|flake8|deterministic|offline-tests]
+python -m py_compile <changed_python_files>        # minimal syntax check
+python -m pytest -m "not network" --timeout=120 -o timeout_method=thread
+python scripts/check_env.py                          # .env / provider / LLM / notify diagnostics
+
+# CLI smoke scenarios (not pytest)
+./scripts/test.sh [market|a-stock|etf|hk-stock|us-stock|mixed|single|dry-run|full|quick|code|yfinance|syntax|flake8|all]
+
+# Web frontend
+cd apps/dsa-web && npm ci && npm run lint && npm run build
+cd apps/dsa-web && npm test                          # vitest; npm run test:smoke = playwright
+
+# Desktop (build web first, then Electron)
+cd apps/dsa-desktop && npm install && npm run build
+
+# Docker
+docker compose -f docker/docker-compose.yml up -d    # services: analyzer (scheduled) + server (FastAPI)
+
+# AI asset governance (after touching AGENTS.md / CLAUDE.md / .github instructions / .claude/skills)
 python scripts/check_ai_assets.py
 ```
 
-## 3. 仓库速览
+## Code Conventions & Common Patterns
 
-- 项目定位：股票智能分析系统，覆盖 A 股、港股、美股。
-- 主流程：抓取数据 -> 技术分析/新闻检索 -> LLM 分析 -> 生成报告 -> 通知推送。
-- 关键入口：
-  - `main.py`：分析任务主入口
-  - `server.py`：FastAPI 服务入口
-  - `apps/dsa-web/`：Web 前端
-  - `apps/dsa-desktop/`：Electron 桌面端
-  - `.github/workflows/`：CI、发布、每日任务
-- 核心职责：
-  - `src/core/`：主流程编排
-  - `src/services/`：业务服务层
-  - `src/repositories/`：数据访问层
-  - `src/reports/`：报告生成
-  - `src/schemas/`：Schema / 数据结构
-  - `data_provider/`：多数据源适配与 fallback
-  - `api/`：FastAPI API
-  - `bot/`：机器人接入
-  - `scripts/`：本地脚本
-  - `.github/scripts/`：GitHub 自动化脚本
-  - `tests/`：pytest 测试
-  - `docs/`：文档与说明
+- **Formatting / lint**: black with `line-length = 120` (`pyproject.toml`); isort `profile = black`; flake8
+  `max-line-length = 120`, ignores `E501,W503,E203,E402` (`setup.cfg`). CI flake8 runs critical codes only:
+  `--select=E9,F63,F7,F82`.
+- **Naming**: services `XxxService`, repositories `XxxRepository`, fetchers `XxxFetcher`, senders `XxxSender`,
+  providers `XxxProvider`, backends `XxxGenerationBackend`; module-level constants `UPPER_SNAKE`; private helpers
+  `_leading_underscore`; env keys `SCREAMING_SNAKE` with namespaced families (`LLM_*`, `AGENT_*`, `GENERATION_*`,
+  `NOTIFICATION_*`, `*_PRIORITY`, `*_API_KEYS`).
+- **File headers**: `# -*- coding: utf-8 -*-` + module docstring. Legacy files use Chinese `====` banners;
+  new modules use English docstrings and `from __future__ import annotations`. Comments/docstrings/log text are
+  not required to be English — match the file's language.
+- **Typing**: pydantic v2 for LLM-facing and API schemas (`src/schemas/`, `api/v1/schemas/`); `@dataclass(frozen=True)`
+  for immutable contracts; `Literal` for enum-like values; `typing.Protocol` for structural interfaces
+  (`GenerationBackend`, `AgentBackend`); `Optional[X]` and `X | None` both accepted (mixed legacy/new).
+- **Error handling — fail-open**: optional services wrap init/calls in `try/except Exception` and degrade to
+  `None`/empty/fallback with `logger.warning`; a single provider, channel, or stock failure must NOT break the main
+  flow (unless fail-fast is explicitly required). Core paths (all daily-data sources failing) raise typed errors
+  like `DataFetchError`. Custom exceptions carry structured payloads (`GenerationError` with `error_code/stage/
+  retryable/fallbackable`, `ConfigValidationError(issues)`, `PortfolioBusyError`). API errors use the uniform body
+  `{"error", "message", "detail"}` (`api/v1/errors.py`). Log with `logger.exception` inside except blocks.
+- **Async model**: sync-first. FastAPI handlers are mostly `def` (blocking work runs in Starlette's threadpool);
+  only SSE / auth / health are `async def`. Analysis concurrency is threads (`ThreadPoolExecutor`), scheduler
+  background tasks are daemon `threading.Thread`; async bridges via `asyncio.to_thread`. Guard shared state with
+  `threading.RLock`; request-scoped state via `ContextVar`.
+- **Dependency injection**: constructor injection with optional singleton default
+  (`def __init__(self, db_manager: Optional[DatabaseManager] = None)`); legacy classmethod singletons
+  (`TaskService.get_instance()`, `DatabaseManager.get_instance()`, `get_db()`); FastAPI DI in `api/deps.py`
+  (request-scoped services cached on `request.app.state`). Use lazy function-level imports to break circular deps.
+  Note: `src/services/__init__.py` lazy-re-exports only 6 names — import other services from their submodules.
+- **State management**: single env-driven `Config` singleton; SQLite via `DatabaseManager`; repositories are thin;
+  `.env` writes are optimistic-concurrency (config_version). ORM models all live in `src/storage.py` — do not add
+  models elsewhere.
+- **Fallback pattern**: ordered provider lists with numeric priority (smaller = first; env-tunable `*_PRIORITY`),
+  tenacity retries (`stop_after_attempt(3)`, exponential wait), `CircuitBreaker` for unhealthy sources, per-run
+  diagnostics via `record_provider_run`. Never hardcode a chain that ignores `*_PRIORITY` env vars.
+- **Notification contract** for new channels: add a plain `XxxSender(config)` with `send_to_xxx(content, *, timeout_seconds=...)`,
+  then register in `notification_sender/__init__.py`, the `NotificationService` mixin list, `NotificationChannel`,
+  `_send_to_static_channel`, `ChannelProfile`, and the route channel tuple.
+- **Bot contract** for new commands/platforms: subclass `BotCommand` → add to `bot/commands/__init__.py
+  ALL_COMMANDS`; subclass `BotPlatform` → register in `bot/platforms/__init__.py ALL_PLATFORMS`.
 
-## 4. 常用命令
+## Important Files
 
-### 运行应用
+| Path | Why it matters |
+|---|---|
+| `main.py` | CLI orchestrator: arg parsing, serve/schedule/backtest/market-review modes, `run_full_analysis`, API bootstrap |
+| `server.py` / `webui.py` | uvicorn entry (`api.app:app`); standalone Web-UI launcher |
+| `api/app.py` | FastAPI factory: CORS, auth + error middlewares, `/api/v1` router, health, SPA/static serving, lifespan services |
+| `api/v1/router.py` | Aggregates endpoint routers (auth, analysis, history, stocks, backtest, system, agent, portfolio, screening, decision-signals, usage, alerts, intelligence) |
+| `src/core/pipeline.py` | `StockAnalysisPipeline` — the per-stock fetch→analyze→report→notify engine |
+| `src/core/market_review.py` | `run_market_review` — multi-region market-review report + persistence + notification |
+| `src/core/trading_calendar.py` | Market region inference, open/trading-day checks, market-phase context |
+| `src/config.py` | `Config` singleton dataclass + `setup_env()` (.env loading, precedence, validation) |
+| `src/core/config_registry.py` | WebUI config schema metadata (categories, field defs, sensitivity, hidden keys) |
+| `src/core/config_manager.py` | Atomic `.env` read/write with optimistic versioning + compose escaping |
+| `src/storage.py` | `DatabaseManager` singleton + ALL ORM models + persistence API (SQLite) |
+| `src/analyzer.py` | `GeminiAnalyzer` (LiteLLM) + `AnalysisResult` + prompt/JSON parsing/integrity fills |
+| `src/market_analyzer.py` | `MarketAnalyzer` — index overview, stats, sectors, news, LLM market review + market-light snapshot |
+| `src/llm/backend_registry.py` / `backend_factory.py` | Backend id constants + resolution; `create_generation_backend()` |
+| `src/agent/orchestrator.py` / `factory.py` | Multi-agent pipeline; single construction point `build_agent_executor` |
+| `src/services/system_config_service.py` | WebUI settings read/validate/update; `.env` persistence flow |
+| `data_provider/base.py` | `DataFetcherManager` fallback routing; `STANDARD_COLUMNS`; code normalization |
+| `src/notification.py` | `NotificationService` mixin + report builders + dispatch |
+| `src/search_service.py` | News-search providers with fallback order + tenacity retries |
+| `scripts/ci_gate.sh` / `scripts/test.sh` | Canonical backend gate; CLI smoke driver |
+| `scripts/check_ai_assets.py` | Enforces AGENTS.md/CLAUDE.md symlink + `.github` instructions + `.claude/skills` contract |
+| `strategies/*.yaml` | Strategy-skill packs (authoring spec in `strategies/README.md`) |
+| `templates/report_*.j2` | Jinja2 report templates rendered by `src/services/report_renderer.py` |
+| `.env.example` | Canonical env-var reference (~20 grouped sections; update it when config semantics change) |
+| `setup.cfg` / `pyproject.toml` | flake8/pytest/isort/black/bandit config |
 
-```bash
-python main.py
-python main.py --debug
-python main.py --dry-run
-python main.py --stocks 600519,hk00700,AAPL
-python main.py --market-review
-python main.py --schedule
-python main.py --serve
-python main.py --serve-only
-uvicorn server:app --reload --host 0.0.0.0 --port 8000
-```
+## Runtime / Tooling Preferences
 
-### 后端验证
+- **Python**: 3.10+ floor; CI and Docker use **3.11**; desktop PyInstaller packaging uses **3.12**. The repo is
+  **not a pip package** — `pyproject.toml` is tooling-only (no `[project]`/`[build-system]`); run from the repo root.
+- **Package managers**: `pip` + `requirements.txt` (runtime) and `.github/requirements-ci.txt` (CI test deps);
+  `npm ci` for the web app (engines: `node >=20.19 <27`, `npm >=10`).
+- **Code tooling**: black (120), isort (black profile), flake8 (120, ignores E501/W503/E203/E402), bandit (skips
+  B101 in tests). CI lint gate is flake8 criticals `E9,F63,F7,F82` only.
+- **Config**: everything is env-driven (`.env`; `ENV_FILE` overrides path). Never hardcode secrets, accounts, ports,
+  model names, or environment-specific paths; new config keys MUST be added to `.env.example`.
+- **Docker**: multi-stage (node:20-slim web builder → python:3.11-slim-bookworm), non-root user `dsa` (UID 1000),
+  `docker-compose.yml` runs two services of one image: `analyzer` (scheduled) and `server`
+  (`main.py --serve-only`). TZ `Asia/Shanghai`.
+- **Git discipline**: never `git commit` / `git tag` / `git push` without explicit user confirmation. Before
+  PR creation/update, PR review, or issue analysis: `git fetch --all --prune`, then `git pull --ff-only` only when
+  the worktree is clean and fast-forwardable — otherwise analyze against fetched remote refs and record the baseline
+  gap. Auto-tagging is opt-in (`#patch` / `#minor` / `#major` in commit title).
 
-```bash
-pip install -r requirements.txt
-pip install flake8 pytest
-./scripts/ci_gate.sh
-python -m pytest -m "not network"
-python -m py_compile <changed_python_files>
-```
+## Testing & QA
 
-### Web / Desktop
+- **Framework**: pytest (`setup.cfg [tool:pytest]`, `testpaths = tests`, `addopts = -v --tb=short`). Markers
+  declared: `unit`, `integration`, `network` — in practice only `network` is used. ~250 test files incl.
+  `tests/agent/`; legacy tests are `unittest.TestCase`, newer ones use pytest fixtures (`tmp_path`, `monkeypatch`,
+  `caplog`, `@pytest.mark.parametrize`).
+- **`tests/conftest.py` is not fixtures** — it is an asyncio/AnyIO/TestClient compatibility shim (single-thread
+  `_ThreadlessTestClient` replacing `fastapi.testclient.TestClient`). Do not remove or "simplify" it.
+- **Canonical gate**: `./scripts/ci_gate.sh` = `py_compile` on key modules → flake8 criticals → `test.sh code` +
+  `test.sh yfinance` (inline assertions) → `pytest -m "not network" --timeout=120 -o timeout_method=thread
+  -o faulthandler_timeout=300`. CI runs this in 3 duration-balanced shards via `scripts/ci_test_shard.py` +
+  `.github/ci-test-durations.json` (no pytest-xdist). Update the durations file when adding heavy test files.
+- **Network isolation**: mock at the HTTP boundary — module-level `@mock.patch("...requests.post")`, `sys.modules`
+  fakes for `litellm`/`akshare`/`json_repair`, `monkeypatch.setenv`. DB isolation via `sqlite:///:memory:` /
+  `tmp_path` DBs plus singleton resets (`DatabaseManager.reset_instance()`, `Config.reset_instance()`). Real risk
+  layers that ARE exercised offline: SQLite schema migrations, FastAPI auth stack, subprocess lifecycle, packaging
+  assets, and CI wiring itself (`tests/test_ci_workflow_contract.py`).
+- **Network-marked tests** (`@pytest.mark.network`): only `tests/test_anspire_search.py` and
+  `tests/test_tw_institutional_network.py`; run in the non-blocking cron `network-smoke.yml`
+  (`pytest -m network` + `./scripts/test.sh quick --no-notify`). Live-drift detector:
+  `tests/tw_institutional_live_smoke.py` (manual, deliberately not pytest-collected).
+- **Coverage**: none measured — no `--cov`, no `fail_under`. Don't claim coverage numbers.
+- **Review contract**: mocking a real risk layer (e.g. stubbing the whole fetch) must be paired with either an
+  offline real-stack test or a `network`-marked live check. Fix review feedback across the full contract (runtime,
+  API/Web, docs, workflows, tests), never as a one-line patch.
 
-```bash
-cd apps/dsa-web
-npm ci
-npm run lint
-npm run build
+## Repository Governance & Contribution Rules
 
-cd ../dsa-desktop
-npm install
-npm run build
-```
-
-### PR / CI 证据
-
-```bash
-gh pr view <pr_number>
-gh pr checks <pr_number>
-gh run view <run_id> --log-failed
-```
-
-## 5. 默认工作流
-
-1. 先判断任务类型：`fix / feat / refactor / docs / chore / test / review`
-2. 先读现有实现、配置、测试、脚本、工作流和文档，再动手修改。
-3. 识别改动边界：后端 / API / Web / Desktop / Workflow / Docs / AI 协作资产。
-4. 先判断是否命中高风险区域：配置语义、API / Schema、数据源 fallback、报告结构、认证、调度、发布流程、桌面端启动链路。
-5. 只做和当前任务直接相关的最小改动，不顺手夹带无关重构。
-6. 如果发现文档、脚本、工作流描述不一致，优先信任实际代码与工作流，再决定是否顺手修正文档。
-7. 改完后按下面的验证矩阵执行检查。
-8. 最终交付默认要说明：
-   - 改了什么
-   - 为什么这么改
-   - 验证情况
-   - 未验证项
-   - 风险点
-   - 回滚方式
-
-## 6. 验证矩阵
-
-### CI 覆盖原则
-
-当前仓库 CI 主要包含：
-
-| 检查项 | 来源 | 说明 | 是否阻断 |
-| --- | --- | --- | --- |
-| `ai-governance` | `.github/workflows/ci.yml` | 校验 `AGENTS.md` / `CLAUDE.md` / `.github` 指令 / `.claude/skills` 关系 | 是 |
-| `backend-gate` | `.github/workflows/ci.yml` | 执行 `./scripts/ci_gate.sh` | 是 |
-| `docker-build` | `.github/workflows/ci.yml` | Docker 构建与关键模块导入 smoke | 是 |
-| `web-gate` | `.github/workflows/ci.yml` | 前端改动时执行 `npm run lint` + `npm run build` | 是（触发时） |
-| `network-smoke` | `.github/workflows/network-smoke.yml` | `pytest -m network` + `scripts/test.sh quick` | 否，观测项 |
-| `pr-review` | `.github/workflows/pr-review.yml` | PR 静态检查 + AI 审查 + 自动标签 | 否，辅助项 |
-
-若 PR 上已有对应 CI 结果，可直接引用 CI 结论；若 CI 未覆盖改动面，或本地与 CI 环境差异较大，需要补充说明本地验证与缺口。
-
-### 按改动面执行
-
-- Python 后端改动：
-  - 适用范围：`main.py`、`src/`、`data_provider/`、`api/`、`bot/`、`tests/`
-  - 优先执行：`./scripts/ci_gate.sh`
-  - 最低要求：`python -m py_compile <changed_python_files>`
-  - 若影响 API、任务编排、报告生成、通知发送、数据源 fallback、认证、调度，交付说明中要写明是否覆盖了对应路径。
-
-- Web 前端改动：
-  - 适用范围：`apps/dsa-web/`
-  - 默认执行：`cd apps/dsa-web && npm ci && npm run lint && npm run build`
-  - 若涉及 API 联调、路由、状态管理、Markdown/图表渲染或认证状态，交付说明中要明确说明联动面和未覆盖风险。
-
-- 桌面端改动：
-  - 适用范围：`apps/dsa-desktop/`、`scripts/run-desktop.ps1`、`scripts/build-desktop*.ps1`、`scripts/build-*.sh`、`docs/desktop-package.md`
-  - 默认执行：先构建 Web，再构建桌面端
-  - 如受平台限制未能完整验证，需要明确说明是否验证了 Web 构建产物、Electron 构建以及 Release 工作流影响。
-
-- API / Schema / 认证联动改动：
-  - 适用范围：`api/**`、`src/schemas/**`、`src/services/**`、`apps/dsa-web/**`、`apps/dsa-desktop/**`
-  - 至少覆盖对应后端验证 + 受影响客户端构建验证。
-  - 若涉及登录、Cookie、会话、轮询状态、字段增删或枚举变化，必须明确写出兼容性影响。
-
-- 文档与治理文件改动：
-  - 适用范围：`README.md`、`docs/**`、`AGENTS.md`、`.github/copilot-instructions.md`、`.github/instructions/**`、`.claude/skills/**`
-  - 不强制代码测试。
-  - 需确认命令、配置项、文件名、工作流名称与实际仓库一致。
-  - 改动 AI 协作治理资产时，执行 `python scripts/check_ai_assets.py`。
-
-- 工作流 / 脚本 / Docker 改动：
-  - 适用范围：`.github/**`、`scripts/**`、`docker/**`
-  - 运行最接近改动面的本地验证。
-  - 交付时说明影响了哪条流水线、发布路径或部署路径。
-  - 若未执行 Docker / GitHub Actions 相关验证，明确说明原因与潜在风险。
-
-- 网络或三方依赖相关改动：
-  - 先跑离线或确定性检查。
-  - 优先确认 timeout、retry、fallback、异常文案、降级路径是否仍然成立。
-  - 若未执行在线验证，必须明确写出原因。
-
-## 7. 稳定性护栏
-
-- 配置与运行入口：
-  - 修改 `.env` 语义、默认值、CLI 参数、服务启动方式、调度语义时，要同时评估本地运行、Docker、GitHub Actions、API、Web、Desktop 的影响。
-  - 新配置优先做到“不配置也可运行，配置后增强能力”，避免叠加开关和互斥模式。
-
-- 数据源与 fallback：
-  - 修改 `data_provider/` 时，要关注数据源优先级、失败降级、字段标准化、缓存与超时策略。
-  - 单一数据源失败不应拖垮整个分析流程，除非需求明确要求 fail-fast。
-
-- API / Web / Desktop 兼容：
-  - 改 API / Schema / 认证 / 报告载荷时，要同时检查后端、Web、Desktop 的兼容性。
-  - 默认优先追加字段、保留旧字段或提供兼容层，避免无提示破坏现有客户端。
-
-- 报告 / Prompt / 通知：
-  - 修改报告结构、Prompt、提取器、通知模板、机器人链路时，要检查上游输入与下游消费方是否仍兼容。
-  - 单一通知渠道失败不应拖垮整个分析主流程，除非需求明确要求 fail-fast。
-  - 修改 `src/services/image_stock_extractor.py` 中 `EXTRACT_PROMPT` 时，要在 PR 描述中附完整最新 prompt。
-
-- 工作流 / 发布 / 打包：
-  - 修改自动 tag、Release、Docker 发布、日常分析或桌面端打包流程时，要评估触发条件、产物路径、权限边界和回滚方式。
-  - 自动 tag 默认保持 opt-in：只有 commit title 含 `#patch`、`#minor`、`#major` 才触发版本号更新，除非需求明确要求改变发布策略。
-
-## 8. Issue / PR / Skill 工作流
-
-- 仓库内已有以下 skill，可优先复用：
-  - `.claude/skills/analyze-issue/SKILL.md`
-  - `.claude/skills/analyze-pr/SKILL.md`
-  - `.claude/skills/fix-issue/SKILL.md`
-- 如果任务明确是 issue 分析、PR 审查、issue 修复，优先按对应 skill 执行，并将产物保存到 `.claude/reviews/`。
-- skill 中的命令、模板、验证顺序和交付结构必须与 `AGENTS.md` 保持一致。
-- 每次进行 PR 创建 / 更新、PR 审查或 issue 分析前，必须先同步最新代码基线：先检查工作区状态并执行 `git fetch --all --prune`；若工作区干净且当前分支可 fast-forward，则执行 `git pull --ff-only`。如存在本地改动、冲突状态、未跟踪风险文件或无法 fast-forward，不得强行切分支、stash、reset 或覆盖本地状态；PR 审查 / issue 分析可改用已 fetch 的远端 refs/PR head 做分析，并在分析文档中明确记录未更新本地工作树的原因、当前本地 HEAD 与使用的远端基线；PR 创建 / 更新应先说明当前分支与目标基线差异，必要时请求用户确认 rebase、merge 或继续基于当前分支推进。
-- skill 默认优先读取 CI / 工作流证据，再决定是否补本地验证。
-- 除上述 PR 创建 / 更新、PR 审查 / issue 分析的安全 fast-forward 同步外，skill 不得默认执行 `git pull`、`git push`、`git tag`、`gh pr create` 等会改变远端或当前分支状态的操作；这些操作必须要求用户确认。
-- PR 审查默认顺序：
-  1. 必要性
-  2. 关联性
-  3. 标题建议（`<类型>: <修改内容>`，且不含工具/agent 前缀；不作为硬性阻断项）
-  4. 描述完整性（对照 `.github/PULL_REQUEST_TEMPLATE.md`）
-  5. 验证证据
-  6. 实现正确性
-  7. 合入判定
-- 对 `fix` 类 PR，必须说明：原问题、根因、修复点、回归风险。
-- 合入阻断条件：
-  - 正确性或安全性问题
-  - 阻断型 CI 未通过
-  - PR 描述与实际改动内容实质性矛盾
-  - 缺少回滚方案
-  - 反复出现未收敛的契约漂移、补丁堆叠或验证证据失真
-
-## 8.1 Review 反馈处理与补丁堆叠禁止
-
-当你处理 review 反馈时，禁止只在 reviewer 点名的位置追加局部 patch 后声称“已全部修复”。你必须先重新理解 reviewer 指出的业务契约，再检查同一语义涉及的所有入口、配置、测试、文档、workflow 和用户可见路径。
-
-收到 review 反馈后，必须按以下顺序处理：
-
-1. 逐条列出 reviewer 指出的原问题。
-2. 说明根因，不能只描述“改了哪几行”。
-3. 找出同一语义影响的所有相关路径，例如 runtime、API/Web、CLI、diagnostics、workflow、docs、tests。
-4. 修复完整契约，而不是只修复当前失败测试或当前评论行。
-5. 补充能覆盖 reviewer 反例的回归测试、最终入口验证，或明确说明无法验证的原因。
-6. 同步更新 PR body，保证 scope、验证结果、兼容性、风险和回滚方案与当前 head 一致。
-
-如果你无法完成上述收敛，不要继续堆叠补丁，不要声称 ready for merge。应主动说明当前 PR 需要拆分、关闭重做，或请求维护者确认新的最小范围。
-
-以下行为会被视为低质量 PR：
-
-- 用 broad fallback、静默降级、`return False/None/[]` 掩盖不清晰的契约。
-- 测试 mock 掉真实风险层，只证明局部实现通过。
-- CI 通过后声称问题已关闭，但没有覆盖 reviewer 指出的反例。
-- PR body 与实际 diff、验证结果或兼容风险不一致。
-- review 后继续追加零散 patch，而不是重新收敛完整语义。
-- 同一业务语义在 runtime、Web/API、docs、workflow、tests 中表现不一致。
-
-CI 通过只能说明自动检查通过，不能替代人工语义收敛，也不能单独证明 reviewer 指出的反例已经关闭。
-
-## 9. 交付与发布
-
-- 默认交付结构：
-  - `改了什么`
-  - `为什么这么改`
-  - `验证情况`
-  - `未验证项`
-  - `风险点`
-  - `回滚方式`
-- 如果是 `docs` 任务，可直接写：`Docs only, tests not run`，但仍需说明是否核对了命令和文件名。
-- 自动 tag 默认不触发，只有 commit title 包含 `#patch`、`#minor`、`#major` 才会触发版本号更新。
-- 手动打 tag 必须使用 annotated tag。
-- 用户可见变更优先通过 PR 合入，并补齐 label 与验证说明。
+- **AI asset governance**: `AGENTS.md` is the single source of truth for AI-collaboration rules; `CLAUDE.md` must
+  remain a symlink to it; `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md` mirror it
+  (`applyTo:` globs scope them per path); repo skills live in `.claude/skills/`; `.claude/reviews/` is a local
+  artifact (never committed). Run `python scripts/check_ai_assets.py` after touching these. If a future agent dir
+  is added, mirror via script from one source — no hand-maintained duplicates.
+- **Scope discipline**: respect directory boundaries (backend `src/`+`data_provider/`+`api/`+`bot/`, web
+  `apps/dsa-web/`, desktop `apps/dsa-desktop/`, deploy `.github/workflows/`+`scripts/`+`docker/`). Reuse existing
+  modules, config entrypoints, scripts, and tests — no parallel implementations. Stability first: no unrelated
+  refactors, no low-quality "line-count" contributions.
+- **PR titles**: `<type>: <summary>` with `fix`/`feat`/`refactor`/`docs`/`chore`/`test`/`ci`; no `[codex]`/
+  `codex`/`autocode`/`copilot` or tool prefixes (process guidance, not a hard blocker).
+- **CHANGELOG** (`docs/CHANGELOG.md`): `[Unreleased]` uses a **flat format** — one `- [类型] 描述` line per change
+  (`新功能`/`改进`/`修复`/`文档`/`测试`/`chore`), **no `###` subheadings** in `[Unreleased]` (enforced by tests).
+- **Docs**: `README.md` stays homepage-level; detail goes in `docs/*.md` (`docs/INDEX.md` is the hub). Primary docs
+  are Simplified Chinese with `*_EN.md` mirrors; when updating only one language version, explain why the
+  counterpart was not synced. New/changed config keys → sync `.env.example`.
+- **User-visible changes** (CLI/API, deploy, notification, report structure, report rendering, Web UI): update docs +
+  `docs/CHANGELOG.md`, and PR descriptions must include screenshots/visual evidence (in the PR, not committed files).
+  Changing `EXTRACT_PROMPT` in `src/services/image_stock_extractor.py` requires attaching the full latest prompt.
+- **Delivery contract**: default final summary covers what changed / why / verification / unverified items / risks /
+  rollback. Validation by change area — backend: `./scripts/ci_gate.sh` (min `py_compile`); web: `npm ci && npm run
+  lint && npm run build`; desktop: build web then Electron; docs/workflows: verify commands, paths, workflow names,
+  and config keys match the repo; network/third-party changes: run offline/deterministic checks and state why any
+  online validation was skipped.
+- **Skills**: for issue analysis, PR review, or issue fixing, prefer `.claude/skills/analyze-issue`,
+  `.claude/skills/analyze-pr`, `.claude/skills/fix-issue` and write artifacts under `.claude/reviews/`. Review order:
+  necessity → relevance → title → description completeness → validation evidence → implementation correctness →
+  merge decision. Blockers: correctness/security issues, blocking CI failure, PR body contradicting the diff,
+  missing rollback, or repeated contract drift.
