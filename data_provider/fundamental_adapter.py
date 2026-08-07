@@ -601,15 +601,10 @@ class AkshareFundamentalAdapter:
                 )[:200]
                 result["source_chain"].append(f"earnings_quick:{quick_source}")
 
-        # Consensus EPS forecast (同花顺一致预期, direct HTTP, free)
-        try:
-            consensus_eps = self._ths_consensus_eps(stock_code)
-        except Exception as exc:
-            consensus_eps = {}
-            result["errors"].append(f"consensus_eps:{type(exc).__name__}")
-        if consensus_eps:
-            result["earnings"]["consensus_eps"] = consensus_eps
-            result["source_chain"].append("earnings_consensus:ths")
+        # Consensus EPS forecast is fetched by the fundamental-context layer as a
+        # quick keyless block (see DataFetcherManager.get_fundamental_context),
+        # so this bundle stays akshare-only and never blocks on the THS page.
+        # (method _ths_consensus_eps remains for direct/standalone use)
 
         # Dividend details (cash dividend, pre-tax)
         dividend_df, dividend_source, dividend_errors = self._call_df_candidates([

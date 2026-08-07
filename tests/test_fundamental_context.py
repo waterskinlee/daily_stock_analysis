@@ -245,6 +245,7 @@ class TestFundamentalContext(unittest.TestCase):
                 }), \
                 patch.object(manager, "get_capital_flow_context", return_value={"status": "partial", "source_chain": []}), \
                 patch.object(manager, "get_dragon_tiger_context", return_value={"status": "partial", "source_chain": []}), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}), \
                 patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_board_context", return_value={"status": "partial", "source_chain": []}):
             ctx = manager.get_fundamental_context("600519", budget_seconds=1.5)
@@ -290,6 +291,7 @@ class TestFundamentalContext(unittest.TestCase):
                 }), \
                 patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}), \
                 patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_board_context", return_value={"status": "not_supported", "source_chain": []}):
             ctx = manager.get_fundamental_context("600519", budget_seconds=1.5)
@@ -332,6 +334,7 @@ class TestFundamentalContext(unittest.TestCase):
                 }), \
                 patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}), \
                 patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_board_context", return_value={"status": "not_supported", "source_chain": []}):
             ctx = manager.get_fundamental_context("600519", budget_seconds=1.5)
@@ -390,6 +393,7 @@ class TestFundamentalContext(unittest.TestCase):
                 ), \
                 patch.object(manager, "get_capital_flow_context", side_effect=_capital_flow_side_effect), \
                 patch.object(manager, "get_dragon_tiger_context", side_effect=_dragon_tiger_side_effect), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}), \
                 patch.object(manager, "get_lockup_context", side_effect=_lockup_side_effect), \
                 patch.object(manager, "get_board_context", side_effect=_boards_side_effect):
             manager.get_fundamental_context("600519")
@@ -440,6 +444,7 @@ class TestFundamentalContext(unittest.TestCase):
                 ), \
                 patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported", "source_chain": []}), \
                 patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}), \
                 patch.object(manager, "get_lockup_context", return_value=lockup_block), \
                 patch.object(manager, "get_board_context", return_value={"status": "not_supported", "source_chain": []}):
             ctx = manager.get_fundamental_context("600519")
@@ -447,6 +452,58 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(ctx["coverage"].get("lockup"), "ok")
         self.assertEqual(ctx["lockup"]["data"]["upcoming"][0]["free_date"], "2026-09-06")
         self.assertTrue(any(item.get("provider") == "eastmoney_lockup" for item in ctx["source_chain"]))
+
+    def test_quick_consensus_eps_injected_when_bundle_fails(self) -> None:
+        """Keyless THS EPS is fetched before the akshare bundle and survives bundle failure."""
+        manager = DataFetcherManager(fetchers=[])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=120,
+            fundamental_stage_timeout_seconds=1.5,
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+        quote = SimpleNamespace(
+            pe_ratio=12.3,
+            pb_ratio=2.1,
+            total_mv=1.0e11,
+            circ_mv=7.0e10,
+            source=SimpleNamespace(value="tencent"),
+        )
+        bundle = {
+            "status": "failed",
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": [],
+            "errors": ["bundle failed"],
+        }
+        quick_eps = {
+            "2026": {"count": 46, "min": 65.02, "mean": 68.7, "max": 77.85},
+            "2027": {"count": 46, "min": 67.61, "mean": 72.45, "max": 84.02},
+        }
+        with patch("src.config.get_config", return_value=cfg), \
+                patch.object(manager, "get_realtime_quote", return_value=quote), \
+                patch(
+                    "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_fundamental_bundle",
+                    return_value=bundle,
+                ), \
+                patch.object(
+                    manager._fundamental_adapter,
+                    "_ths_consensus_eps",
+                    return_value=quick_eps,
+                ), \
+                patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager, "get_board_context", return_value={"status": "not_supported", "source_chain": []}):
+            ctx = manager.get_fundamental_context("600519")
+
+        consensus = ctx["earnings"]["data"].get("consensus_eps", {})
+        self.assertIn("2026", consensus)
+        self.assertAlmostEqual(consensus["2026"]["mean"], 68.7, places=6)
+        self.assertTrue(any(item.get("provider") == "earnings_consensus:ths" for item in ctx["source_chain"]))
+        self.assertEqual(ctx["coverage"].get("earnings"), "ok")
 
     def test_run_with_timeout_limits_hanging_workers(self) -> None:
         manager = DataFetcherManager(fetchers=[])
@@ -523,7 +580,8 @@ class TestFundamentalContext(unittest.TestCase):
                     "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_fundamental_bundle",
                     return_value=bundle,
                 ), \
-                patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}):
+                patch.object(manager, "get_lockup_context", return_value={"status": "not_supported", "source_chain": []}), \
+                patch.object(manager._fundamental_adapter, "_ths_consensus_eps", return_value={}):
             ctx = manager.get_fundamental_context("600519")
 
         self.assertEqual(ctx["coverage"].get("valuation"), "partial")

@@ -3225,7 +3225,35 @@ class DataFetcherManager:
             [valuation_err] if valuation_err else [],
         )
 
-        # growth / earnings / institution (one AkShare call)
+        # Consensus EPS: quick keyless THS fetch (~0.2s) BEFORE the slow akshare
+        # bundle so the default stage budget reliably covers it even when the
+        # bundle times out. CN non-ETF only; fail-open.
+        quick_eps: Dict[str, Any] = {}
+        quick_eps_ms = 0
+        if not is_etf:
+            eps_budget = min(fetch_timeout, remaining_seconds)
+            if eps_budget > 0:
+                eps_start = time.time()
+                try:
+                    quick_eps = self._fundamental_adapter._ths_consensus_eps(stock_code) or {}
+                    if not isinstance(quick_eps, dict):
+                        quick_eps = {}
+                except Exception as exc:  # noqa: BLE001 - keyless feed, fail-open
+                    logger.warning("consensus EPS fetch failed for %s: %s", stock_code, exc)
+                    quick_eps = {}
+                quick_eps_ms = int((time.time() - eps_start) * 1000)
+                _consume_budget(quick_eps_ms)
+
+            # Lockup: single eastmoney datacenter HTTP (~0.5s), also fetched
+            # before the slow akshare blocks so the default budget covers it.
+            lockup_budget = min(fetch_timeout, remaining_seconds)
+            lockup_start = time.time()
+            result_ctx["lockup"] = self.get_lockup_context(
+                stock_code,
+                budget_seconds=lockup_budget,
+            )
+            _consume_budget(int((time.time() - lockup_start) * 1000))
+
         if remaining_seconds <= 0:
             bundle_status = "failed"
             bundle_payload: Dict[str, Any] = {}
@@ -3317,6 +3345,20 @@ class DataFetcherManager:
         earnings_errors.extend(earnings_extra_errors)
         institution_errors = list(adapter_errors)
 
+        # Consensus EPS fetched as a quick keyless block BEFORE the slow akshare
+        # bundle, so the default 8s budget reliably covers it even when the
+        # bundle times out. Merge into the earnings block (keyless, ~0.2s).
+        earnings_chain = bundle_chain
+        if quick_eps:
+            earnings_payload["consensus_eps"] = quick_eps
+            earnings_chain = list(bundle_chain) + [
+                {
+                    "provider": "earnings_consensus:ths",
+                    "result": "ok",
+                    "duration_ms": quick_eps_ms,
+                }
+            ]
+
         growth_status = self._infer_block_status(growth_payload, bundle_status)
         earnings_status = self._infer_block_status(earnings_payload, bundle_status)
         institution_status = self._infer_block_status(institution_payload, bundle_status)
@@ -3330,7 +3372,7 @@ class DataFetcherManager:
         result_ctx["earnings"] = self._build_fundamental_block(
             earnings_status,
             earnings_payload,
-            bundle_chain,
+            earnings_chain,
             earnings_errors,
         )
         result_ctx["institution"] = self._build_fundamental_block(
@@ -3368,17 +3410,6 @@ class DataFetcherManager:
             )
             result_ctx["status"] = "partial"
         else:
-            # lockup runs early: single datacenter HTTP (~1s) so the default
-            # 8s stage budget still covers it before the slow multi-candidate
-            # akshare blocks (capital_flow / dragon_tiger) consume the budget.
-            lockup_budget = min(fetch_timeout, remaining_seconds)
-            lockup_start = time.time()
-            result_ctx["lockup"] = self.get_lockup_context(
-                stock_code,
-                budget_seconds=lockup_budget,
-            )
-            _consume_budget(int((time.time() - lockup_start) * 1000))
-
             capital_flow_budget = min(fetch_timeout, remaining_seconds)
             capital_flow_start = time.time()
             result_ctx["capital_flow"] = self.get_capital_flow_context(

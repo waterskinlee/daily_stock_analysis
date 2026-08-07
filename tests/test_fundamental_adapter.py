@@ -278,9 +278,9 @@ class TestFundamentalAdapter(unittest.TestCase):
             with self.assertRaises(ConnectionError):
                 adapter._ths_consensus_eps("600519")
 
-    # ---- fundamental bundle includes consensus EPS -------------------------------
+    # ---- fundamental bundle no longer fetches consensus EPS (context-layer quick block) ----
 
-    def test_fundamental_bundle_includes_consensus_eps(self) -> None:
+    def test_fundamental_bundle_does_not_fetch_consensus_eps(self) -> None:
         adapter = AkshareFundamentalAdapter()
         fin_df = pd.DataFrame({"股票代码": ["600519"], "营业收入同比": [12.0]})
         with patch.object(
@@ -294,20 +294,11 @@ class TestFundamentalAdapter(unittest.TestCase):
                 (None, None, []),
                 (None, None, []),
             ],
-        ), patch.object(
-            adapter,
-            "_ths_consensus_eps",
-            return_value={
-                "2026": {"count": 24, "min": 6.5, "mean": 7.2, "max": 8.1},
-                "2027": {"count": 12, "min": 8.0, "mean": 9.1, "max": 10.5},
-            },
-        ):
+        ), patch.object(adapter, "_ths_consensus_eps", return_value={}) as eps_mock:
             result = adapter.get_fundamental_bundle("600519")
 
-        consensus = result["earnings"].get("consensus_eps", {})
-        self.assertIn("2026", consensus)
-        self.assertAlmostEqual(consensus["2026"]["mean"], 7.2, places=6)
-        self.assertTrue(any("consensus" in item for item in result["source_chain"]))
+        self.assertNotIn("consensus_eps", result.get("earnings", {}))
+        eps_mock.assert_not_called()  # bundle stays akshare-only; EPS is a context-layer quick block
 
 
 class TestClsWireSearchProvider(unittest.TestCase):
