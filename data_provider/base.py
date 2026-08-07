@@ -3368,6 +3368,17 @@ class DataFetcherManager:
             )
             result_ctx["status"] = "partial"
         else:
+            # lockup runs early: single datacenter HTTP (~1s) so the default
+            # 8s stage budget still covers it before the slow multi-candidate
+            # akshare blocks (capital_flow / dragon_tiger) consume the budget.
+            lockup_budget = min(fetch_timeout, remaining_seconds)
+            lockup_start = time.time()
+            result_ctx["lockup"] = self.get_lockup_context(
+                stock_code,
+                budget_seconds=lockup_budget,
+            )
+            _consume_budget(int((time.time() - lockup_start) * 1000))
+
             capital_flow_budget = min(fetch_timeout, remaining_seconds)
             capital_flow_start = time.time()
             result_ctx["capital_flow"] = self.get_capital_flow_context(
@@ -3383,14 +3394,6 @@ class DataFetcherManager:
                 budget_seconds=dragon_tiger_budget,
             )
             _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
-
-            lockup_budget = min(fetch_timeout, remaining_seconds)
-            lockup_start = time.time()
-            result_ctx["lockup"] = self.get_lockup_context(
-                stock_code,
-                budget_seconds=lockup_budget,
-            )
-            _consume_budget(int((time.time() - lockup_start) * 1000))
 
             result_ctx["boards"] = self.get_board_context(
                 stock_code,
