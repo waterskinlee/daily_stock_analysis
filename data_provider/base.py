@@ -3218,6 +3218,17 @@ class DataFetcherManager:
             )
             _consume_budget(int((time.time() - lockup_start) * 1000))
 
+            # Dragon-tiger: akshare LHB (eastmoney datacenter, ~0.6-1s standalone)
+            # — also run before the slow akshare bundle so the stage budget
+            # reliably covers it (it would otherwise starve after the bundle).
+            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
+            dragon_tiger_start = time.time()
+            result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
+                stock_code,
+                budget_seconds=dragon_tiger_budget,
+            )
+            _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
+
         valuation_timeout = min(fetch_timeout, remaining_seconds)
         if valuation_timeout > 0:
             quote_payload, valuation_err, valuation_ms = self._run_with_retry(
@@ -3416,14 +3427,6 @@ class DataFetcherManager:
                 budget_seconds=capital_flow_budget,
             )
             _consume_budget(int((time.time() - capital_flow_start) * 1000))
-
-            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
-            dragon_tiger_start = time.time()
-            result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
-                stock_code,
-                budget_seconds=dragon_tiger_budget,
-            )
-            _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
 
             result_ctx["boards"] = self.get_board_context(
                 stock_code,
