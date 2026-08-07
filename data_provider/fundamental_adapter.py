@@ -353,7 +353,10 @@ class AkshareFundamentalAdapter:
             if not isinstance(row, pd.Series):
                 continue
             raw_year = _safe_str(row.iloc[0]) if len(row) > 0 else ""
-            year_digits = re.sub(r"\D", "", raw_year)
+            try:
+                year_digits = str(int(float(raw_year)))
+            except (TypeError, ValueError):
+                year_digits = re.sub(r"\D", "", raw_year)
             if len(year_digits) != 4 or not year_digits.isdigit():
                 continue
             year_str = year_digits
@@ -414,8 +417,8 @@ class AkshareFundamentalAdapter:
                 history.append(
                     {
                         "free_date": free_date,
-                        "share_type": str(row.get("LIMITED_STOCK_TYPE") or ""),
-                        "free_shares": _safe_float(row.get("FREE_SHARES_NUM")),
+                        "share_type": str(row.get("FREE_SHARES_TYPE") or row.get("LIMITED_STOCK_TYPE") or ""),
+                        "free_shares": _safe_float(row.get("FREE_SHARES") or row.get("FREE_SHARES_NUM")),
                         "free_ratio_pct": _safe_float(row.get("FREE_RATIO")),
                     }
                 )
@@ -457,8 +460,8 @@ class AkshareFundamentalAdapter:
                 upcoming.append(
                     {
                         "free_date": str(row.get("FREE_DATE") or "")[:10],
-                        "share_type": str(row.get("LIMITED_STOCK_TYPE") or ""),
-                        "free_shares": _safe_float(row.get("FREE_SHARES_NUM")),
+                        "share_type": str(row.get("FREE_SHARES_TYPE") or row.get("LIMITED_STOCK_TYPE") or ""),
+                        "free_shares": _safe_float(row.get("FREE_SHARES") or row.get("FREE_SHARES_NUM")),
                         "free_ratio_pct": _safe_float(row.get("FREE_RATIO")),
                     }
                 )
