@@ -3190,6 +3190,34 @@ class DataFetcherManager:
             nonlocal remaining_seconds
             remaining_seconds = max(0.0, remaining_seconds - consumed_ms / 1000.0)
 
+        # Consensus EPS + lockup: fast keyless direct-HTTP blocks (~0.2-0.5s)
+        # fetched FIRST so even tight budgets (screening enrich = 4s) reliably
+        # cover them, and the slow akshare bundle later can never starve them.
+        # CN non-ETF only; fail-open.
+        quick_eps: Dict[str, Any] = {}
+        quick_eps_ms = 0
+        if not is_etf:
+            eps_budget = min(fetch_timeout, remaining_seconds)
+            if eps_budget > 0:
+                eps_start = time.time()
+                try:
+                    quick_eps = self._fundamental_adapter._ths_consensus_eps(stock_code) or {}
+                    if not isinstance(quick_eps, dict):
+                        quick_eps = {}
+                except Exception as exc:  # noqa: BLE001 - keyless feed, fail-open
+                    logger.warning("consensus EPS fetch failed for %s: %s", stock_code, exc)
+                    quick_eps = {}
+                quick_eps_ms = int((time.time() - eps_start) * 1000)
+                _consume_budget(quick_eps_ms)
+
+            lockup_budget = min(fetch_timeout, remaining_seconds)
+            lockup_start = time.time()
+            result_ctx["lockup"] = self.get_lockup_context(
+                stock_code,
+                budget_seconds=lockup_budget,
+            )
+            _consume_budget(int((time.time() - lockup_start) * 1000))
+
         valuation_timeout = min(fetch_timeout, remaining_seconds)
         if valuation_timeout > 0:
             quote_payload, valuation_err, valuation_ms = self._run_with_retry(
@@ -3224,35 +3252,6 @@ class DataFetcherManager:
             ),
             [valuation_err] if valuation_err else [],
         )
-
-        # Consensus EPS: quick keyless THS fetch (~0.2s) BEFORE the slow akshare
-        # bundle so the default stage budget reliably covers it even when the
-        # bundle times out. CN non-ETF only; fail-open.
-        quick_eps: Dict[str, Any] = {}
-        quick_eps_ms = 0
-        if not is_etf:
-            eps_budget = min(fetch_timeout, remaining_seconds)
-            if eps_budget > 0:
-                eps_start = time.time()
-                try:
-                    quick_eps = self._fundamental_adapter._ths_consensus_eps(stock_code) or {}
-                    if not isinstance(quick_eps, dict):
-                        quick_eps = {}
-                except Exception as exc:  # noqa: BLE001 - keyless feed, fail-open
-                    logger.warning("consensus EPS fetch failed for %s: %s", stock_code, exc)
-                    quick_eps = {}
-                quick_eps_ms = int((time.time() - eps_start) * 1000)
-                _consume_budget(quick_eps_ms)
-
-            # Lockup: single eastmoney datacenter HTTP (~0.5s), also fetched
-            # before the slow akshare blocks so the default budget covers it.
-            lockup_budget = min(fetch_timeout, remaining_seconds)
-            lockup_start = time.time()
-            result_ctx["lockup"] = self.get_lockup_context(
-                stock_code,
-                budget_seconds=lockup_budget,
-            )
-            _consume_budget(int((time.time() - lockup_start) * 1000))
 
         if remaining_seconds <= 0:
             bundle_status = "failed"
