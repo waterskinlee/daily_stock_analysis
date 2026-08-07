@@ -309,7 +309,10 @@ class AkshareFundamentalAdapter:
             "client": "WEB",
         }
         if filter_str:
-            params["filter"] = f"({filter_str})"
+            # Pass the filter verbatim — the eastmoney datacenter API rejects
+            # nested groups, so callers must supply fully parenthesized groups
+            # (e.g. `(SECURITY_CODE="688783")(FREE_DATE>='..')(FREE_DATE<='..')`).
+            params["filter"] = filter_str
         if sort_columns:
             params["sortColumns"] = sort_columns
             params["sortTypes"] = sort_types or "1"
@@ -398,7 +401,7 @@ class AkshareFundamentalAdapter:
         try:
             history_rows = self._em_datacenter_get(
                 "RPT_LIFT_STAGE",
-                filter_str=f'SECURITY_CODE="{code}"',
+                filter_str=f'(SECURITY_CODE="{code}")',
                 page_size=20,
                 sort_columns="FREE_DATE",
                 sort_types="-1",
@@ -438,7 +441,7 @@ class AkshareFundamentalAdapter:
             upcoming_rows = self._em_datacenter_get(
                 "RPT_LIFT_STAGE",
                 filter_str=(
-                    f'SECURITY_CODE="{code}"'
+                    f'(SECURITY_CODE="{code}")'
                     f"(FREE_DATE>='{today.isoformat()}')"
                     f"(FREE_DATE<='{forward_end}')"
                 ),
