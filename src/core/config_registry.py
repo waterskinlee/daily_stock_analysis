@@ -1114,6 +1114,20 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 53,
     },
+    "CLS_WIRE_ENABLED": {
+        "title": "7x24 Wire News (CLS/Eastmoney)",
+        "description": "Enable the keyless 7x24 wire fallback news source (CLS telegraph preferred, Eastmoney 7x24 fallback). Surfaces fresh telegraph headlines when every search engine fails. Default: false.",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 54,
+    },
     "ENABLE_REALTIME_QUOTE": {
         "title": "Enable Realtime Quote",
         "description": "Enable realtime market quotes. Disable to only use historical close prices.",
@@ -4664,6 +4678,15 @@ _FIELD_HELP_METADATA: Dict[str, Dict[str, Any]] = {
         ],
         "docs": _DOC_FULL_GUIDE_SEARCH,
         "warning_codes": ["public_instance_stability"],
+    },
+    "CLS_WIRE_ENABLED": {
+        "help_key": "settings.data_source.SEARXNG_BASE_URLS",
+        "examples": [
+            "CLS_WIRE_ENABLED=true",
+            "CLS_WIRE_ENABLED=false",
+        ],
+        "docs": _DOC_FULL_GUIDE_SEARCH,
+        "warning_codes": [],
     },
     "BIAS_THRESHOLD": {
         "help_key": "settings.data_source.BIAS_THRESHOLD",

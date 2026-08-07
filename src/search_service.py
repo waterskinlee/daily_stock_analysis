@@ -2220,6 +2220,237 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class ClsWireSearchProvider(BaseSearchProvider):
+    """
+    财联社 7x24 快讯直连（free, no API key）。
+
+    Ported from tradingagents-astock (Apache-2.0)
+    ``tradingagents/dataflows/a_stock.py::get_global_news``.
+
+    Primary source is the CLS telegraph list; as of 2026-08 the CLS
+    ``nodeapi/telegraphList`` endpoint returns 404 from both the production
+    network and public CN networks, so the provider fails over to the
+    Eastmoney 7x24 fast-news wire (``np-weblist.eastmoney.com``, verified
+    200 from the production server) and is fail-open when both are down.
+
+    The wire is a rolling market feed, not a keyword search engine, so this
+    provider is used as a LAST-RESORT fallback: when all configured search
+    engines return nothing, it still surfaces fresh telegraph headlines.
+    Client-side keyword filtering keeps results relevant to the requested
+    stock/topic when possible.
+    """
+
+    CLS_WIRE_URL = "https://www.cls.cn/nodeapi/telegraphList"
+    EM_WIRE_URL = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
+    WIRE_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://www.cls.cn/",
+    }
+    WIRE_TIMEOUT_SECONDS = 10
+    WIRE_MAX_ITEMS = 40
+
+    def __init__(self, enabled: bool = True):
+        super().__init__([], "CLS")
+        self._enabled = bool(enabled)
+
+    @property
+    def is_available(self) -> bool:
+        """No API key required — availability is governed by the enable flag."""
+        return self._enabled
+
+    @staticmethod
+    def _item_url(item: Dict[str, Any], source: str) -> str:
+        if source == "eastmoney":
+            code = str(item.get("code") or "")
+            if code:
+                return f"https://kuaixun.eastmoney.com/{code}.html"
+            return "https://kuaixun.eastmoney.com/"
+        for key in ("shareurl", "link", "url"):
+            value = item.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+        item_id = item.get("id")
+        if item_id:
+            return f"https://www.cls.cn/detail/{item_id}"
+        return "https://www.cls.cn/"
+
+    def _filter_items(
+        self,
+        items: List[Dict[str, Any]],
+        query: str,
+        max_results: int,
+        days: int,
+        source: str,
+    ) -> List[SearchResult]:
+        """Filter wire items by recency + client-side keywords."""
+        cutoff = time.time() - max(1, int(days)) * 86400
+        query_terms = [
+            term.strip()
+            for term in re.split(r"[\s，,、;；]+", query)
+            if len(term.strip()) >= 2
+        ]
+        results: List[SearchResult] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if source == "eastmoney":
+                content = str(item.get("summary") or "").strip()
+            else:
+                content = str(item.get("content") or item.get("brief") or "").strip()
+            if not title and not content:
+                continue
+
+            published_date: Optional[str] = None
+            if source == "eastmoney":
+                show_time = str(item.get("showTime") or "").strip()
+                if show_time:
+                    try:
+                        ts = datetime.strptime(show_time, "%Y-%m-%d %H:%M:%S").timestamp()
+                    except ValueError:
+                        ts = None
+                    if ts is not None:
+                        if ts < cutoff:
+                            continue
+                        published_date = show_time[:16]
+            else:
+                raw_ctime = item.get("ctime")
+                try:
+                    ctime_ts = int(raw_ctime)
+                    if ctime_ts < cutoff:
+                        continue
+                    published_date = datetime.fromtimestamp(ctime_ts).strftime("%Y-%m-%d %H:%M")
+                except (TypeError, ValueError, OSError):
+                    published_date = None
+
+            haystack = f"{title} {content}"
+            if query_terms and not any(term in haystack for term in query_terms):
+                continue
+
+            snippet = (content or title)[:200]
+            results.append(
+                SearchResult(
+                    title=title or snippet[:80],
+                    snippet=snippet,
+                    url=self._item_url(item, source),
+                    source="财联社" if source == "cls" else "东财7x24",
+                    published_date=published_date,
+                )
+            )
+            if len(results) >= max_results:
+                break
+        return results
+
+    def _fetch_cls(self, query: str, max_results: int, days: int) -> Tuple[List[SearchResult], Optional[str]]:
+        try:
+            params = {"rn": str(max(self.WIRE_MAX_ITEMS, max_results)), "page": "1"}
+            response = requests.get(
+                self.CLS_WIRE_URL,
+                params=params,
+                headers=self.WIRE_HEADERS,
+                timeout=self.WIRE_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                return [], f"CLS HTTP {response.status_code}"
+            payload = response.json()
+            raw_items = (payload.get("data") or {}).get("roll_data") or []
+            if not isinstance(raw_items, list):
+                raw_items = []
+            return self._filter_items(raw_items, query, max_results, days, "cls"), None
+        except Exception as exc:  # noqa: BLE001 - fail-open wire provider
+            return [], f"CLS 请求失败: {type(exc).__name__}"
+
+    def _fetch_em(self, query: str, max_results: int, days: int) -> Tuple[List[SearchResult], Optional[str]]:
+        try:
+            import uuid
+
+            params = {
+                "client": "web",
+                "biz": "web_724",
+                "fastColumn": "102",
+                "sortEnd": "",
+                "pageSize": str(max(self.WIRE_MAX_ITEMS, max_results)),
+                "req_trace": str(uuid.uuid4()),
+            }
+            headers = dict(self.WIRE_HEADERS)
+            headers["Referer"] = "https://kuaixun.eastmoney.com/"
+            response = requests.get(
+                self.EM_WIRE_URL,
+                params=params,
+                headers=headers,
+                timeout=self.WIRE_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                return [], f"EM7x24 HTTP {response.status_code}"
+            payload = response.json()
+            raw_items = (payload.get("data") or {}).get("fastNewsList") or []
+            if not isinstance(raw_items, list):
+                raw_items = []
+            return self._filter_items(raw_items, query, max_results, days, "eastmoney"), None
+        except Exception as exc:  # noqa: BLE001 - fail-open wire provider
+            return [], f"EM7x24 请求失败: {type(exc).__name__}"
+
+    def _do_search(  # type: ignore[override]
+        self,
+        query: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        """Fetch the latest 7x24 wire (CLS preferred, Eastmoney fallback)."""
+        cls_results, cls_error = self._fetch_cls(query, max_results, days)
+        if cls_results:
+            return SearchResponse(
+                query=query,
+                results=cls_results,
+                provider=self.name,
+                success=True,
+            )
+        em_results, em_error = self._fetch_em(query, max_results, days)
+        if em_results:
+            return SearchResponse(
+                query=query,
+                results=em_results,
+                provider=self.name,
+                success=True,
+            )
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self.name,
+            success=False,
+            error_message=em_error or cls_error or "7x24 快讯不可用",
+        )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Fetch 7x24 wire; return filtered results (last-resort fallback)."""
+        start_time = time.time()
+        if not self._enabled:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="CLS 快讯未启用",
+                search_time=time.time() - start_time,
+            )
+        response = self._do_search(query, max_results=max_results, days=days)
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 快讯拉取成功，query='%s'，返回 %s 条结果，耗时 %.2fs",
+                self.name,
+                query,
+                len(response.results),
+                response.search_time,
+            )
+        else:
+            logger.warning("[%s] 快讯拉取失败: %s", self.name, response.error_message)
+        return response
+
+
 class SearchService:
     """
     搜索服务
@@ -2392,6 +2623,7 @@ class SearchService:
         searxng_public_instances_enabled: bool = True,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
+        cls_wire_enabled: bool = False,
     ):
         """
         初始化搜索服务
@@ -2407,6 +2639,7 @@ class SearchService:
             searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
+            cls_wire_enabled: 财联社 7x24 快讯直连（免费无 key，最后兜底）
         """
         self._constructor_kwargs: Dict[str, Any] = {
             "bocha_keys": list(bocha_keys or []),
@@ -2419,6 +2652,7 @@ class SearchService:
             "searxng_public_instances_enabled": bool(searxng_public_instances_enabled),
             "news_max_age_days": int(news_max_age_days),
             "news_strategy_profile": news_strategy_profile,
+            "cls_wire_enabled": bool(cls_wire_enabled),
         }
         self._providers: List[BaseSearchProvider] = []
         self.news_max_age_days = max(1, news_max_age_days)
@@ -2480,6 +2714,11 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
+
+        # 8. 财联社 7x24 快讯（免费无 key，最后兜底；搜索引擎全失败时仍可提供最新电报）
+        if cls_wire_enabled:
+            self._providers.append(ClsWireSearchProvider(enabled=True))
+            logger.info("已启用财联社 7x24 快讯直连（兜底数据源）")
             
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
@@ -4892,6 +5131,7 @@ def get_search_service() -> SearchService:
                     searxng_public_instances_enabled=config.searxng_public_instances_enabled,
                     news_max_age_days=config.news_max_age_days,
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
+                    cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
                 )
     
     return _search_service

@@ -2759,6 +2759,7 @@ class DataFetcherManager:
             "institution",
             "capital_flow",
             "dragon_tiger",
+            "lockup",
             "boards",
         ):
             payload = context.get(block, {})
@@ -2799,6 +2800,12 @@ class DataFetcherManager:
                 [reason],
             ),
             "dragon_tiger": self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                [reason],
+            ),
+            "lockup": self._build_fundamental_block(
                 "not_supported",
                 {},
                 [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
@@ -2871,6 +2878,7 @@ class DataFetcherManager:
             "institution": {},
             "capital_flow": {},
             "dragon_tiger": {},
+            "lockup": {},
             "boards": {},
             "belong_boards": [],
             "coverage": {},
@@ -2957,8 +2965,8 @@ class DataFetcherManager:
             list(adapter_errors),
         )
 
-        # capital_flow / dragon_tiger / boards: no offshore data feed today -> not_supported.
-        for block in ("capital_flow", "dragon_tiger", "boards"):
+        # capital_flow / dragon_tiger / lockup / boards: no offshore data feed today -> not_supported.
+        for block in ("capital_flow", "dragon_tiger", "lockup", "boards"):
             result_ctx[block] = self._build_fundamental_block(
                 "not_supported",
                 {},
@@ -3044,10 +3052,11 @@ class DataFetcherManager:
             "institution": institution_status,
             "capital_flow": "not_supported",
             "dragon_tiger": "not_supported",
+            "lockup": "not_supported",
             "boards": "not_supported",
         }
         result_ctx["coverage"] = block_statuses
-        for block in ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "boards"):
+        for block in ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "lockup", "boards"):
             result_ctx["errors"].extend(result_ctx[block].get("errors", []))
             result_ctx["source_chain"].extend(result_ctx[block].get("source_chain", []))
 
@@ -3092,6 +3101,7 @@ class DataFetcherManager:
             "institution",
             "capital_flow",
             "dragon_tiger",
+            "lockup",
             "boards",
         )
         blocks = {
@@ -3167,6 +3177,7 @@ class DataFetcherManager:
             "institution": {},
             "capital_flow": {},
             "dragon_tiger": {},
+            "lockup": {},
             "boards": {},
             "coverage": {},
             "source_chain": [],
@@ -3343,6 +3354,12 @@ class DataFetcherManager:
                 [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
                 ["etf not fully supported"],
             )
+            result_ctx["lockup"] = self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["etf not fully supported"],
+            )
             result_ctx["boards"] = self._build_fundamental_block(
                 "not_supported",
                 {},
@@ -3367,6 +3384,14 @@ class DataFetcherManager:
             )
             _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
 
+            lockup_budget = min(fetch_timeout, remaining_seconds)
+            lockup_start = time.time()
+            result_ctx["lockup"] = self.get_lockup_context(
+                stock_code,
+                budget_seconds=lockup_budget,
+            )
+            _consume_budget(int((time.time() - lockup_start) * 1000))
+
             result_ctx["boards"] = self.get_board_context(
                 stock_code,
                 budget_seconds=min(fetch_timeout, remaining_seconds),
@@ -3379,6 +3404,7 @@ class DataFetcherManager:
             "institution": result_ctx["institution"].get("status", "not_supported"),
             "capital_flow": result_ctx["capital_flow"].get("status", "not_supported"),
             "dragon_tiger": result_ctx["dragon_tiger"].get("status", "not_supported"),
+            "lockup": result_ctx["lockup"].get("status", "not_supported"),
             "boards": result_ctx["boards"].get("status", "not_supported"),
         }
         result_ctx["coverage"] = block_statuses
@@ -3389,6 +3415,7 @@ class DataFetcherManager:
             "institution",
             "capital_flow",
             "dragon_tiger",
+            "lockup",
             "boards",
         ):
             result_ctx["errors"].extend(result_ctx[block].get("errors", []))
@@ -3525,6 +3552,66 @@ class DataFetcherManager:
                 payload.get("source_chain", []),
                 "dragon_tiger",
                 str(payload.get("status", "ok")),
+                cost_ms,
+            ),
+            list(payload.get("errors", [])) + ([err] if err else []),
+        )
+
+    def get_lockup_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """限售解禁块（fail-open, direct HTTP eastmoney datacenter）。"""
+        from src.config import get_config
+
+        config = get_config()
+        stock_code = normalize_stock_code(stock_code)
+        timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
+        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["not supported"],
+            )
+
+        if timeout <= 0:
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
+                ["fundamental stage timeout"],
+            )
+        payload, err, cost_ms = self._run_with_retry(
+            lambda: self._fundamental_adapter.get_lockup_schedule(stock_code),
+            timeout,
+            "lockup",
+        )
+        if not isinstance(payload, dict):
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": cost_ms}],
+                [err or "lockup failed"],
+            )
+        adapter_status = str(payload.get("status", "not_supported"))
+        if adapter_status == "failed":
+            lockup_status = "failed"
+        elif adapter_status == "empty":
+            lockup_status = "empty"
+        elif payload.get("history") or payload.get("upcoming"):
+            lockup_status = "ok"
+        else:
+            lockup_status = "not_supported"
+        return self._build_fundamental_block(
+            lockup_status,
+            {
+                "history": payload.get("history", []),
+                "upcoming": payload.get("upcoming", []),
+                "as_of": payload.get("as_of"),
+                "forward_days": payload.get("forward_days"),
+            },
+            self._normalize_source_chain(
+                payload.get("source_chain", []),
+                "lockup",
+                lockup_status,
                 cost_ms,
             ),
             list(payload.get("errors", [])) + ([err] if err else []),

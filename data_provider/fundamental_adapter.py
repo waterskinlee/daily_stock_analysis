@@ -8,12 +8,17 @@ endpoint candidates. It should never raise to caller; partial data is allowed.
 
 from __future__ import annotations
 
+import io
+import json
 import logging
+import random
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +269,227 @@ def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series
 class AkshareFundamentalAdapter:
     """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
 
+    _EM_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    _EM_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://data.eastmoney.com/",
+    }
+    _THS_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://basic.10jqka.com.cn/",
+    }
+    _HTTP_TIMEOUT_SEC = 15
+
+    def _em_datacenter_get(
+        self,
+        report_name: str,
+        columns: str = "ALL",
+        filter_str: str = "",
+        page_size: int = 20,
+        sort_columns: str = "",
+        sort_types: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Direct-HTTP Eastmoney datacenter query (free, no API key).
+
+        Ported from tradingagents-astock (Apache-2.0)
+        ``tradingagents/dataflows/a_stock.py::_eastmoney_datacenter``.
+        """
+        params: Dict[str, Any] = {
+            "reportName": report_name,
+            "columns": columns,
+            "pageNumber": "1",
+            "pageSize": str(page_size),
+            "source": "WEB",
+            "client": "WEB",
+        }
+        if filter_str:
+            params["filter"] = f"({filter_str})"
+        if sort_columns:
+            params["sortColumns"] = sort_columns
+            params["sortTypes"] = sort_types or "1"
+        resp = requests.get(
+            self._EM_DATACENTER_URL,
+            params=params,
+            headers=self._EM_HEADERS,
+            timeout=self._HTTP_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        result = payload.get("result") or {}
+        data = result.get("data") or []
+        return list(data)
+
+    def _ths_consensus_eps(self, stock_code: str) -> Dict[str, Dict[str, Any]]:
+        """Fetch 同花顺 consensus EPS forecast (direct HTTP, free).
+
+        Ported from tradingagents-astock (Apache-2.0)
+        ``tradingagents/dataflows/a_stock.py::_ths_eps_forecast``.
+        Returns {year_str: {"count", "min", "mean", "max"}}; empty on failure.
+        """
+        url = f"https://basic.10jqka.com.cn/new/{stock_code}/worth.html"
+        resp = requests.get(url, headers=self._THS_HEADERS, timeout=self._HTTP_TIMEOUT_SEC)
+        resp.raise_for_status()
+        resp.encoding = "gbk"
+        dfs = pd.read_html(io.StringIO(resp.text))
+        target_df: Optional[pd.DataFrame] = None
+        for frame in dfs:
+            cols = [str(c) for c in frame.columns]
+            if any("每股收益" in c or "均值" in c for c in cols):
+                target_df = frame
+                break
+        if target_df is None and dfs:
+            target_df = dfs[0]
+        if target_df is None or target_df.empty:
+            return {}
+
+        parsed: Dict[str, Dict[str, Any]] = {}
+        for _, row in target_df.iterrows():
+            if not isinstance(row, pd.Series):
+                continue
+            raw_year = _safe_str(row.iloc[0]) if len(row) > 0 else ""
+            year_digits = re.sub(r"\D", "", raw_year)
+            if len(year_digits) != 4 or not year_digits.isdigit():
+                continue
+            year_str = year_digits
+            def _cell(idx: int) -> Optional[float]:
+                if len(row) <= idx:
+                    return None
+                value = _safe_float(row.iloc[idx])
+                return value
+            parsed[year_str] = {
+                "count": _cell(1),
+                "min": _cell(2),
+                "mean": _cell(3),
+                "max": _cell(4),
+            }
+        return parsed
+
+    def get_lockup_schedule(
+        self,
+        stock_code: str,
+        lookback_days: int = 180,
+        forward_days: int = 90,
+    ) -> Dict[str, Any]:
+        """Eastmoney restricted-share unlock (限售解禁) calendar, direct HTTP.
+
+        Fail-open: never raises. Returns block payload with
+        ``history``/``upcoming`` lists and ``source_chain``/``errors``.
+        """
+        start_ts = time.time()
+        code = _normalize_code(stock_code)
+        today = datetime.now().date()
+        lookback_start = (today - timedelta(days=max(1, int(lookback_days)))).isoformat()
+        forward_end = (today + timedelta(days=max(1, int(forward_days)))).isoformat()
+        errors: List[str] = []
+        source_chain: List[Dict[str, Any]] = []
+        history: List[Dict[str, Any]] = []
+        upcoming: List[Dict[str, Any]] = []
+        status = "ok"
+
+        try:
+            history_rows = self._em_datacenter_get(
+                "RPT_LIFT_STAGE",
+                filter_str=f'SECURITY_CODE="{code}"',
+                page_size=20,
+                sort_columns="FREE_DATE",
+                sort_types="-1",
+            )
+            source_chain.append(
+                {
+                    "provider": "eastmoney_lockup",
+                    "result": "ok" if history_rows else "empty",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                }
+            )
+            for row in history_rows:
+                free_date = str(row.get("FREE_DATE") or "")[:10]
+                if not free_date or free_date < lookback_start or free_date > today.isoformat():
+                    continue
+                history.append(
+                    {
+                        "free_date": free_date,
+                        "share_type": str(row.get("LIMITED_STOCK_TYPE") or ""),
+                        "free_shares": _safe_float(row.get("FREE_SHARES_NUM")),
+                        "free_ratio_pct": _safe_float(row.get("FREE_RATIO")),
+                    }
+                )
+            history.sort(key=lambda item: item.get("free_date") or "", reverse=True)
+        except Exception as exc:
+            errors.append(f"lockup_history:{type(exc).__name__}")
+            source_chain.append(
+                {
+                    "provider": "eastmoney_lockup",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+
+        try:
+            upcoming_rows = self._em_datacenter_get(
+                "RPT_LIFT_STAGE",
+                filter_str=(
+                    f'SECURITY_CODE="{code}"'
+                    f"(FREE_DATE>='{today.isoformat()}')"
+                    f"(FREE_DATE<='{forward_end}')"
+                ),
+                page_size=20,
+                sort_columns="FREE_DATE",
+                sort_types="1",
+            )
+            source_chain.append(
+                {
+                    "provider": "eastmoney_lockup",
+                    "result": "ok" if upcoming_rows else "empty",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                }
+            )
+            for row in upcoming_rows:
+                free_date = str(row.get("FREE_DATE") or "")[:10]
+                if not free_date or free_date < today.isoformat() or free_date > forward_end:
+                    continue
+                upcoming.append(
+                    {
+                        "free_date": str(row.get("FREE_DATE") or "")[:10],
+                        "share_type": str(row.get("LIMITED_STOCK_TYPE") or ""),
+                        "free_shares": _safe_float(row.get("FREE_SHARES_NUM")),
+                        "free_ratio_pct": _safe_float(row.get("FREE_RATIO")),
+                    }
+                )
+            upcoming.sort(key=lambda item: item.get("free_date") or "")
+        except Exception as exc:
+            errors.append(f"lockup_upcoming:{type(exc).__name__}")
+            source_chain.append(
+                {
+                    "provider": "eastmoney_lockup",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+
+        if errors and not history and not upcoming:
+            status = "failed"
+        elif not history and not upcoming and not errors:
+            status = "empty"
+
+        return {
+            "status": status,
+            "history": history[:10],
+            "upcoming": upcoming[:10],
+            "source_chain": source_chain,
+            "errors": errors,
+            "as_of": today.isoformat(),
+            "lookback_days": int(lookback_days),
+            "forward_days": int(forward_days),
+        }
+
     def _call_df_candidates(
         self,
         candidates: List[Tuple[str, Dict[str, Any]]],
@@ -368,6 +594,16 @@ class AkshareFundamentalAdapter:
                     _pick_by_keywords(row, ["快报", "摘要", "公告", "说明"])
                 )[:200]
                 result["source_chain"].append(f"earnings_quick:{quick_source}")
+
+        # Consensus EPS forecast (同花顺一致预期, direct HTTP, free)
+        try:
+            consensus_eps = self._ths_consensus_eps(stock_code)
+        except Exception as exc:
+            consensus_eps = {}
+            result["errors"].append(f"consensus_eps:{type(exc).__name__}")
+        if consensus_eps:
+            result["earnings"]["consensus_eps"] = consensus_eps
+            result["source_chain"].append("earnings_consensus:ths")
 
         # Dividend details (cash dividend, pre-tax)
         dividend_df, dividend_source, dividend_errors = self._call_df_candidates([

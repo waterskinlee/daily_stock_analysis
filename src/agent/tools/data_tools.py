@@ -143,6 +143,7 @@ def _compact_fundamental_context(fundamental_context: dict) -> dict:
         "institution",
         "capital_flow",
         "dragon_tiger",
+        "lockup",
         "boards",
     )
     compact = {

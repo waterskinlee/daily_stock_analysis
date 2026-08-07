@@ -79,7 +79,7 @@ DSA_SCREENING_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
 )
 _DSA_FETCHER_MANAGER_LOCK = threading.RLock()
 _DSA_FETCHER_MANAGER: Any = None
-_FUNDAMENTAL_BLOCKS = ("valuation", "growth", "earnings", "institution", "capital_flow", "boards")
+_FUNDAMENTAL_BLOCKS = ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "lockup", "boards")
 _SCREENING_LITELLM_COMPLETION_ROUTES: ContextVar[Optional[Tuple[Dict[str, Any], ...]]] = ContextVar(
     "screening_litellm_completion_routes",
     default=None,

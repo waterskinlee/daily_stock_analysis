@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
+- [新功能] 基本面管线新增「限售解禁」块（东财 datacenter 直连，免费无 key）：按代码返回近 180 天历史解禁与未来 90 天待解禁（类型/数量/占比），聚合进 `fundamental_context.lockup` 与 coverage，A 股适用、ETF/离岸标记 `not_supported`、全程 fail-open（移植自 tradingagents-astock，Apache-2.0，保留归因）。
+- [新功能] 基本面 earnings 块新增「一致预期 EPS」（同花顺 worth.html 直连，免费无 key）：按年度返回预测机构数/最小/均值/最大，存入 `earnings.consensus_eps`；同花顺不可达时 fail-open 不影响其余块（移植自 tradingagents-astock，Apache-2.0，保留归因）。
+- [新功能] 新闻搜索新增「7x24 快讯直连」兜底源（`CLS_WIRE_ENABLED=true`，免费无 key）：优先财联社电报，CLS 接口 404 时自动回退东财 7x24 快讯（生产网络实测 200），全部搜索引擎失败时仍可提供最新电报；按查询词客户端过滤并按 NEWS_MAX_AGE_DAYS 时效过滤（移植自 tradingagents-astock，Apache-2.0，保留归因）。
+
 - [改进] 后端 CI 在不跳过离线测试的前提下按完整测试文件分成三个独立 runner 并行执行，由单一 `backend-gate` 汇总门禁结果；实测文件耗时和首分片静态检查成本共同参与负载平衡，新测试文件自动纳入，现有 pip 安装和测试参数保持不变，避免 xdist 进程内并发的全局状态竞态。
 - [测试] 后端 CI 默认覆盖所有非 Web 改动，仅对已证明安全的纯 Web 路径跳过，并将整个 Web public 目录及前端渠道模板、设置帮助视为跨层运行合同；补充纯 Web、共享 Web 资产及 Web/非 Web 混合改动的过滤语义回归，明确 `predicate-quantifier: every` 按单文件匹配全部规则、再以任一匹配文件触发门禁。Docker CI 继续按构建输入过滤。离线测试保留稳定的串行执行与慢用例摘要，并移除重复用例和测试内真实等待。
 
