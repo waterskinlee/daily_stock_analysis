@@ -3196,88 +3196,19 @@ class DataFetcherManager:
             nonlocal remaining_seconds
             remaining_seconds = max(0.0, remaining_seconds - consumed_ms / 1000.0)
 
-        # Consensus EPS + lockup: fast keyless direct-HTTP blocks (~0.2-0.5s)
-        # fetched FIRST so even tight budgets (screening enrich = 4s) reliably
-        # cover them, and the slow akshare bundle later can never starve them.
-        # CN non-ETF only; fail-open.
-        quick_eps: Dict[str, Any] = {}
-        quick_eps_ms = 0
-        if not is_etf:
-            eps_budget = min(fetch_timeout, remaining_seconds)
-            if eps_budget > 0:
-                eps_start = time.time()
-                try:
-                    quick_eps = self._fundamental_adapter._ths_consensus_eps(stock_code) or {}
-                    if not isinstance(quick_eps, dict):
-                        quick_eps = {}
-                except Exception as exc:  # noqa: BLE001 - keyless feed, fail-open
-                    logger.warning("consensus EPS fetch failed for %s: %s", stock_code, exc)
-                    quick_eps = {}
-                quick_eps_ms = int((time.time() - eps_start) * 1000)
-                _consume_budget(quick_eps_ms)
-
-            lockup_budget = min(fetch_timeout, remaining_seconds)
-            lockup_start = time.time()
-            result_ctx["lockup"] = self.get_lockup_context(
-                stock_code,
-                budget_seconds=lockup_budget,
-            )
-            _consume_budget(int((time.time() - lockup_start) * 1000))
-
-            # Dragon-tiger: akshare LHB (eastmoney datacenter, ~0.6-1s standalone)
-            # — also run before the slow akshare bundle so the stage budget
-            # reliably covers it (it would otherwise starve after the bundle).
-            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
-            dragon_tiger_start = time.time()
-            result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
-                stock_code,
-                budget_seconds=dragon_tiger_budget,
-            )
-            _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
-
-        valuation_timeout = min(fetch_timeout, remaining_seconds)
-        if valuation_timeout > 0:
-            quote_payload, valuation_err, valuation_ms = self._run_with_retry(
-                lambda: self.get_realtime_quote(stock_code),
-                valuation_timeout,
-                "fundamental_valuation",
-            )
-            _consume_budget(valuation_ms)
-        else:
-            quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
-
-        valuation_payload = {
-            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
-            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
-            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
-            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
-        }
-        valuation_status = self._infer_block_status(
-            valuation_payload,
-            "partial" if quote_payload is not None else "not_supported",
-        )
-        if valuation_status == "partial" and valuation_err and not self._has_meaningful_payload(valuation_payload):
-            valuation_status = "failed"
-        result_ctx["valuation"] = self._build_fundamental_block(
-            valuation_status,
-            valuation_payload,
-            self._normalize_source_chain(
-                [{"provider": "realtime_quote", "result": valuation_status, "duration_ms": valuation_ms}],
-                "realtime_quote",
-                valuation_status,
-                valuation_ms,
-            ),
-            [valuation_err] if valuation_err else [],
-        )
-
-        if remaining_seconds <= 0:
-            bundle_status = "failed"
-            bundle_payload: Dict[str, Any] = {}
-            bundle_errors = ["fundamental stage timeout"]
-            bundle_ms = 0
-        else:
-            bundle_timeout = min(fetch_timeout, remaining_seconds)
-
+        # ---- fundamental bundle FIRST ----
+        # tushare 化后 bundle 是信息密度最高的块（growth/earnings/institution 三块
+        # 一次拿全，fina/income/cashflow/forecast/express/dividend/top10/zlsj 共
+        # ~7-8 次调用 ≈ 2s）。在 4s 选股 enrich 预算下只有把它放最前才能保证
+        # 三块齐全；EPS/lockup/龙虎榜等轻块随后，剩多少跑多少，fail-open。
+        # （历史顺序把 bundle 放最后导致 4s 预算被轻块耗尽，growth/earnings/
+        #  institution 在选股场景全空——见 dsa 选股 enrich 实测。）
+        bundle_payload: Dict[str, Any] = {}
+        bundle_status = "not_supported"
+        bundle_errors: List[str] = []
+        bundle_ms = 0
+        bundle_timeout = min(fetch_timeout, remaining_seconds)
+        if bundle_timeout > 0:
             def _fundamental_bundle_task() -> Dict[str, Any]:
                 # Prefer TushareFetcher bundle (fast keyless-proxy calls ~0.3s
                 # each) so growth/institution populate within the budget; fall
@@ -3323,6 +3254,45 @@ class DataFetcherManager:
             else:
                 bundle_status = str(bundle_payload.get("status", "not_supported"))
                 bundle_errors = [bundle_err_msg] if bundle_err_msg else []
+        else:
+            bundle_status = "failed"
+            bundle_errors = ["fundamental stage timeout"]
+            bundle_ms = 0
+
+        # ---- Consensus EPS + lockup + dragon-tiger: light blocks AFTER bundle ----
+        # 快速 keyless 块（EPS ~0.3s / lockup ~0.3s / 龙虎榜 ~1s）：bundle 之后
+        # 剩多少预算跑多少，预算不足时 fail-open，绝不反饿 bundle。
+        quick_eps: Dict[str, Any] = {}
+        quick_eps_ms = 0
+        if not is_etf:
+            eps_budget = min(fetch_timeout, remaining_seconds)
+            if eps_budget > 0:
+                eps_start = time.time()
+                try:
+                    quick_eps = self._fundamental_adapter._ths_consensus_eps(stock_code) or {}
+                    if not isinstance(quick_eps, dict):
+                        quick_eps = {}
+                except Exception as exc:  # noqa: BLE001 - keyless feed, fail-open
+                    logger.warning("consensus EPS fetch failed for %s: %s", stock_code, exc)
+                    quick_eps = {}
+                quick_eps_ms = int((time.time() - eps_start) * 1000)
+                _consume_budget(quick_eps_ms)
+
+            lockup_budget = min(fetch_timeout, remaining_seconds)
+            lockup_start = time.time()
+            result_ctx["lockup"] = self.get_lockup_context(
+                stock_code,
+                budget_seconds=lockup_budget,
+            )
+            _consume_budget(int((time.time() - lockup_start) * 1000))
+
+            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
+            dragon_tiger_start = time.time()
+            result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
+                stock_code,
+                budget_seconds=dragon_tiger_budget,
+            )
+            _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
 
         bundle_chain = self._normalize_source_chain(
             bundle_payload.get("source_chain", []),
@@ -3351,45 +3321,10 @@ class DataFetcherManager:
         else:
             institution_payload = dict(institution_payload)
 
-        # Derive TTM dividend yield from already-fetched quote price; avoid extra quote calls.
-        earnings_extra_errors: List[str] = []
-        dividend_payload = earnings_payload.get("dividend")
-        if isinstance(dividend_payload, dict):
-            dividend_payload = dict(dividend_payload)
-            ttm_cash_raw = dividend_payload.get("ttm_cash_dividend_per_share")
-            ttm_cash = None
-            if ttm_cash_raw is not None:
-                try:
-                    ttm_cash = float(ttm_cash_raw)
-                except (TypeError, ValueError):
-                    earnings_extra_errors.append("invalid_ttm_cash_dividend_per_share")
-            if isinstance(quote_payload, dict):
-                latest_price_raw = quote_payload.get("price")
-            else:
-                latest_price_raw = getattr(quote_payload, "price", None) if quote_payload else None
-            latest_price = None
-            if latest_price_raw is not None:
-                try:
-                    latest_price = float(latest_price_raw)
-                except (TypeError, ValueError):
-                    latest_price = None
-            ttm_yield = None
-            if ttm_cash is not None:
-                if latest_price is not None and latest_price > 0:
-                    ttm_yield = round(ttm_cash / latest_price * 100.0, 4)
-                else:
-                    earnings_extra_errors.append("invalid_price_for_ttm_dividend_yield")
-
-            dividend_payload["ttm_dividend_yield_pct"] = ttm_yield
-            if ttm_yield is not None:
-                dividend_payload["yield_formula"] = "ttm_cash_dividend_per_share / latest_price * 100"
-            earnings_payload["dividend"] = dividend_payload
-
         adapter_errors = list(bundle_payload.get("errors", [])) if isinstance(bundle_payload, dict) else []
         adapter_errors.extend(bundle_errors)
         growth_errors = list(adapter_errors)
         earnings_errors = list(adapter_errors)
-        earnings_errors.extend(earnings_extra_errors)
         institution_errors = list(adapter_errors)
 
         # Consensus EPS fetched as a quick keyless block BEFORE the slow akshare
@@ -3410,6 +3345,44 @@ class DataFetcherManager:
         earnings_status = self._infer_block_status(earnings_payload, bundle_status)
         institution_status = self._infer_block_status(institution_payload, bundle_status)
 
+        # ---- valuation (realtime quote pe/pb/mv) AFTER light blocks ----
+        # 实时行情已有 daily_basic 补全（~0.4s），预算充足时提供 valuation 块；
+        # 预算被 bundle+轻块耗尽时 fail-open（not_supported），不再反饿 bundle。
+        valuation_timeout = min(fetch_timeout, remaining_seconds)
+        if valuation_timeout > 0:
+            quote_payload, valuation_err, valuation_ms = self._run_with_retry(
+                lambda: self.get_realtime_quote(stock_code),
+                valuation_timeout,
+                "fundamental_valuation",
+            )
+            _consume_budget(valuation_ms)
+        else:
+            quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
+
+        valuation_payload = {
+            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
+            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
+            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
+            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
+        }
+        valuation_status = self._infer_block_status(
+            valuation_payload,
+            "partial" if quote_payload is not None else "not_supported",
+        )
+        if valuation_status == "partial" and valuation_err and not self._has_meaningful_payload(valuation_payload):
+            valuation_status = "failed"
+        result_ctx["valuation"] = self._build_fundamental_block(
+            valuation_status,
+            valuation_payload,
+            self._normalize_source_chain(
+                [{"provider": "realtime_quote", "result": valuation_status, "duration_ms": valuation_ms}],
+                "realtime_quote",
+                valuation_status,
+                valuation_ms,
+            ),
+            [valuation_err] if valuation_err else [],
+        )
+
         result_ctx["growth"] = self._build_fundamental_block(
             growth_status,
             growth_payload,
@@ -3428,6 +3401,47 @@ class DataFetcherManager:
             bundle_chain,
             institution_errors,
         )
+
+        # Derive TTM dividend yield from already-fetched quote price; avoid extra quote calls.
+        # （valuation 块在 bundle/轻块之后执行，此处 quote_payload 已就绪。）
+        earnings_extra_errors_ttm: List[str] = []
+        dividend_payload = earnings_payload.get("dividend")
+        if isinstance(dividend_payload, dict):
+            dividend_payload = dict(dividend_payload)
+            ttm_cash_raw = dividend_payload.get("ttm_cash_dividend_per_share")
+            ttm_cash = None
+            if ttm_cash_raw is not None:
+                try:
+                    ttm_cash = float(ttm_cash_raw)
+                except (TypeError, ValueError):
+                    earnings_extra_errors_ttm.append("invalid_ttm_cash_dividend_per_share")
+            if isinstance(quote_payload, dict):
+                latest_price_raw = quote_payload.get("price")
+            else:
+                latest_price_raw = getattr(quote_payload, "price", None) if quote_payload else None
+            latest_price = None
+            if latest_price_raw is not None:
+                try:
+                    latest_price = float(latest_price_raw)
+                except (TypeError, ValueError):
+                    latest_price = None
+            ttm_yield = None
+            if ttm_cash is not None:
+                if latest_price is not None and latest_price > 0:
+                    ttm_yield = round(ttm_cash / latest_price * 100.0, 4)
+                else:
+                    earnings_extra_errors_ttm.append("invalid_price_for_ttm_dividend_yield")
+
+            dividend_payload["ttm_dividend_yield_pct"] = ttm_yield
+            if ttm_yield is not None:
+                dividend_payload["yield_formula"] = "ttm_cash_dividend_per_share / latest_price * 100"
+            earnings_payload["dividend"] = dividend_payload
+            result_ctx["earnings"] = self._build_fundamental_block(
+                earnings_status,
+                earnings_payload,
+                earnings_chain,
+                earnings_errors + earnings_extra_errors_ttm,
+            )
 
         # capital flow
         if is_etf:
