@@ -2256,6 +2256,30 @@ class SinaNewsSearchProvider(BaseSearchProvider):
         text = re.sub(r"<[^>]+>", "", str(raw or ""))
         return re.sub(r"\s+", " ", text).strip()
 
+    # 新浪把多词查询当 OR 处理：DSA 通用查询「贵州茅台 600519 股票 最新消息」
+    # 会被拆成 OR 词返回台风/高铁等泛化新闻。这些噪音词/代码需在发给新浪前清理。
+    _SINA_NOISE_TERMS = (
+        "股票", "最新消息", "最新", "消息", "A股", "a股", "催化",
+        "上市公司", "个股", "行情", "走势",
+    )
+
+    @classmethod
+    def _clean_query(cls, query: str) -> str:
+        """简化查询：去掉 DSA 通用噪音词与 6 位股票代码，保留核心公司名+事件词。
+
+        ``贵州茅台 600519 股票 最新消息`` -> ``贵州茅台``
+        ``贵州茅台 (年报预告 OR 减持公告)`` -> ``贵州茅台 (年报预告 OR 减持公告)``
+        仅当清理后仍有 ≥2 字内容才返回，否则保持原查询。
+        """
+        q = str(query or "").strip()
+        if not q:
+            return q
+        cleaned = re.sub(r"\b\d{6}\b", " ", q)  # 6 位 A 股代码
+        for term in cls._SINA_NOISE_TERMS:
+            cleaned = re.sub(re.escape(term), " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t()（）|")
+        return cleaned if len(cleaned) >= 2 else q
+
     @staticmethod
     def _format_time(ctime: Any) -> Optional[str]:
         try:
@@ -2277,11 +2301,12 @@ class SinaNewsSearchProvider(BaseSearchProvider):
     ) -> SearchResponse:
         cutoff = time.time() - max(1, int(days)) * 86400
         results: List[SearchResult] = []
+        sina_query = self._clean_query(query)
         try:
             resp = requests.get(
                 self.SINA_SEARCH_URL,
                 params={
-                    "q": query,
+                    "q": sina_query,
                     "tp": "news",
                     "sort": "0",
                     "page": "1",
@@ -3276,7 +3301,7 @@ class SearchService:
         return terms
 
     @classmethod
-    def _company_identity_terms(cls, stock_name: str) -> List[str]:
+    def _company_identity_terms(cls, stock_name: str, stock_code: Optional[str] = None) -> List[str]:
         """Return conservative company-name variants for relevance matching."""
         raw = (stock_name or "").strip()
         if not raw:
@@ -3296,6 +3321,16 @@ class SearchService:
             ).strip()
             if len(cleaned) >= 4:
                 cls._append_unique(terms, cleaned)
+            # 中文短名（贵州茅台 -> 茅台）：仅用于 A 股中文名匹配；
+            # 港股/美股中文名（如“腾讯控股”->“控股”）不加，避免误伤
+            # 相似公司名（腾讯控股 vs 腾讯音乐）。
+            code_raw = (stock_code or "") if stock_code else ""
+            is_cn_6digit = (
+                code_raw.isdigit()
+                and len(code_raw) == 6
+            )
+            if is_cn_6digit and len(cleaned) >= 2:
+                cls._append_unique(terms, cleaned[-2:])
         else:
             cleaned = re.sub(
                 r"\b(incorporated|inc|corporation|corp|company|co|plc|ltd|limited|holdings?)\.?$",
@@ -3626,7 +3661,7 @@ class SearchService:
                         add_reason(f"链接命中股票代码 {term}")
                         break
 
-        for term in cls._company_identity_terms(stock_name):
+        for term in cls._company_identity_terms(stock_name, stock_code=stock_code):
             ambiguous_en = (
                 not cls._contains_chinese_text(term)
                 and term.lower() in cls._AMBIGUOUS_EN_COMPANY_NAMES

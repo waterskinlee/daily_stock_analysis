@@ -39,6 +39,38 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
     def _provider(self, enabled=True):
         return SinaNewsSearchProvider(enabled=enabled)
 
+    def test_cleans_dsa_generic_query_for_sina(self) -> None:
+        """「贵州茅台 600519 股票 最新消息」清理为「贵州茅台」，新浪 OR 语义不再被噪音词污染。"""
+        provider = self._provider()
+        self.assertEqual(provider._clean_query("贵州茅台 600519 股票 最新消息"), "贵州茅台")
+        self.assertEqual(provider._clean_query("贵州茅台 600519"), "贵州茅台")
+        # 事件查询保留事件词
+        self.assertIn("减持", provider._clean_query("贵州茅台 (年报预告 OR 减持公告)"))
+        # 空/过短回退原查询
+        self.assertEqual(provider._clean_query("股票 最新消息"), "股票 最新消息")
+        self.assertEqual(provider._clean_query("600519"), "600519")
+
+    def test_uses_cleaned_query_in_request(self) -> None:
+        provider = self._provider()
+        payload = _payload(
+            [
+                {
+                    "title": "飞天茅台再涨价！",
+                    "intro": "x",
+                    "url": "https://finance.sina.com.cn/a.shtml",
+                    "ctime": _NOW - 60,
+                    "media_show": "21世纪经济报道",
+                }
+            ]
+        )
+        with patch(
+            "src.search_service.requests.get",
+            return_value=MagicMock(status_code=200, json=lambda: payload),
+        ) as m:
+            resp = provider.search("贵州茅台 600519 股票 最新消息", max_results=3, days=7)
+        self.assertTrue(resp.success)
+        self.assertEqual(m.call_args.kwargs["params"]["q"], "贵州茅台")
+
     def test_parses_title_intro_url_and_date(self) -> None:
         provider = self._provider()
         payload = _payload(
