@@ -2205,10 +2205,18 @@ class AkshareFetcher(BaseFetcher):
         date: Optional[str] = None,
         n: int = 20,
     ) -> Optional[List[Dict[str, Any]]]:
-        """获取涨停池，优先按连板数和封板时间展示。"""
+        """获取涨停池，优先按连板数和封板时间展示。
+
+        优先 push2ex 直连（getTopicZTPool，实测 200，push2 被服务端拒但
+        push2ex 通）；失败回退 akshare stock_zt_pool_em。
+        """
+        query_date = date or datetime.now().strftime('%Y%m%d')
+        rows = self._get_limit_up_pool_push2ex(query_date, n)
+        if rows:
+            return rows
+
         import akshare as ak
 
-        query_date = date or datetime.now().strftime('%Y%m%d')
         try:
             self._set_random_user_agent()
             self._enforce_rate_limit()
@@ -2251,6 +2259,68 @@ class AkshareFetcher(BaseFetcher):
         except Exception as e:
             logger.warning(f"[Akshare] 获取涨停池失败: {e}")
             return None
+
+    def _get_limit_up_pool_push2ex(
+        self,
+        query_date: str,
+        n: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """push2ex 涨停池直连（getTopicZTPool），与 akshare stock_zt_pool_em 同源。
+
+        实测 200（push2 被服务端拒但 push2ex 通）。返回与 akshare 同构字段。
+        """
+        import requests
+
+        url = "https://push2ex.eastmoney.com/getTopicZTPool"
+        params = {
+            "ut": "7eea3edcaed734bea9cbfc24409ed989",
+            "dpt": "wz.ztzt",
+            "Pageindex": 0,
+            "pagesize": max(100, n * 3),
+            "sort": "fbt:asc",
+            "date": query_date,
+        }
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            payload = resp.json()
+            if int(payload.get("rc") or 0) != 0:
+                return None
+            pool = (payload.get("data") or {}).get("pool") or []
+            if not isinstance(pool, list) or not pool:
+                return None
+        except Exception as exc:  # noqa: BLE001 - fail-open to akshare
+            logger.warning(f"[Akshare] push2ex 涨停池失败: {type(exc).__name__}")
+            return None
+
+        rows: List[Dict[str, Any]] = []
+        for p in pool[:n]:
+            if not isinstance(p, dict):
+                continue
+            zttj = p.get("zttj") or {}
+            rows.append({
+                "code": str(p.get("c", "")).strip(),
+                "name": str(p.get("n", "")).strip(),
+                "change_pct": self._safe_float(p.get("zdp")),
+                "price": self._safe_float(p.get("p")) / 1000 if p.get("p") is not None else None,
+                "amount": self._safe_float(p.get("amount")),
+                "turnover_rate": self._safe_float(p.get("hs")),
+                "seal_amount": self._safe_float(p.get("fund")),
+                "first_limit_time": self._normalize_limit_time_value(p.get("fbt")),
+                "last_limit_time": self._normalize_limit_time_value(p.get("lbt")),
+                "break_count": self._safe_int(p.get("zbc")),
+                "limit_stat": f"{zttj.get('days', '?')}天{zttj.get('ct', '?')}板",
+                "consecutive_boards": self._safe_int(p.get("lbc")),
+                "industry": str(p.get("hybk", "")).strip(),
+            })
+        return rows if rows else None
 
     @staticmethod
     def _normalize_limit_time_value(value: Any) -> str:

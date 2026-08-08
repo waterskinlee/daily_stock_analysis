@@ -50,6 +50,57 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         self.assertEqual(provider._clean_query("股票 最新消息"), "股票 最新消息")
         self.assertEqual(provider._clean_query("600519"), "600519")
 
+    def test_cls_v1_sign_matches_expected(self) -> None:
+        """财联社 v1 签名 = md5(sha1(按 key 字典序拼接 query))，实测 errno=0。"""
+        from src.search_service import ClsWireSearchProvider
+
+        params = {
+            "appName": "CailianpressWeb",
+            "os": "web",
+            "sv": "7.7.5",
+            "last_time": "",
+            "refresh_type": "1",
+            "rn": "5",
+        }
+        sign = ClsWireSearchProvider._cls_sign(params)
+        self.assertIsInstance(sign, str)
+        self.assertEqual(len(sign), 32)  # md5 hex
+        # 确定性：相同参数 -> 相同签名
+        self.assertEqual(sign, ClsWireSearchProvider._cls_sign(dict(params)))
+
+    def test_cls_fetch_uses_v1_signed_url(self) -> None:
+        """_fetch_cls 用 v1/roll/get_roll_list + sign，解析 roll_data。"""
+        from src.search_service import ClsWireSearchProvider
+
+        provider = ClsWireSearchProvider(enabled=True)
+        payload = {
+            "errno": 0,
+            "msg": "",
+            "data": {
+                "roll_data": [
+                    {
+                        "title": "",
+                        "content": "【贵州茅台】飞天茅台自营店再调价，散客可购买…",
+                        "ctime": _NOW - 60,
+                        "id": "12345",
+                    }
+                ]
+            },
+        }
+        with patch(
+            "src.search_service.requests.get",
+            return_value=MagicMock(status_code=200, json=lambda: payload),
+        ) as m:
+            results, err = provider._fetch_cls("贵州茅台", 3, 7)
+
+        self.assertIsNone(err)
+        self.assertEqual(len(results), 1)
+        self.assertIn("贵州茅台", results[0].snippet)
+        # 请求 URL 用 v1/roll/get_roll_list，且带 sign 参数
+        call_params = m.call_args.kwargs.get("params", {})
+        self.assertIn("sign", call_params)
+        self.assertEqual(call_params["appName"], "CailianpressWeb")
+
     def test_uses_cleaned_query_in_request(self) -> None:
         provider = self._provider()
         payload = _payload(

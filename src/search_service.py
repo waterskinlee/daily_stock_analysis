@@ -2795,7 +2795,7 @@ class ClsWireSearchProvider(BaseSearchProvider):
     stock/topic when possible.
     """
 
-    CLS_WIRE_URL = "https://www.cls.cn/nodeapi/telegraphList"
+    CLS_WIRE_URL = "https://www.cls.cn/v1/roll/get_roll_list"
     EM_WIRE_URL = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
     WIRE_HEADERS = {
         "User-Agent": (
@@ -2806,6 +2806,18 @@ class ClsWireSearchProvider(BaseSearchProvider):
     }
     WIRE_TIMEOUT_SECONDS = 10
     WIRE_MAX_ITEMS = 40
+
+    @staticmethod
+    def _cls_sign(params: Dict[str, Any]) -> str:
+        """财联社 v1 API 本地签名：md5(sha1(按 key 字典序拼接的 query 串))。
+
+        旧 nodeapi/telegraphList 2026-05 下线（404），改走官方 v1/roll/
+        get_roll_list + 本地签名（零 key）。实测 errno=0。
+        """
+        import hashlib
+
+        qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        return hashlib.md5(hashlib.sha1(qs.encode()).hexdigest().encode()).hexdigest()
 
     def __init__(self, enabled: bool = True):
         super().__init__([], "CLS")
@@ -2901,7 +2913,16 @@ class ClsWireSearchProvider(BaseSearchProvider):
 
     def _fetch_cls(self, query: str, max_results: int, days: int) -> Tuple[List[SearchResult], Optional[str]]:
         try:
-            params = {"rn": str(max(self.WIRE_MAX_ITEMS, max_results)), "page": "1"}
+            params = {
+                "appName": "CailianpressWeb",
+                "os": "web",
+                "sv": "7.7.5",
+                "last_time": "",
+                "refresh_type": "1",
+                "rn": str(max(self.WIRE_MAX_ITEMS, max_results)),
+            }
+            sign = self._cls_sign(params)
+            params["sign"] = sign
             response = requests.get(
                 self.CLS_WIRE_URL,
                 params=params,
@@ -2911,6 +2932,8 @@ class ClsWireSearchProvider(BaseSearchProvider):
             if response.status_code != 200:
                 return [], f"CLS HTTP {response.status_code}"
             payload = response.json()
+            if int(payload.get("errno") or 0) != 0:
+                return [], f"CLS errno={payload.get('errno')}"
             raw_items = (payload.get("data") or {}).get("roll_data") or []
             if not isinstance(raw_items, list):
                 raw_items = []

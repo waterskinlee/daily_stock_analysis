@@ -1617,6 +1617,10 @@ class TushareFetcher(BaseFetcher):
                         "institution_ratio_change",
                         "hold_direction",
                         "report_date",
+                        "holder_num",
+                        "holder_num_change",
+                        "holder_num_ratio",
+                        "holder_report_date",
                     ):
                         if detail.get(key) is not None:
                             result["institution"][key] = detail[key]

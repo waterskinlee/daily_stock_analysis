@@ -603,6 +603,16 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
                         "HOLDCHA_NUM": -25422467,
                     }
                 ]
+            if report_name == "RPT_HOLDERNUMLATEST":
+                return [
+                    {
+                        "SECURITY_CODE": "600519",
+                        "HOLDER_NUM": 243159,
+                        "HOLDER_NUM_CHANGE": -12733,
+                        "HOLDER_NUM_RATIO": -4.98,
+                        "END_DATE": "2026-06-30",
+                    }
+                ]
             return []
 
         with patch.object(
@@ -617,6 +627,10 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(detail["hold_direction"], "减仓")
         self.assertEqual(detail["report_date"], "2026-06-30")
         self.assertEqual(detail["source"], "eastmoney_zlsj")
+        # 股东户数（筹码集中度）
+        self.assertEqual(detail["holder_num"], 243159.0)
+        self.assertEqual(detail["holder_num_change"], -12733.0)
+        self.assertAlmostEqual(detail["holder_num_ratio"], -4.98, places=2)
 
     def test_get_institution_holdings_detail_falls_back_to_akshare(self) -> None:
         """zlsj 失败/无数据时回退 akshare stock_institute_hold。"""

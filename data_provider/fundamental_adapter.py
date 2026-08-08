@@ -592,6 +592,35 @@ class AkshareFundamentalAdapter:
                         result["hold_direction"] = direction
                     result["report_date"] = report_date
                     result["source"] = "eastmoney_zlsj"
+                    # 股东户数（筹码集中度）：RPT_HOLDERNUMLATEST，同 datacenter 直连。
+                    # 户数持续减少 = 筹码集中 = 主力吸筹信号（fail-open）。
+                    try:
+                        holder_rows = self._em_datacenter_get(
+                            "RPT_HOLDERNUMLATEST",
+                            columns="ALL",
+                            filter_str=f'(SECURITY_CODE="{stock_code}")',
+                            page_size=4,
+                            sort_columns="END_DATE",
+                            sort_types="-1",
+                        )
+                        if holder_rows:
+                            h = holder_rows[0]
+                            for key, src_key in (
+                                ("holder_num", "HOLDER_NUM"),
+                                ("holder_num_change", "HOLDER_NUM_CHANGE"),
+                                ("holder_num_ratio", "HOLDER_NUM_RATIO"),
+                            ):
+                                val = _safe_float(h.get(src_key))
+                                if val is not None:
+                                    result[key] = val
+                            if h.get("END_DATE"):
+                                result["holder_report_date"] = str(h.get("END_DATE"))[:10]
+                    except Exception as exc:  # noqa: BLE001 - fail-open
+                        logger.debug(
+                            "[AkshareFundamentalAdapter] 股东户数失败 %s: %s",
+                            stock_code,
+                            type(exc).__name__,
+                        )
                     return result
         except Exception as exc:  # noqa: BLE001 - fail-open
             logger.debug(
