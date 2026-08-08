@@ -111,7 +111,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
             )
         with patch(
             "src.services.screening_service._enrich_candidates_with_dsa",
-            side_effect=lambda candidates: (
+            side_effect=lambda candidates, **kwargs: (
                 candidates,
                 {
                     "enabled": True,

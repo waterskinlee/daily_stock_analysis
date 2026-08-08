@@ -1265,7 +1265,10 @@ class ScreeningService:
             92,
             "正在补充入选股票的新闻与事件",
         )
-        selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
+        selected, dsa_enrichment = _enrich_candidates_with_dsa(
+            selected,
+            max_results=max_results,
+        )
         warnings = _collect_screening_warning_messages(raw_data)
         response = {
             "enabled": True,
@@ -3461,10 +3464,26 @@ def get_dsa_candidate_context(
     return context.get("dsa_context", {})
 
 
-def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _enrich_candidates_with_dsa(
+    candidates: List[Dict[str, Any]],
+    *,
+    max_results: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Enrich candidates with DSA fundamentals/news/events.
+
+    Enrich 数量跟随页面「返回数量」max_results：LLM 排序要排多少只，就给多少只
+    喂全量上下文（每只 15s 预算 = 完整个股分析同款）。受 LLM 候选上限
+    （DSA_SCREENING_LLM_MAX_CANDIDATES=12）约束，避免用户填 100 时逐只 15s
+    拖到 25 分钟。默认回退 DSA_ENRICHMENT_MAX_CANDIDATES=3（历史护栏）。
+    """
     enriched_count = 0
     warnings: List[str] = []
-    limit = min(len(candidates), DSA_ENRICHMENT_MAX_CANDIDATES)
+    requested = (
+        max_results
+        if isinstance(max_results, int) and max_results > 0
+        else DSA_ENRICHMENT_MAX_CANDIDATES
+    )
+    limit = min(len(candidates), _resolve_dsa_llm_max_candidates(requested))
 
     for index, candidate in enumerate(candidates):
         if index >= limit:
@@ -3505,7 +3524,7 @@ def _enrich_candidates_with_dsa(candidates: List[Dict[str, Any]]) -> Tuple[List[
 
     return candidates, {
         "enabled": True,
-        "max_candidates": DSA_ENRICHMENT_MAX_CANDIDATES,
+        "max_candidates": limit,
         "requested_count": limit,
         "enriched_count": enriched_count,
         "warnings": _dedupe_strings(warnings),
