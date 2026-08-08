@@ -633,6 +633,12 @@ class DataFetcherManager:
     _CONCEPT_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
     _concept_rankings_cache_lock = RLock()
     _concept_rankings_cache: Dict[int, Tuple[float, List[Dict], List[Dict]]] = {}
+    # 板块排行（行业）是市场级数据，与个股无关：多只候选 enrich 时每只都拉
+    # moneyflow_ind_ths 是浪费（0.4s/次 × N）。60s 共享缓存一次拉取全复用。
+    _SECTOR_RANKINGS_CACHE_TTL_SECONDS = 60.0
+    _SECTOR_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
+    _sector_rankings_cache_lock = RLock()
+    _sector_rankings_cache: Dict[int, Tuple[float, List[Dict], List[Dict]]] = {}
 
     def __init__(self, fetchers: Optional[List[BaseFetcher]] = None):
         """
@@ -3834,13 +3840,42 @@ class DataFetcherManager:
             return [], [], source_chain, last_error
 
     def get_sector_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
-        """获取板块涨跌榜（自动切换数据源）"""
+        """获取板块涨跌榜（自动切换数据源）。
+
+        板块排行是市场级数据（与个股无关）：多只选股候选 enrich 时每只都拉
+        moneyflow_ind_ths 是浪费。60s 共享缓存（按 n）一次拉取全复用。
+        """
+        try:
+            normalized_n = int(n)
+        except (TypeError, ValueError):
+            normalized_n = 5
+        if normalized_n <= 0:
+            normalized_n = 5
+
+        now = time.monotonic()
+        with self.__class__._sector_rankings_cache_lock:
+            cached = self.__class__._sector_rankings_cache.get(normalized_n)
+            if cached and cached[0] > now:
+                logger.debug("[板块排行] 命中共享缓存 n=%s", normalized_n)
+                return self._copy_ranking_rows(cached[1]), self._copy_ranking_rows(cached[2])
+
         # 按需求固定回退顺序：Akshare(EM) -> Akshare(Sina) -> Tushare -> Efinance
-        top, bottom, _, last_error = self._get_sector_rankings_with_meta(n)
-        if top or bottom:
-            return top, bottom
-        logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")
-        return [], []
+        top, bottom, _, last_error = self._get_sector_rankings_with_meta(normalized_n)
+        if not top and not bottom:
+            logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")
+
+        ttl = (
+            self.__class__._SECTOR_RANKINGS_CACHE_TTL_SECONDS
+            if top or bottom
+            else self.__class__._SECTOR_RANKINGS_EMPTY_CACHE_TTL_SECONDS
+        )
+        with self.__class__._sector_rankings_cache_lock:
+            self.__class__._sector_rankings_cache[normalized_n] = (
+                time.monotonic() + ttl,
+                self._copy_ranking_rows(top),
+                self._copy_ranking_rows(bottom),
+            )
+        return self._copy_ranking_rows(top), self._copy_ranking_rows(bottom)
 
     @staticmethod
     def _copy_ranking_rows(rows: List[Dict]) -> List[Dict]:
@@ -3850,6 +3885,8 @@ class DataFetcherManager:
     def clear_concept_rankings_cache_for_tests(cls) -> None:
         with cls._concept_rankings_cache_lock:
             cls._concept_rankings_cache.clear()
+        with cls._sector_rankings_cache_lock:
+            cls._sector_rankings_cache.clear()
 
     def get_concept_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
         """获取概念/题材涨跌榜（自动切换数据源）。"""

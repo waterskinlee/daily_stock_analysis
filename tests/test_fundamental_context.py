@@ -202,6 +202,7 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(ctx["coverage"].get("boards"), "not_supported")
 
     def test_sector_rankings_use_ordered_fallback(self) -> None:
+        DataFetcherManager.clear_concept_rankings_cache_for_tests()
         akshare = _DummyFetcher("AkshareFetcher", priority=5, rankings=None)
         tushare = _DummyFetcher(
             "TushareFetcher",
@@ -219,6 +220,7 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(bottom[0]["name"], "煤炭")
 
     def test_fundamental_context_aggregates_blocks(self) -> None:
+        DataFetcherManager.clear_concept_rankings_cache_for_tests()
         manager = DataFetcherManager(fetchers=[])
         cfg = SimpleNamespace(
             enable_fundamental_pipeline=True,
