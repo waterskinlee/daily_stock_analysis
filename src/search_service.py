@@ -2425,6 +2425,190 @@ class SinaNewsSearchProvider(BaseSearchProvider):
         return response
 
 
+class ThsStockNewsProvider(BaseSearchProvider):
+    """
+    同花顺个股新闻列表（free, no API key, 国内直连）。
+
+    基于 ``basic.10jqka.com.cn/basicapi/notice/news``（F10 资讯接口）：
+    按个股代码返回该股最近新闻（total=100，含 title/source/time/url），
+    2026-08 生产网络实测 requests 直连 200。与东财/新浪（关键词搜索）不同，
+    这是**个股维度**的新闻流——对「个股最新消息」最直接、覆盖最全。
+    关键词在服务端不参与筛选，故 query 仅用于提取 6 位 A 股代码，
+    提取不到则返回空（fall-through 到下一个 provider）。
+
+    位置：A股查询时排东财/新浪之前（个股新闻最直接）。
+    """
+
+    THS_NEWS_URL = "https://basic.10jqka.com.cn/basicapi/notice/news"
+    THS_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://basic.10jqka.com.cn/",
+        "Accept": "application/json",
+    }
+    THS_TIMEOUT_SECONDS = 10
+
+    def __init__(self, enabled: bool = True):
+        super().__init__([], "ThsStockNews")
+        self._enabled = bool(enabled)
+
+    @property
+    def is_available(self) -> bool:
+        """No API key required — availability is governed by the enable flag."""
+        return self._enabled
+
+    @staticmethod
+    def _extract_stock_code(query: str) -> Optional[str]:
+        """从查询里提取 6 位 A 股代码（DSA 查询模板含 ``名称 代码 股票 最新消息``）。"""
+        m = re.search(r"\b(\d{6})\b", str(query or ""))
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _clean_title(raw: Any) -> str:
+        text = re.sub(r"<[^>]+>", "", str(raw or ""))
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _format_time(ts_raw: Any) -> Optional[str]:
+        try:
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            return None
+        if ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except (OSError, ValueError):
+            return None
+
+    def _do_search(  # type: ignore[override]
+        self,
+        query: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        stock_code = self._extract_stock_code(query)
+        if stock_code is None:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="ThsStockNews 需要 6 位 A 股代码",
+            )
+        cutoff = time.time() - max(1, int(days)) * 86400
+        results: List[SearchResult] = []
+        try:
+            resp = requests.get(
+                self.THS_NEWS_URL,
+                params={
+                    "type": "stock",
+                    "code": stock_code,
+                    "current": "1",
+                    "limit": str(max(10, int(max_results) * 2)),
+                },
+                headers=self.THS_HEADERS,
+                timeout=self.THS_TIMEOUT_SECONDS,
+            )
+            if resp.status_code != 200:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=f"ThsStockNews HTTP {resp.status_code}",
+                )
+            payload = resp.json()
+            if int(payload.get("status_code") or 0) != 0:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=f"ThsStockNews status={payload.get('status_code')}",
+                )
+            items = (payload.get("data") or {}).get("data") or []
+            if not isinstance(items, list):
+                items = []
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"ThsStockNews 请求失败: {type(exc).__name__}",
+            )
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = self._clean_title(item.get("title"))
+            if not title:
+                continue
+            try:
+                ts = int(item.get("time") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if ts and ts < cutoff:
+                continue
+            media = str(item.get("source") or "").strip() or "同花顺"
+            url = str(item.get("pc_url") or item.get("mobile_url") or "").strip()
+            results.append(
+                SearchResult(
+                    title=title,
+                    snippet=title[:200],
+                    url=url or f"https://stock.10jqka.com.cn/{stock_code}/",
+                    source=media,
+                    published_date=self._format_time(item.get("time")),
+                )
+            )
+            if len(results) >= int(max_results):
+                break
+
+        if not results:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="ThsStockNews 无匹配结果",
+            )
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Search THS stock news; fail-open when disabled or unreachable."""
+        start_time = time.time()
+        if not self._enabled:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="同花顺个股新闻未启用",
+                search_time=time.time() - start_time,
+            )
+        response = self._do_search(query, max_results=max_results, days=days)
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 搜索 '%s' 成功，返回 %s 条结果，耗时 %.2fs",
+                self.name,
+                query,
+                len(response.results),
+                response.search_time,
+            )
+        else:
+            logger.debug("[%s] 搜索 '%s' 失败: %s", self.name, query, response.error_message)
+        return response
+
+
 class EastmoneyDataApiSearchProvider(BaseSearchProvider):
     """
     东财数据中心资讯搜索（free, no API key, 国内直连）。
@@ -2997,6 +3181,7 @@ class SearchService:
         cls_wire_enabled: bool = False,
         sina_news_enabled: bool = False,
         em_data_news_enabled: bool = False,
+        ths_news_enabled: bool = False,
         sina_news_prefer_for_cn: bool = True,
     ):
         """
@@ -3029,6 +3214,7 @@ class SearchService:
             "cls_wire_enabled": bool(cls_wire_enabled),
             "sina_news_enabled": bool(sina_news_enabled),
             "em_data_news_enabled": bool(em_data_news_enabled),
+            "ths_news_enabled": bool(ths_news_enabled),
             "sina_news_prefer_for_cn": bool(sina_news_prefer_for_cn),
         }
         self._providers: List[BaseSearchProvider] = []
@@ -3066,7 +3252,13 @@ class SearchService:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
 
-        # 3.4 东财数据中心资讯搜索（免费无 key，国内直连；中文财经新闻质量
+        # 3.4 同花顺个股新闻（免费无 key，国内直连；个股维度新闻流，
+        #     A股「最新消息」最直接，放东财/新浪前）
+        if ths_news_enabled:
+            self._providers.append(ThsStockNewsProvider(enabled=True))
+            logger.info("已启用同花顺个股新闻（免费无 key，国内直连）")
+
+        # 3.4b 东财数据中心资讯搜索（免费无 key，国内直连；中文财经新闻质量
         #     首选，放新浪之前。多词查询走共享清理。）
         if em_data_news_enabled:
             self._providers.append(EastmoneyDataApiSearchProvider(enabled=True))
@@ -4943,10 +5135,10 @@ class SearchService:
         is_cn_stock = code.isdigit() and len(code) == 6
         if not is_cn_stock:
             return providers
-        # 中文免费源优先：东财（质量最高）-> 新浪（兜底）
+        # 中文免费源优先：同花顺（个股新闻最直接）-> 东财（关键词质量高）-> 新浪（兜底）
         preferred = [
             p for p in providers
-            if isinstance(p, (EastmoneyDataApiSearchProvider, SinaNewsSearchProvider))
+            if isinstance(p, (ThsStockNewsProvider, EastmoneyDataApiSearchProvider, SinaNewsSearchProvider))
         ]
         rest = [p for p in providers if p not in preferred]
         return preferred + rest
@@ -5561,6 +5753,7 @@ def get_search_service() -> SearchService:
                     cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
                     sina_news_enabled=getattr(config, "sina_news_enabled", False),
                     em_data_news_enabled=getattr(config, "em_data_news_enabled", False),
+                    ths_news_enabled=getattr(config, "ths_news_enabled", False),
                     sina_news_prefer_for_cn=getattr(config, "sina_news_prefer_for_cn", True),
                 )
     

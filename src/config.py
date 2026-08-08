@@ -983,6 +983,7 @@ class Config:
     cls_wire_enabled: bool = False  # 财联社 7x24 快讯直连（免费无 key，端口 192.168.1.197 实测可用）
     sina_news_enabled: bool = False  # 新浪新闻搜索 API（免费无 key，国内直连；默认关，与 CLS 快讯一致，生产显式开启）
     em_data_news_enabled: bool = False  # 东财数据中心资讯搜索（免费无 key，国内直连，中文新闻首选；默认关，生产显式开启）
+    ths_news_enabled: bool = False  # 同花顺个股新闻列表（免费无 key，国内直连，个股维度新闻流；默认关，生产显式开启）
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1728,6 +1729,10 @@ class Config:
             os.getenv('EM_DATA_NEWS_ENABLED'),
             default=False,
         )
+        ths_news_enabled = parse_env_bool(
+            os.getenv('THS_NEWS_ENABLED'),
+            default=False,
+        )
         sina_news_prefer_for_cn = parse_env_bool(
             os.getenv('SINA_NEWS_PREFER_FOR_CN'),
             default=True,
@@ -1893,6 +1898,7 @@ class Config:
             cls_wire_enabled=cls_wire_enabled,
             sina_news_enabled=sina_news_enabled,
             em_data_news_enabled=em_data_news_enabled,
+            ths_news_enabled=ths_news_enabled,
             sina_news_prefer_for_cn=sina_news_prefer_for_cn,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,
             social_sentiment_api_url=os.getenv('SOCIAL_SENTIMENT_API_URL', 'https://api.adanos.org').rstrip('/'),

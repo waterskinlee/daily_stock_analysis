@@ -228,6 +228,57 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         self.assertLess(ordered.index("EastmoneyData"), ordered.index("SinaNews"))
         self.assertLess(ordered.index("SinaNews"), ordered.index("Brave"))
 
+    def test_cn_stock_prefers_ths_then_eastmoney_then_sina(self) -> None:
+        """A股且同花顺+东财+新浪都开启时：同花顺个股 -> 东财 -> 新浪 -> Brave。"""
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            em_data_news_enabled=True,
+            ths_news_enabled=True,
+            sina_news_prefer_for_cn=True,
+        )
+        ordered = [p.name for p in service._providers_for_query("601138", "工业富联")]
+        self.assertEqual(ordered[0], "ThsStockNews")
+        self.assertLess(ordered.index("ThsStockNews"), ordered.index("EastmoneyData"))
+        self.assertLess(ordered.index("EastmoneyData"), ordered.index("SinaNews"))
+        self.assertLess(ordered.index("SinaNews"), ordered.index("Brave"))
+
+    def test_ths_extracts_code_and_parses_news(self) -> None:
+        """ThsStockNews 从查询提取 6 位代码并解析返回新闻。"""
+        from src.search_service import ThsStockNewsProvider
+        provider = ThsStockNewsProvider(enabled=True)
+        self.assertEqual(provider._extract_stock_code("工业富联 601138 股票 最新消息"), "601138")
+        self.assertIsNone(provider._extract_stock_code("贵州茅台 最新消息"))
+        payload = {
+            "status_code": 0,
+            "data": {
+                "total": 100,
+                "data": [
+                    {
+                        "title": "工业富联：8月7日获融资买入9.74亿元",
+                        "source": "同花顺iNews",
+                        "time": _NOW - 60,
+                        "pc_url": "https://stock.10jqka.com.cn/c1.shtml",
+                    }
+                ],
+            },
+        }
+        with patch(
+            "src.search_service.requests.get",
+            return_value=MagicMock(status_code=200, json=lambda: payload),
+        ) as m:
+            resp = provider.search("工业富联 601138 股票 最新消息", max_results=3, days=7)
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.results), 1)
+        r = resp.results[0]
+        self.assertIn("融资买入", r.title)
+        self.assertEqual(r.source, "同花顺iNews")
+        self.assertIsNotNone(r.published_date)
+        self.assertEqual(m.call_args.kwargs["params"]["code"], "601138")
+
     def test_foreign_stock_keeps_brave_first(self) -> None:
         """美股/港股（英文查询）时保持 Brave 优先，SinaNews 仅作兜底。"""
         service = SearchService(
