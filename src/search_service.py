@@ -2793,6 +2793,7 @@ class SearchService:
         news_strategy_profile: str = "short",
         cls_wire_enabled: bool = False,
         sina_news_enabled: bool = False,
+        sina_news_prefer_for_cn: bool = True,
     ):
         """
         初始化搜索服务
@@ -2823,8 +2824,10 @@ class SearchService:
             "news_strategy_profile": news_strategy_profile,
             "cls_wire_enabled": bool(cls_wire_enabled),
             "sina_news_enabled": bool(sina_news_enabled),
+            "sina_news_prefer_for_cn": bool(sina_news_prefer_for_cn),
         }
         self._providers: List[BaseSearchProvider] = []
+        self._sina_news_prefer_for_cn = bool(sina_news_prefer_for_cn)
         self.news_max_age_days = max(1, news_max_age_days)
         raw_profile = (news_strategy_profile or "short").strip().lower()
         self.news_strategy_profile = normalize_news_strategy_profile(news_strategy_profile)
@@ -4279,7 +4282,7 @@ class SearchService:
 
         had_provider_success = False
         try:
-            for provider in self._providers:
+            for provider in self._providers_for_query("", topic_text or "", prefer_chinese=prefer_chinese):
                 if not provider.is_available:
                     continue
                 search_kwargs: Dict[str, Any] = {}
@@ -4514,7 +4517,7 @@ class SearchService:
             had_provider_success = False
             best_ranked_response: Optional[SearchResponse] = None
             best_ranked_stats: Optional[Dict[str, int]] = None
-            for provider in self._providers:
+            for provider in self._providers_for_query(stock_code, stock_name, prefer_chinese=prefer_chinese):
                 if not provider.is_available:
                     continue
 
@@ -4697,6 +4700,33 @@ class SearchService:
             if cache_owner and cache_event is not None:
                 self._release_cache_fill(cache_key, cache_event)
     
+    def _providers_for_query(
+        self,
+        stock_code: str,
+        stock_name: str,
+        prefer_chinese: Optional[bool] = None,
+    ) -> List[BaseSearchProvider]:
+        """Provider 顺序：默认链；A股（6位数字代码，中文查询）时 SinaNews 优先。
+
+        返回新的列表，不修改 self._providers（保持其它调用点/测试预期）。
+        美股/港股（英文查询）保持 Brave 优先，SinaNews 仅作兜底。
+        """
+        providers = [p for p in self._providers if p.is_available]
+        if not providers:
+            return providers
+        if not self._sina_news_prefer_for_cn:
+            return providers
+        # A股 = 6 位数字代码；避免 `苹果` 中文名称但外股（AAPL）时误提优先
+        code = (stock_code or "").strip()
+        is_cn_stock = code.isdigit() and len(code) == 6
+        if not is_cn_stock:
+            return providers
+        sina = next((p for p in providers if isinstance(p, SinaNewsSearchProvider)), None)
+        if sina is None:
+            return providers
+        rest = [p for p in providers if p is not sina]
+        return [sina] + rest
+
     def search_stock_events(
         self,
         stock_code: str,
@@ -4744,7 +4774,7 @@ class SearchService:
         logger.info(f"搜索股票事件: {stock_name}({stock_code}) - {event_types}")
         
         # 依次尝试各个搜索引擎
-        for provider in self._providers:
+        for provider in self._providers_for_query(stock_code, stock_name):
             if not provider.is_available:
                 continue
             
@@ -4928,8 +4958,8 @@ class SearchService:
             if search_count >= max_searches:
                 break
             
-            # 选择搜索引擎（轮流使用）
-            available_providers = [p for p in self._providers if p.is_available]
+            # 选择搜索引擎（轮流使用；国内票 SinaNews 优先）
+            available_providers = self._providers_for_query(stock_code, stock_name)
             if not available_providers:
                 break
             
@@ -5156,10 +5186,7 @@ class SearchService:
             logger.info(f"[增强搜索] 第 {i+1}/{max_attempts} 次搜索: {query}")
             
             # 依次尝试各个搜索引擎
-            for provider in self._providers:
-                if not provider.is_available:
-                    continue
-                
+            for provider in self._providers_for_query(stock_code, stock_name):
                 try:
                     response = provider.search(query, max_results=3)
                     
@@ -5308,7 +5335,8 @@ def get_search_service() -> SearchService:
                     news_max_age_days=config.news_max_age_days,
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
                     cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
-                    sina_news_enabled=getattr(config, "sina_news_enabled", True),
+                    sina_news_enabled=getattr(config, "sina_news_enabled", False),
+                    sina_news_prefer_for_cn=getattr(config, "sina_news_prefer_for_cn", True),
                 )
     
     return _search_service

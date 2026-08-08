@@ -166,6 +166,61 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         names = [p.name for p in service._providers]
         self.assertNotIn("SinaNews", names)
 
+    def test_cn_stock_prefers_sina_news_first(self) -> None:
+        """A股（中文优先）且 SINA_NEWS_PREFER_FOR_CN 时，SinaNews 排到 Brave 前。"""
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            sina_news_prefer_for_cn=True,
+        )
+        ordered = [p.name for p in service._providers_for_query("600519", "贵州茅台")]
+        self.assertEqual(ordered[0], "SinaNews")
+        self.assertLess(ordered.index("SinaNews"), ordered.index("Brave"))
+
+    def test_foreign_stock_keeps_brave_first(self) -> None:
+        """美股/港股（英文查询）时保持 Brave 优先，SinaNews 仅作兜底。"""
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            sina_news_prefer_for_cn=True,
+        )
+        ordered = [p.name for p in service._providers_for_query("AAPL.US", "苹果")]
+        self.assertEqual(ordered[0], "Brave")
+        self.assertLess(ordered.index("Brave"), ordered.index("SinaNews"))
+
+    def test_sina_priority_disabled_keeps_default_order(self) -> None:
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            sina_news_prefer_for_cn=False,
+        )
+        ordered = [p.name for p in service._providers_for_query("600519", "贵州茅台")]
+        self.assertEqual(ordered[0], "Brave")
+        self.assertLess(ordered.index("Brave"), ordered.index("SinaNews"))
+
+    def test_original_providers_order_unchanged(self) -> None:
+        """_providers_for_query 不修改 self._providers（其它调用点/测试依赖原顺序）。"""
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            sina_news_prefer_for_cn=True,
+        )
+        original = [p.name for p in service._providers]
+        _ = service._providers_for_query("600519", "贵州茅台")
+        self.assertEqual([p.name for p in service._providers], original)
+
 
 if __name__ == "__main__":
     unittest.main()
