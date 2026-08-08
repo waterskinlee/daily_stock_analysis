@@ -94,6 +94,19 @@ def _resolve_tushare_http_url() -> Optional[str]:
     return url
 
 
+def _num(value: Any) -> Optional[float]:
+    """Best-effort float conversion (NaN -> None)."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:  # NaN
+        return None
+    return parsed
+
+
 class _TushareHttpClient:
     """Lightweight Tushare Pro client that does not require the tushare SDK."""
 
@@ -1328,6 +1341,179 @@ class TushareFetcher(BaseFetcher):
                 payload,
             )
         return payload
+
+    def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
+        """Return growth/earnings/institution bundle via Tushare Pro.
+
+        Mirrors ``AkshareFundamentalAdapter.get_fundamental_bundle`` shape so
+        the manager's bundle path can prefer this fast keyless-proxy source
+        (each call ~0.3s) over the slow akshare multi-candidate probing.
+
+        Mapping:
+        - growth: fina_indicator -> or_yoy / netprofit_yoy / roe / grossprofit_margin
+        - earnings.financial_report: fina_indicator + income (total_revenue,
+          n_income_attr_p) + cashflow (c_fr_sale_sg)
+        - earnings.forecast_summary: forecast.summary
+        - earnings.quick_report_summary: express.perf_summary
+        - earnings.dividend: dividend (cash_div_tax per-10-shares -> pre-tax per share)
+        - institution.top10_holder_change: top10_holders.hold_change
+
+        Fail-open: any interface error is recorded, remaining blocks still
+        populate. ``top_inst_hold`` (机构持股) is NOT exposed by the proxy, so
+        ``institution_holding_change`` stays unset.
+        """
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "growth": {},
+            "earnings": {},
+            "institution": {},
+            "source_chain": [],
+            "errors": [],
+        }
+        if self._api is None:
+            result["errors"].append("tushare api not initialized")
+            return result
+        if _is_us_code(stock_code) or _is_hk_market(stock_code):
+            return result
+
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"convert_code:{type(exc).__name__}")
+            return result
+
+        today = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+
+        # 1. fina_indicator -> growth + financial_report base
+        try:
+            fin = self._call_api_with_rate_limit(
+                "fina_indicator", ts_code=ts_code, start_date=start, end_date=today
+            )
+            if fin is not None and not fin.empty:
+                row = fin.iloc[0]
+                result["growth"] = {
+                    "revenue_yoy": _num(row.get("or_yoy")),
+                    "net_profit_yoy": _num(row.get("netprofit_yoy")),
+                    "roe": _num(row.get("roe")),
+                    "gross_margin": _num(row.get("grossprofit_margin")),
+                }
+                result["earnings"]["financial_report"] = {
+                    "report_date": (
+                        str(row.get("end_date"))[:10] if row.get("end_date") else None
+                    ),
+                    "roe": _num(row.get("roe")),
+                }
+                result["source_chain"].append("growth:tushare_fina_indicator")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"fina_indicator:{type(exc).__name__}")
+
+        # 2. income -> revenue / net_profit_parent
+        try:
+            inc = self._call_api_with_rate_limit(
+                "income", ts_code=ts_code, start_date=start, end_date=today
+            )
+            if inc is not None and not inc.empty:
+                row = inc.iloc[0]
+                fr = dict(result["earnings"].get("financial_report") or {})
+                if row.get("end_date"):
+                    fr["report_date"] = str(row["end_date"])[:10]
+                fr["revenue"] = _num(row.get("total_revenue"))
+                fr["net_profit_parent"] = _num(row.get("n_income_attr_p"))
+                result["earnings"]["financial_report"] = fr
+                result["source_chain"].append("growth:tushare_income")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"income:{type(exc).__name__}")
+
+        # 3. cashflow -> operating_cash_flow
+        try:
+            cf = self._call_api_with_rate_limit(
+                "cashflow", ts_code=ts_code, start_date=start, end_date=today
+            )
+            if cf is not None and not cf.empty:
+                row = cf.iloc[0]
+                fr = dict(result["earnings"].get("financial_report") or {})
+                fr["operating_cash_flow"] = _num(row.get("c_fr_sale_sg"))
+                result["earnings"]["financial_report"] = fr
+                result["source_chain"].append("growth:tushare_cashflow")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"cashflow:{type(exc).__name__}")
+
+        # 4. forecast -> earnings.forecast_summary
+        try:
+            fc = self._call_api_with_rate_limit(
+                "forecast", ts_code=ts_code, start_date=start, end_date=today
+            )
+            if fc is not None and not fc.empty:
+                row = fc.iloc[0]
+                summary = str(row.get("summary") or "").strip()
+                if summary:
+                    result["earnings"]["forecast_summary"] = summary[:200]
+                    result["source_chain"].append("earnings_forecast:tushare_forecast")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"forecast:{type(exc).__name__}")
+
+        # 5. express -> earnings.quick_report_summary
+        try:
+            ex = self._call_api_with_rate_limit(
+                "express", ts_code=ts_code, start_date=start, end_date=today
+            )
+            if ex is not None and not ex.empty:
+                row = ex.iloc[0]
+                summary = str(row.get("perf_summary") or "").strip()
+                if summary:
+                    result["earnings"]["quick_report_summary"] = summary[:200]
+                    result["source_chain"].append("earnings_quick:tushare_express")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"express:{type(exc).__name__}")
+
+        # 6. dividend -> earnings.dividend (reuse the adapter's TTM/pre-tax logic)
+        try:
+            div = self._call_api_with_rate_limit("dividend", ts_code=ts_code)
+            if div is not None and not div.empty:
+                ex_dates = div.get("ex_date") if "ex_date" in div.columns else pd.Series([None] * len(div))
+                cash_divs = div.get("cash_div_tax") if "cash_div_tax" in div.columns else div.get("cash_div")
+                work = pd.DataFrame(
+                    {
+                        "除息日": [
+                            str(v)[:10] if pd.notna(v) else None for v in ex_dates
+                        ],
+                        "分配方案": [
+                            f"10派{v}元(含税)" if pd.notna(v) else "" for v in (cash_divs or [None] * len(div))
+                        ],
+                    }
+                )
+                from .fundamental_adapter import _build_dividend_payload
+
+                payload = _build_dividend_payload(work, stock_code, max_events=5)
+                if payload:
+                    result["earnings"]["dividend"] = payload
+                    result["source_chain"].append("dividend:tushare_dividend")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"dividend:{type(exc).__name__}")
+
+        # 7. top10_holders -> institution.top10_holder_change
+        try:
+            period = None
+            fin_report = result["earnings"].get("financial_report") or {}
+            raw_report_date = fin_report.get("report_date")
+            if raw_report_date:
+                period = str(raw_report_date).replace("-", "")
+            t10_kwargs = {"ts_code": ts_code}
+            if period:
+                t10_kwargs["period"] = period
+            t10 = self._call_api_with_rate_limit("top10_holders", **t10_kwargs)
+            if t10 is not None and not t10.empty:
+                row = t10.iloc[0]
+                if "hold_change" in t10.columns and row.get("hold_change") is not None:
+                    result["institution"]["top10_holder_change"] = _num(row.get("hold_change"))
+                    result["source_chain"].append("top10:tushare_top10_holders")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"top10_holders:{type(exc).__name__}")
+
+        has_content = bool(result["growth"] or result["earnings"] or result["institution"])
+        result["status"] = "partial" if has_content else "not_supported"
+        return result
 
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """

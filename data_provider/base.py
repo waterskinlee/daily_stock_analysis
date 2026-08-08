@@ -3271,8 +3271,39 @@ class DataFetcherManager:
             bundle_ms = 0
         else:
             bundle_timeout = min(fetch_timeout, remaining_seconds)
+
+            def _fundamental_bundle_task() -> Dict[str, Any]:
+                # Prefer TushareFetcher bundle (fast keyless-proxy calls ~0.3s
+                # each) so growth/institution populate within the budget; fall
+                # back to the slow akshare adapter only when tushare is absent
+                # or returned no content.
+                tushare = None
+                for fetcher in self._fetchers:
+                    if (
+                        getattr(fetcher, "name", "") == "TushareFetcher"
+                        and getattr(fetcher, "is_available", lambda: False)()
+                        and hasattr(fetcher, "get_fundamental_bundle")
+                    ):
+                        tushare = fetcher
+                        break
+                if tushare is not None:
+                    try:
+                        payload = tushare.get_fundamental_bundle(stock_code)
+                    except Exception as exc:  # noqa: BLE001 - fail-open
+                        logger.warning("tushare fundamental bundle failed for %s: %s", stock_code, exc)
+                        payload = None
+                    if isinstance(payload, dict):
+                        has_content = bool(
+                            payload.get("growth")
+                            or payload.get("earnings")
+                            or payload.get("institution")
+                        )
+                        if has_content:
+                            return payload
+                return self._fundamental_adapter.get_fundamental_bundle(stock_code)
+
             bundle_payload, bundle_err_msg, bundle_ms = self._run_with_retry(
-                lambda: self._fundamental_adapter.get_fundamental_bundle(stock_code),
+                _fundamental_bundle_task,
                 bundle_timeout,
                 "fundamental_bundle",
             )

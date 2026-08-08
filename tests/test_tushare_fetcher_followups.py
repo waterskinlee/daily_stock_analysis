@@ -314,3 +314,78 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
             result = fetcher.get_concept_rankings(3)
 
         self.assertIsNone(result)
+
+    # ---- get_fundamental_bundle (growth/earnings/institution via tushare) -------
+
+    @staticmethod
+    def _fina_df():
+        return pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "end_date": ["20260331"],
+                "or_yoy": [6.538],
+                "netprofit_yoy": [1.4714],
+                "roe": [10.5687],
+                "grossprofit_margin": [89.7592],
+            }
+        )
+
+    def test_get_fundamental_bundle_populates_growth_and_earnings(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.fina_indicator.return_value = self._fina_df()
+        fetcher._api.income.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "total_revenue": [54702912385.23], "n_income_attr_p": [27242512886.45]}
+        )
+        fetcher._api.cashflow.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "c_fr_sale_sg": [56392589148.92]}
+        )
+        fetcher._api.forecast.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "summary": ["业绩预增"]}
+        )
+        fetcher._api.express.return_value = pd.DataFrame()
+        fetcher._api.dividend.return_value = pd.DataFrame()
+        fetcher._api.top10_holders.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "hold_change": [0.5]}
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_fundamental_bundle("600519")
+
+        self.assertEqual(result["status"], "partial")
+        growth = result["growth"]
+        self.assertAlmostEqual(growth["revenue_yoy"], 6.538, places=4)
+        self.assertAlmostEqual(growth["net_profit_yoy"], 1.4714, places=4)
+        self.assertAlmostEqual(growth["roe"], 10.5687, places=4)
+        self.assertAlmostEqual(growth["gross_margin"], 89.7592, places=4)
+
+        fr = result["earnings"]["financial_report"]
+        self.assertEqual(fr["report_date"], "20260331")
+        self.assertAlmostEqual(fr["revenue"], 54702912385.23, places=2)
+        self.assertAlmostEqual(fr["net_profit_parent"], 27242512886.45, places=2)
+        self.assertAlmostEqual(fr["operating_cash_flow"], 56392589148.92, places=2)
+
+        self.assertEqual(result["earnings"]["forecast_summary"], "业绩预增")
+        self.assertEqual(result["institution"]["top10_holder_change"], 0.5)
+        self.assertIn("growth:tushare_fina_indicator", result["source_chain"])
+        self.assertIn("earnings_forecast:tushare_forecast", result["source_chain"])
+        self.assertIn("top10:tushare_top10_holders", result["source_chain"])
+        self.assertEqual(result["errors"], [])
+
+    def test_get_fundamental_bundle_fail_open_on_api_error(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.fina_indicator.side_effect = Exception("quota")
+        fetcher._api.income.side_effect = Exception("quota")
+        fetcher._api.cashflow.side_effect = Exception("quota")
+        fetcher._api.forecast.side_effect = Exception("quota")
+        fetcher._api.express.side_effect = Exception("quota")
+        fetcher._api.dividend.side_effect = Exception("quota")
+        fetcher._api.top10_holders.side_effect = Exception("quota")
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_fundamental_bundle("600519")
+
+        self.assertEqual(result["status"], "not_supported")
+        self.assertEqual(result["growth"], {})
+        self.assertEqual(result["earnings"], {})
+        self.assertEqual(result["institution"], {})
+        self.assertEqual(len(result["errors"]), 7)
