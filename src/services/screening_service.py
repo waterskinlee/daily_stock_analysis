@@ -3384,7 +3384,11 @@ def get_dsa_realtime_quote(stock_code: str) -> Dict[str, Any]:
 
 def get_dsa_fundamental_context(stock_code: str) -> Dict[str, Any]:
     manager = _get_dsa_fetcher_manager()
-    context = manager.get_fundamental_context(stock_code, budget_seconds=4.0)
+    # 选股 enrich 预算：与完整个股分析一致（15s）。bundle 已提到最前（~2s），
+    # EPS/lockup/龙虎榜/valuation/boards/capital_flow 依序 fail-open；
+    # 预算足够时 8 块全量喂给 LLM，选股质量不因 4s 预算打折扣。
+    # （DSA_ENRICHMENT_MAX_CANDIDATES=3 是成本护栏，enrich 的 3 只应吃全量。）
+    context = manager.get_fundamental_context(stock_code, budget_seconds=15.0)
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
 
 
