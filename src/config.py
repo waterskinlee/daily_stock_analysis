@@ -981,6 +981,7 @@ class Config:
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
     searxng_public_instances_enabled: bool = True  # Auto-discover public SearXNG instances when base URLs are absent
     cls_wire_enabled: bool = False  # 财联社 7x24 快讯直连（免费无 key，端口 192.168.1.197 实测可用）
+    sina_news_enabled: bool = False  # 新浪新闻搜索 API（免费无 key，国内直连；默认关，与 CLS 快讯一致，生产显式开启）
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1714,6 +1715,10 @@ class Config:
             os.getenv('CLS_WIRE_ENABLED'),
             default=False,
         )
+        sina_news_enabled = parse_env_bool(
+            os.getenv('SINA_NEWS_ENABLED'),
+            default=False,
+        )
 
         # 企微消息类型与最大字节数逻辑
         wechat_msg_type = os.getenv('WECHAT_MSG_TYPE', 'markdown')
@@ -1873,6 +1878,7 @@ class Config:
             searxng_base_urls=searxng_base_urls,
             searxng_public_instances_enabled=searxng_public_instances_enabled,
             cls_wire_enabled=cls_wire_enabled,
+            sina_news_enabled=sina_news_enabled,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,
             social_sentiment_api_url=os.getenv('SOCIAL_SENTIMENT_API_URL', 'https://api.adanos.org').rstrip('/'),
             news_max_age_days=parse_env_int(os.getenv('NEWS_MAX_AGE_DAYS'), 3, field_name='NEWS_MAX_AGE_DAYS', minimum=1),

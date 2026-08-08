@@ -2220,6 +2220,167 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class SinaNewsSearchProvider(BaseSearchProvider):
+    """
+    新浪新闻搜索（free, no API key, 国内直连）。
+
+    基于新浪搜索 ``search.sina.com.cn/api/news`` JSON 接口（关键词搜索新闻，
+    返回 title/intro/url/ctime/media），2026-08 从生产网络实测 200 可达、
+    无需 key/cookie、requests 直连即可。用作 Brave（免费额度 429 频发）之后、
+    公共 SearXNG 之前的稳定兜底：Brave 限流时新闻搜索仍返回真实关键词结果，
+    不再直接掉到 CLS 7x24 快讯流（非搜索语义）。
+    """
+
+    SINA_SEARCH_URL = "https://search.sina.com.cn/api/news"
+    SINA_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://search.sina.com.cn/",
+    }
+    SINA_TIMEOUT_SECONDS = 10
+
+    def __init__(self, enabled: bool = True):
+        super().__init__([], "SinaNews")
+        self._enabled = bool(enabled)
+
+    @property
+    def is_available(self) -> bool:
+        """No API key required — availability is governed by the enable flag."""
+        return self._enabled
+
+    @staticmethod
+    def _clean_title(raw: Any) -> str:
+        """新浪标题可能含 <em> 高亮标签，去 HTML 标签并折叠空白。"""
+        text = re.sub(r"<[^>]+>", "", str(raw or ""))
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _format_time(ctime: Any) -> Optional[str]:
+        try:
+            ts = int(ctime)
+        except (TypeError, ValueError):
+            return None
+        if ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        except (OSError, ValueError):
+            return None
+
+    def _do_search(  # type: ignore[override]
+        self,
+        query: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        cutoff = time.time() - max(1, int(days)) * 86400
+        results: List[SearchResult] = []
+        try:
+            resp = requests.get(
+                self.SINA_SEARCH_URL,
+                params={
+                    "q": query,
+                    "tp": "news",
+                    "sort": "0",
+                    "page": "1",
+                    "size": str(max(10, int(max_results) * 2)),
+                    "from": "search_result",
+                },
+                headers=self.SINA_HEADERS,
+                timeout=self.SINA_TIMEOUT_SECONDS,
+            )
+            if resp.status_code != 200:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=f"SinaNews HTTP {resp.status_code}",
+                )
+            payload = resp.json()
+            items = (payload.get("data") or {}).get("list") or []
+            if not isinstance(items, list):
+                items = []
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"SinaNews 请求失败: {type(exc).__name__}",
+            )
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = self._clean_title(item.get("title"))
+            intro = str(item.get("intro") or "").strip()
+            if not title and not intro:
+                continue
+            try:
+                ctime = int(item.get("ctime") or 0)
+            except (TypeError, ValueError):
+                ctime = 0
+            if ctime and ctime < cutoff:
+                continue
+            url = str(item.get("url") or "").strip()
+            media = str(item.get("media") or item.get("source") or "新浪财经").strip()
+            results.append(
+                SearchResult(
+                    title=title or (intro[:80] or "新浪新闻"),
+                    snippet=(intro or title)[:200],
+                    url=url or "https://finance.sina.com.cn/",
+                    source=media or "新浪财经",
+                    published_date=self._format_time(ctime),
+                )
+            )
+            if len(results) >= int(max_results):
+                break
+
+        if not results:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="SinaNews 无匹配结果",
+            )
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Search sina news API; fail-open when disabled or unreachable."""
+        start_time = time.time()
+        if not self._enabled:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="新浪新闻搜索未启用",
+                search_time=time.time() - start_time,
+            )
+        response = self._do_search(query, max_results=max_results, days=days)
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 搜索 '%s' 成功，返回 %s 条结果，耗时 %.2fs",
+                self.name,
+                query,
+                len(response.results),
+                response.search_time,
+            )
+        else:
+            logger.debug("[%s] 搜索 '%s' 失败: %s", self.name, query, response.error_message)
+        return response
+
+
 class ClsWireSearchProvider(BaseSearchProvider):
     """
     财联社 7x24 快讯直连（free, no API key）。
@@ -2624,6 +2785,7 @@ class SearchService:
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
         cls_wire_enabled: bool = False,
+        sina_news_enabled: bool = False,
     ):
         """
         初始化搜索服务
@@ -2653,6 +2815,7 @@ class SearchService:
             "news_max_age_days": int(news_max_age_days),
             "news_strategy_profile": news_strategy_profile,
             "cls_wire_enabled": bool(cls_wire_enabled),
+            "sina_news_enabled": bool(sina_news_enabled),
         }
         self._providers: List[BaseSearchProvider] = []
         self.news_max_age_days = max(1, news_max_age_days)
@@ -2687,6 +2850,12 @@ class SearchService:
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
+
+        # 3.5 新浪新闻搜索（免费无 key，国内直连；Brave 429 限流时的稳定兜底，
+        #     优先于公共 SearXNG 与 CLS 快讯流）
+        if sina_news_enabled:
+            self._providers.append(SinaNewsSearchProvider(enabled=True))
+            logger.info("已启用新浪新闻搜索（免费无 key，国内直连）")
 
         # 4. SerpAPI 作为备选（每月 100 次）
         if serpapi_keys:
@@ -5132,6 +5301,7 @@ def get_search_service() -> SearchService:
                     news_max_age_days=config.news_max_age_days,
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
                     cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
+                    sina_news_enabled=getattr(config, "sina_news_enabled", True),
                 )
     
     return _search_service
