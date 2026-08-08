@@ -753,6 +753,34 @@ class TushareFetcher(BaseFetcher):
                 row = df.iloc[0]
                 logger.debug(f"Tushare Pro 实时行情获取成功: {stock_code}")
 
+                # quotation 接口缺 volume_ratio/turnover_rate/pe/pb/mv/amplitude；
+                # 用 daily_basic（同源，~0.3s，xiaodefa 可用）补全缺失字段，避免
+                # 实时行情阶段再回退腾讯补充，减少拓扑噪音。
+                basic_row = {}
+                try:
+                    today = datetime.now().strftime("%Y%m%d")
+                    basic = self._call_api_with_rate_limit(
+                        "daily_basic",
+                        ts_code=ts_code,
+                        start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
+                        end_date=today,
+                    )
+                    if basic is not None and not basic.empty:
+                        if "trade_date" in basic.columns:
+                            basic = basic.sort_values("trade_date", ascending=False)
+                        basic_row = basic.iloc[0].to_dict()
+                except Exception as exc:  # noqa: BLE001 - fail-open
+                    logger.debug(f"Tushare daily_basic 补全失败 {stock_code}: {exc}")
+
+                def _basic_float(key: str) -> Optional[float]:
+                    if key not in basic_row:
+                        return None
+                    try:
+                        v = float(basic_row[key])
+                    except (TypeError, ValueError):
+                        return None
+                    return v if v == v else None  # NaN -> None
+
                 return UnifiedRealtimeQuote(
                     code=normalized_code,
                     name=str(row.get('name', '')),
@@ -766,10 +794,15 @@ class TushareFetcher(BaseFetcher):
                     low=safe_float(row.get('low')),
                     open_price=safe_float(row.get('open')),
                     pre_close=safe_float(row.get('pre_close')),
-                    turnover_rate=safe_float(row.get('turnover_ratio')), # Pro 接口可能有换手率
-                    pe_ratio=safe_float(row.get('pe')),
-                    pb_ratio=safe_float(row.get('pb')),
-                    total_mv=safe_float(row.get('total_mv')),
+                    turnover_rate=_basic_float("turnover_rate") if row.get("turnover_ratio") is None else safe_float(row.get("turnover_ratio")),
+                    volume_ratio=_basic_float("volume_ratio"),
+                    pe_ratio=_basic_float("pe") if row.get("pe") is None else safe_float(row.get("pe")),
+                    pb_ratio=_basic_float("pb") if row.get("pb") is None else safe_float(row.get("pb")),
+                    total_mv=(
+                        _basic_float("total_mv") if row.get("total_mv") is None else safe_float(row.get("total_mv"))
+                    ),
+                    circ_mv=_basic_float("circ_mv"),
+                    amplitude=_basic_float("amplitude") if "amplitude" in basic_row else None,
                 )
         except Exception as e:
             # 仅记录调试日志，不报错，继续尝试降级

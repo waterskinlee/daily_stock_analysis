@@ -262,6 +262,48 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(quote.name, "平安银行")
         tushare_module.get_realtime_quotes.assert_called_once_with("000001")
 
+    def test_realtime_quote_enriches_missing_fields_via_daily_basic(self) -> None:
+        """quotation 缺 volume_ratio/turnover/pe/pb/mv -> daily_basic 补全，避免回退腾讯。"""
+        fetcher = self._make_fetcher()
+        fetcher._api.quotation.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600916.SH"],
+                "name": ["中国黄金"],
+                "price": [7.77],
+                "pct_chg": [0.52],
+                "change": [0.04],
+                "vol": [100000],
+                "amount": [50000000],
+                "high": [7.85],
+                "low": [7.70],
+                "open": [7.75],
+                "pre_close": [7.73],
+            }
+        )
+        fetcher._api.daily_basic.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600916.SH"],
+                "trade_date": ["20260807"],
+                "turnover_rate": [2.8119],
+                "volume_ratio": [1.06],
+                "pe": [47.3928],
+                "pb": [1.7877],
+                "total_mv": [1305360],
+                "circ_mv": [1305360],
+            }
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            quote = fetcher.get_realtime_quote("600916")
+
+        self.assertIsNotNone(quote)
+        self.assertAlmostEqual(quote.volume_ratio, 1.06, places=4)
+        self.assertAlmostEqual(quote.turnover_rate, 2.8119, places=4)
+        self.assertAlmostEqual(quote.pe_ratio, 47.3928, places=4)
+        self.assertAlmostEqual(quote.pb_ratio, 1.7877, places=4)
+        self.assertAlmostEqual(quote.total_mv, 1305360, places=2)
+        self.assertAlmostEqual(quote.circ_mv, 1305360, places=2)
+
     # ---- get_concept_rankings (dc_index 概念板块) ------------------------------
 
     @staticmethod
