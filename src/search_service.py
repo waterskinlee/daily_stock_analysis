@@ -2852,7 +2852,12 @@ class ClsWireSearchProvider(BaseSearchProvider):
         days: int,
         source: str,
     ) -> List[SearchResult]:
-        """Filter wire items by recency + client-side keywords."""
+        """Filter wire items by recency + client-side keywords.
+
+        7x24 快讯是滚动流而非搜索：关键词不匹配时不应全部丢弃（否则
+        搜索词不在当前快讯里时兜底源永远返回空）。匹配关键词的优先，
+        不匹配的降级保留直到 max_results——兜底语义是「提供最新快讯」。
+        """
         cutoff = time.time() - max(1, int(days)) * 86400
         query_terms = [
             term.strip()
@@ -2860,6 +2865,7 @@ class ClsWireSearchProvider(BaseSearchProvider):
             if len(term.strip()) >= 2
         ]
         results: List[SearchResult] = []
+        unmatched: List[SearchResult] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -2894,21 +2900,28 @@ class ClsWireSearchProvider(BaseSearchProvider):
                     published_date = None
 
             haystack = f"{title} {content}"
-            if query_terms and not any(term in haystack for term in query_terms):
-                continue
-
             snippet = (content or title)[:200]
-            results.append(
-                SearchResult(
-                    title=title or snippet[:80],
-                    snippet=snippet,
-                    url=self._item_url(item, source),
-                    source="财联社" if source == "cls" else "东财7x24",
-                    published_date=published_date,
-                )
+            result = SearchResult(
+                title=title or snippet[:80],
+                snippet=snippet,
+                url=self._item_url(item, source),
+                source="财联社" if source == "cls" else "东财7x24",
+                published_date=published_date,
             )
+            if query_terms and not any(term in haystack for term in query_terms):
+                unmatched.append(result)  # 不匹配关键词，降级保留
+                continue
+            results.append(result)
             if len(results) >= max_results:
                 break
+
+        # 匹配数不足时补最新快讯（兜底语义：提供最新 7x24，而非空手）
+        if len(results) < max_results:
+            fill_needed = max_results - len(results)
+            for extra in unmatched:
+                results.append(extra)
+                if len(results) >= max_results:
+                    break
         return results
 
     def _fetch_cls(self, query: str, max_results: int, days: int) -> Tuple[List[SearchResult], Optional[str]]:
