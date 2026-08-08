@@ -1555,13 +1555,15 @@ class TushareFetcher(BaseFetcher):
             if div is not None and not div.empty:
                 ex_dates = div.get("ex_date") if "ex_date" in div.columns else pd.Series([None] * len(div))
                 cash_divs = div.get("cash_div_tax") if "cash_div_tax" in div.columns else div.get("cash_div")
+                if cash_divs is None:
+                    cash_divs = pd.Series([None] * len(div))
                 work = pd.DataFrame(
                     {
                         "除息日": [
                             str(v)[:10] if pd.notna(v) else None for v in ex_dates
                         ],
                         "分配方案": [
-                            f"10派{v}元(含税)" if pd.notna(v) else "" for v in (cash_divs or [None] * len(div))
+                            f"10派{v}元(含税)" if pd.notna(v) else "" for v in cash_divs
                         ],
                     }
                 )

@@ -540,3 +540,35 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         m.assert_not_called()
         self.assertEqual(result["institution"], {})
         self.assertEqual(len(result["errors"]), 7)
+
+    def test_get_fundamental_bundle_dividend_parses_tushare_rows(self) -> None:
+        """dividend 返回非空 Series 时不再因 or 触发 Series 真值歧义 ValueError。"""
+        fetcher = self._make_fetcher()
+        fetcher._api.fina_indicator.return_value = self._fina_df()
+        fetcher._api.income.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "total_revenue": [1], "n_income_attr_p": [1]}
+        )
+        fetcher._api.cashflow.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "c_fr_sale_sg": [1]}
+        )
+        fetcher._api.forecast.return_value = pd.DataFrame()
+        fetcher._api.express.return_value = pd.DataFrame()
+        fetcher._api.dividend.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "600519.SH"],
+                "ex_date": ["20260710", "20250711"],
+                "cash_div_tax": [28.02423, 27.993],
+            }
+        )
+        fetcher._api.top10_holders.return_value = pd.DataFrame()
+
+        with patch.object(fetcher, "_check_rate_limit"), patch(
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
+            return_value=None,
+        ):
+            result = fetcher.get_fundamental_bundle("600519")
+
+        self.assertEqual(result["status"], "partial")
+        dividend = result["earnings"].get("dividend") or {}
+        self.assertGreater(len(dividend.get("events", [])), 0)
+        self.assertNotIn("dividend", result["errors"])
