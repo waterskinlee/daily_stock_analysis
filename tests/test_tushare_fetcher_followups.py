@@ -261,3 +261,56 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(quote.code, "000001")
         self.assertEqual(quote.name, "平安银行")
         tushare_module.get_realtime_quotes.assert_called_once_with("000001")
+
+    # ---- get_concept_rankings (dc_index 概念板块) ------------------------------
+
+    @staticmethod
+    def _concept_df():
+        return pd.DataFrame(
+            {
+                "ts_code": ["885900.TI", "885901.TI", "885902.TI", "885903.TI", "885904.TI", "885905.TI"],
+                "name": ["光刻胶", "CRO", "稀土", "白酒", "煤炭", "AI算力"],
+                "idx_type": ["概念板块"] * 5 + ["行业板块"],
+                "pct_change": [9.5, 8.2, 7.1, -3.4, -5.2, 6.0],
+            }
+        )
+
+    def test_get_concept_rankings_filters_concept_and_ranks(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.dc_index.return_value = self._concept_df()
+        TushareFetcher.clear_concept_rankings_cache_for_tests()
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_concept_rankings(3)
+
+        self.assertIsNotNone(result)
+        top, bottom = result
+        self.assertEqual([item["name"] for item in top], ["光刻胶", "CRO", "稀土"])
+        self.assertEqual([item["name"] for item in bottom], ["煤炭", "白酒", "稀土"])
+        self.assertEqual(top[0]["change_pct"], 9.5)
+        # 行业板块 (AI算力, idx_type != 概念板块) 被过滤
+        self.assertNotIn("AI算力", [item["name"] for item in top] + [item["name"] for item in bottom])
+
+    def test_get_concept_rankings_caches_by_n(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.dc_index.return_value = self._concept_df()
+        TushareFetcher.clear_concept_rankings_cache_for_tests()
+
+        with patch.object(fetcher, "_check_rate_limit") as rate_mock:
+            r1 = fetcher.get_concept_rankings(3)
+            r2 = fetcher.get_concept_rankings(3)
+            r3 = fetcher.get_concept_rankings(5)
+
+        self.assertEqual(rate_mock.call_count, 2)  # n=3 cached; n=5 refetches
+        self.assertEqual(r1, r2)
+        self.assertEqual(len(r3[0]), 5)
+
+    def test_get_concept_rankings_fail_open_on_api_error(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.dc_index.side_effect = Exception("quota")
+        TushareFetcher.clear_concept_rankings_cache_for_tests()
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_concept_rankings(3)
+
+        self.assertIsNone(result)

@@ -3840,7 +3840,12 @@ class DataFetcherManager:
 
             top: List[Dict] = []
             bottom: List[Dict] = []
+            # TushareFetcher (via TUSHARE_HTTP_URL proxy) resolves concepts with
+            # a single ~1.5s dc_index call; prefer it so the board isn't starved
+            # by the slow akshare multi-candidate chain (push2 blocked).
             for fetcher in self._get_fetchers_snapshot():
+                if getattr(fetcher, "name", "") == "TushareFetcher" and not getattr(fetcher, "is_available", lambda: False)():
+                    continue
                 try:
                     data = fetcher.get_concept_rankings(normalized_n)
                     if data and (data[0] or data[1]):

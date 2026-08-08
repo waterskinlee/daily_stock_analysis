@@ -1254,6 +1254,81 @@ class TushareFetcher(BaseFetcher):
         result["status"] = "partial" if has_content else "not_supported"
         return result
 
+    # 概念板块指数缓存：dc_index 全量 5000 行，短 TTL 避免重复拉取打满限速。
+    _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 120.0
+    _concept_rankings_cache: Dict[int, Tuple[float, Optional[Tuple[List[Dict], List[Dict]]]]] = {}
+    _concept_rankings_cache_lock = None  # initialized lazily in get_concept_rankings
+
+    @classmethod
+    def clear_concept_rankings_cache_for_tests(cls) -> None:
+        with cls._concept_lock():
+            cls._concept_rankings_cache.clear()
+
+    @classmethod
+    def _concept_lock(cls):
+        if cls._concept_rankings_cache_lock is None:
+            import threading
+            cls._concept_rankings_cache_lock = threading.RLock()
+        return cls._concept_rankings_cache_lock
+
+    def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """获取概念/题材涨跌榜（东财板块指数，dc_index 过滤概念板块）。
+
+        与 akshare ``stock_board_concept_name_em`` 同口径（东财概念板块），
+        单次请求拉全量板块指数（~5000 行），按 pct_change 取涨跌幅榜。
+        短 TTL 缓存避免高频重复拉取触发 xiaodefa 限速。
+        """
+        if self._api is None:
+            return None
+        try:
+            normalized_n = int(n)
+        except (TypeError, ValueError):
+            normalized_n = 5
+        if normalized_n <= 0:
+            normalized_n = 5
+
+        now = time.monotonic()
+        with self._concept_lock():
+            cached = self._concept_rankings_cache.get(normalized_n)
+            if cached and cached[0] > now and cached[1] is not None:
+                logger.debug("[Tushare] 概念排行命中缓存 n=%s", normalized_n)
+                return cached[1]
+
+        try:
+            df = self._call_api_with_rate_limit("dc_index")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Tushare] dc_index 获取概念排行失败: %s", exc)
+            return None
+        if df is None or df.empty or "idx_type" not in df.columns or "pct_change" not in df.columns:
+            return None
+
+        concept = df[df["idx_type"] == "概念板块"].copy()
+        if concept.empty or "name" not in concept.columns:
+            return None
+        concept["pct_change"] = pd.to_numeric(concept["pct_change"], errors="coerce")
+        concept = concept.dropna(subset=["pct_change"])
+        if concept.empty:
+            return None
+
+        top = concept.nlargest(normalized_n, "pct_change")
+        bottom = concept.nsmallest(normalized_n, "pct_change")
+        payload = (
+            [
+                {"name": str(row["name"]), "change_pct": float(row["pct_change"])}
+                for _, row in top.iterrows()
+            ],
+            [
+                {"name": str(row["name"]), "change_pct": float(row["pct_change"])}
+                for _, row in bottom.iterrows()
+            ],
+        )
+        with self._concept_lock():
+            self._concept_rankings_cache[normalized_n] = (
+                time.monotonic() + self._CONCEPT_RANKINGS_CACHE_TTL_SECONDS,
+                payload,
+            )
+        return payload
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据
