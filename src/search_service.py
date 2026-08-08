@@ -2326,7 +2326,7 @@ class SinaNewsSearchProvider(BaseSearchProvider):
             if ctime and ctime < cutoff:
                 continue
             url = str(item.get("url") or "").strip()
-            media = str(item.get("media") or item.get("source") or "新浪财经").strip()
+            media = str(item.get("media") or "").strip() or str(item.get("source") or "").strip() or "新浪财经"
             results.append(
                 SearchResult(
                     title=title or (intro[:80] or "新浪新闻"),
