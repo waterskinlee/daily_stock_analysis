@@ -3420,6 +3420,18 @@ class DataFetcherManager:
             )
             result_ctx["status"] = "partial"
         else:
+            # boards (sector rankings) runs before the slow akshare capital_flow:
+            # with TUSHARE_HTTP_URL configured it's a single ~1s tushare call and
+            # the budget would otherwise be consumed by capital_flow's multi-candidate
+            # akshare probing (boards was timing out with zero remaining budget).
+            boards_budget = min(fetch_timeout, remaining_seconds)
+            boards_start = time.time()
+            result_ctx["boards"] = self.get_board_context(
+                stock_code,
+                budget_seconds=boards_budget,
+            )
+            _consume_budget(int((time.time() - boards_start) * 1000))
+
             capital_flow_budget = min(fetch_timeout, remaining_seconds)
             capital_flow_start = time.time()
             result_ctx["capital_flow"] = self.get_capital_flow_context(
@@ -3427,11 +3439,6 @@ class DataFetcherManager:
                 budget_seconds=capital_flow_budget,
             )
             _consume_budget(int((time.time() - capital_flow_start) * 1000))
-
-            result_ctx["boards"] = self.get_board_context(
-                stock_code,
-                budget_seconds=min(fetch_timeout, remaining_seconds),
-            )
 
         block_statuses = {
             "valuation": result_ctx["valuation"].get("status", "not_supported"),
