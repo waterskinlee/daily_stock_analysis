@@ -304,6 +304,64 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertAlmostEqual(quote.total_mv, 1305360, places=2)
         self.assertAlmostEqual(quote.circ_mv, 1305360, places=2)
 
+    @patch.dict(sys.modules, {"tushare": MagicMock()})
+    def test_legacy_realtime_quote_enriched_via_daily_basic(self) -> None:
+        """xiaodefa 无 quotation（接口不存在）-> 旧版路径 + daily_basic 补全。
+
+        这是 xiaodefa 实际走的路径：价格来自旧版实时接口，基础字段来自
+        daily_basic，补全后 _quote_needs_supplement 为 False，无需回退腾讯。
+        """
+        fetcher = self._make_fetcher()
+        fetcher._api.quotation.side_effect = Exception("接口不存在")
+
+        tushare_module = sys.modules["tushare"]
+        tushare_module.get_realtime_quotes.return_value = pd.DataFrame(
+            [
+                {
+                    "name": "中国黄金",
+                    "price": "7.77",
+                    "pre_close": "7.73",
+                    "volume": "1000000",
+                    "amount": "50000000",
+                    "high": "7.85",
+                    "low": "7.70",
+                    "open": "7.75",
+                }
+            ]
+        )
+        fetcher._api.daily_basic.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600916.SH"],
+                "trade_date": ["20260807"],
+                "turnover_rate": [2.8119],
+                "volume_ratio": [1.06],
+                "pe": [47.3928],
+                "pb": [1.7877],
+                "total_mv": [1305360],
+                "circ_mv": [1305360],
+            }
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            quote = fetcher.get_realtime_quote("600916")
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.source.value, "tushare")
+        self.assertAlmostEqual(quote.price, 7.77, places=2)
+        self.assertAlmostEqual(quote.change_pct, 0.52, places=2)  # (7.77-7.73)/7.73*100
+        self.assertAlmostEqual(quote.volume_ratio, 1.06, places=4)
+        self.assertAlmostEqual(quote.turnover_rate, 2.8119, places=4)
+        self.assertAlmostEqual(quote.pe_ratio, 47.3928, places=4)
+        self.assertAlmostEqual(quote.pb_ratio, 1.7877, places=4)
+        self.assertAlmostEqual(quote.total_mv, 1305360, places=2)
+        self.assertAlmostEqual(quote.circ_mv, 1305360, places=2)
+        # amplitude 由 (high-low)/pre_close 估算，不再为 None
+        self.assertAlmostEqual(quote.amplitude, round((7.85 - 7.70) / 7.73 * 100, 2), places=2)
+
+        # 补全后所有 SUPPLEMENT_FIELDS 均非 None，无需回退腾讯
+        from data_provider.base import DataFetcherManager
+        self.assertFalse(DataFetcherManager._quote_needs_supplement(quote))
+
     # ---- get_concept_rankings (dc_index 概念板块) ------------------------------
 
     @staticmethod

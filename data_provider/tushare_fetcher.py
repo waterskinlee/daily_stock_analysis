@@ -32,7 +32,7 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
-from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
+from .realtime_types import UnifiedRealtimeQuote, ChipDistribution, safe_float
 from src.config import get_config
 import os
 from zoneinfo import ZoneInfo
@@ -753,33 +753,11 @@ class TushareFetcher(BaseFetcher):
                 row = df.iloc[0]
                 logger.debug(f"Tushare Pro 实时行情获取成功: {stock_code}")
 
-                # quotation 接口缺 volume_ratio/turnover_rate/pe/pb/mv/amplitude；
+                # quotation 缺 volume_ratio/turnover_rate/pe/pb/mv/amplitude；
                 # 用 daily_basic（同源，~0.3s，xiaodefa 可用）补全缺失字段，避免
                 # 实时行情阶段再回退腾讯补充，减少拓扑噪音。
-                basic_row = {}
-                try:
-                    today = datetime.now().strftime("%Y%m%d")
-                    basic = self._call_api_with_rate_limit(
-                        "daily_basic",
-                        ts_code=ts_code,
-                        start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
-                        end_date=today,
-                    )
-                    if basic is not None and not basic.empty:
-                        if "trade_date" in basic.columns:
-                            basic = basic.sort_values("trade_date", ascending=False)
-                        basic_row = basic.iloc[0].to_dict()
-                except Exception as exc:  # noqa: BLE001 - fail-open
-                    logger.debug(f"Tushare daily_basic 补全失败 {stock_code}: {exc}")
-
-                def _basic_float(key: str) -> Optional[float]:
-                    if key not in basic_row:
-                        return None
-                    try:
-                        v = float(basic_row[key])
-                    except (TypeError, ValueError):
-                        return None
-                    return v if v == v else None  # NaN -> None
+                basic_row = self._daily_basic_basic_row(ts_code)
+                fields = self._enriched_quote_fields(basic_row, row)
 
                 return UnifiedRealtimeQuote(
                     code=normalized_code,
@@ -794,15 +772,13 @@ class TushareFetcher(BaseFetcher):
                     low=safe_float(row.get('low')),
                     open_price=safe_float(row.get('open')),
                     pre_close=safe_float(row.get('pre_close')),
-                    turnover_rate=_basic_float("turnover_rate") if row.get("turnover_ratio") is None else safe_float(row.get("turnover_ratio")),
-                    volume_ratio=_basic_float("volume_ratio"),
-                    pe_ratio=_basic_float("pe") if row.get("pe") is None else safe_float(row.get("pe")),
-                    pb_ratio=_basic_float("pb") if row.get("pb") is None else safe_float(row.get("pb")),
-                    total_mv=(
-                        _basic_float("total_mv") if row.get("total_mv") is None else safe_float(row.get("total_mv"))
-                    ),
-                    circ_mv=_basic_float("circ_mv"),
-                    amplitude=_basic_float("amplitude") if "amplitude" in basic_row else None,
+                    turnover_rate=fields["turnover_rate"],
+                    volume_ratio=fields["volume_ratio"],
+                    pe_ratio=fields["pe_ratio"],
+                    pb_ratio=fields["pb_ratio"],
+                    total_mv=fields["total_mv"],
+                    circ_mv=fields["circ_mv"],
+                    amplitude=fields["amplitude"],
                 )
         except Exception as e:
             # 仅记录调试日志，不报错，继续尝试降级
@@ -832,6 +808,12 @@ class TushareFetcher(BaseFetcher):
                 change_amount = price - pre_close
                 change_pct = (change_amount / pre_close) * 100
 
+            # 旧版接口缺 volume_ratio/turnover/pe/pb/mv 等基础字段，
+            # 同样用 daily_basic（xiaodefa）补全，避免回退腾讯补充。
+            ts_code = self._convert_stock_code(stock_code)
+            basic_row = self._daily_basic_basic_row(ts_code)
+            fields = self._enriched_quote_fields(basic_row, row)
+
             # 构建统一对象
             return UnifiedRealtimeQuote(
                 code=normalized_code,
@@ -846,11 +828,77 @@ class TushareFetcher(BaseFetcher):
                 low=safe_float(row['low']),
                 open_price=safe_float(row['open']),
                 pre_close=pre_close,
+                turnover_rate=fields["turnover_rate"],
+                volume_ratio=fields["volume_ratio"],
+                pe_ratio=fields["pe_ratio"],
+                pb_ratio=fields["pb_ratio"],
+                total_mv=fields["total_mv"],
+                circ_mv=fields["circ_mv"],
+                amplitude=fields["amplitude"],
             )
 
         except Exception as e:
             logger.warning(f"Tushare (旧版) 获取实时行情失败 {stock_code}: {e}")
             return None
+
+    def _daily_basic_basic_row(self, ts_code: str) -> dict:
+        """拉取最近一日 daily_basic 行（fail-open：异常返回 {}）。
+
+        xiaodefa 可用（~0.3s），补全实时行情缺的 volume_ratio/turnover_rate/
+        pe/pb/total_mv/circ_mv，使实时行情阶段无需再回退腾讯。
+        """
+        try:
+            today = datetime.now().strftime("%Y%m%d")
+            basic = self._call_api_with_rate_limit(
+                "daily_basic",
+                ts_code=ts_code,
+                start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
+                end_date=today,
+            )
+            if basic is None or basic.empty:
+                return {}
+            if "trade_date" in basic.columns:
+                basic = basic.sort_values("trade_date", ascending=False)
+            row = basic.iloc[0].to_dict()
+            return {k: v for k, v in row.items() if v is not None}
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            logger.debug(f"Tushare daily_basic 补全失败 {ts_code}: {exc}")
+            return {}
+
+    def _enriched_quote_fields(self, basic_row: dict, row) -> dict:
+        """从 daily_basic 行 + 行情行组装实时行情基础字段。
+
+        优先级：daily_basic 现值 > 行情行自带值；amplitude 缺失时由
+        (high-low)/pre_close 估算。
+        """
+        def _pick(key: str, fallback=None) -> Optional[float]:
+            val = basic_row.get(key)
+            if val is None and fallback is not None:
+                val = fallback
+            if val is None:
+                return None
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return None
+            return v if v == v else None  # NaN -> None
+
+        fields = {
+            "turnover_rate": _pick("turnover_rate", row.get("turnover_ratio")),
+            "volume_ratio": _pick("volume_ratio"),
+            "pe_ratio": _pick("pe", row.get("pe")),
+            "pb_ratio": _pick("pb", row.get("pb")),
+            "total_mv": _pick("total_mv", row.get("total_mv")),
+            "circ_mv": _pick("circ_mv"),
+            "amplitude": _pick("amplitude"),
+        }
+        if fields["amplitude"] is None:
+            hi = safe_float(row.get("high"))
+            lo = safe_float(row.get("low"))
+            pre = safe_float(row.get("pre_close"))
+            if hi is not None and lo is not None and pre and pre > 0:
+                fields["amplitude"] = round((hi - lo) / pre * 100, 2)
+        return fields
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[dict]]:
         """
