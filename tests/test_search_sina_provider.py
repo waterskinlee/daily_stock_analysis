@@ -48,7 +48,8 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
                     "intro": "8月8日下午，贵州茅台上海自营店…",
                     "url": "https://finance.sina.com.cn/wm/2026-08-08/doc-x.shtml",
                     "ctime": _NOW - 60,
-                    "media": "中国基金报",
+                    "media": "",
+                    "media_show": "中国基金报",
                     "source": "新浪财经",
                 }
             ]
@@ -66,7 +67,7 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         self.assertNotIn("<em>", r.title)  # 高亮标签被剥离
         self.assertIn("再涨价", r.title)
         self.assertEqual(r.url, "https://finance.sina.com.cn/wm/2026-08-08/doc-x.shtml")
-        self.assertEqual(r.source, "中国基金报")
+        self.assertEqual(r.source, "中国基金报")  # media_show 优先于空 media
         self.assertIsNotNone(r.published_date)
         # ctime 距今 1 分钟内，published_date 非空且格式正确
         self.assertRegex(r.published_date, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
