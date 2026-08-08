@@ -1596,7 +1596,8 @@ class TushareFetcher(BaseFetcher):
             result["errors"].append(f"top10_holders:{type(exc).__name__}")
 
         # 8. institution_holding_change: xiaodefa 未开放 top_inst_hold，机构持股
-        # 变化补走 akshare stock_institute_hold（keyless，~0.7s，fail-open）。
+        # 补走东财 zlsj 机构持仓（datacenter RPT_MAIN_ORGHOLD，直连全市场覆盖，
+        # ~0.3s，优于 akshare 605 行），akshare stock_institute_hold 兜底。
         # 仅在 tushare 已产出内容（growth/earnings/institution 任一非空）且
         # 缺该字段时触发；若 tushare 整体空，交给 manager 回退整个 akshare
         # bundle，避免重复调用。
@@ -1607,10 +1608,20 @@ class TushareFetcher(BaseFetcher):
             try:
                 from .fundamental_adapter import AkshareFundamentalAdapter
 
-                change = AkshareFundamentalAdapter().get_institution_holding_change(stock_code)
-                if change is not None:
-                    result["institution"]["institution_holding_change"] = change
-                    result["source_chain"].append("institution:akshare_stock_institute_hold")
+                detail = AkshareFundamentalAdapter().get_institution_holdings_detail(stock_code)
+                if detail:
+                    for key in (
+                        "institution_holding_change",
+                        "institution_count",
+                        "institution_holding_ratio",
+                        "institution_ratio_change",
+                        "hold_direction",
+                        "report_date",
+                    ):
+                        if detail.get(key) is not None:
+                            result["institution"][key] = detail[key]
+                    source = detail.get("source", "eastmoney_zlsj")
+                    result["source_chain"].append(f"institution:{source}")
             except Exception as exc:  # noqa: BLE001 - fail-open
                 result["errors"].append(f"institute_hold:{type(exc).__name__}")
 

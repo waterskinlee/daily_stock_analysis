@@ -528,6 +528,79 @@ class AkshareFundamentalAdapter:
         ``top_inst_hold``, so when institution_holding_change is missing we fill
         it from this keyless akshare feed (~0.7s, fail-open -> None).
         """
+        detail = self.get_institution_holdings_detail(stock_code)
+        return detail.get("institution_holding_change")
+
+    def get_institution_holdings_detail(self, stock_code: str) -> Dict[str, Any]:
+        """Return institution holdings detail for one A-share stock.
+
+        Eastmoney zlsj (主力数据·机构持仓) first via datacenter-web
+        ``RPT_MAIN_ORGHOLD`` (direct HTTP, no key, ~0.3s, full-market
+        coverage — beats akshare's 605-row ``stock_institute_hold`` which
+        omits many stocks). Falls back to akshare when zlsj has no row.
+
+        Returns dict with institution_holding_change (增减数量), plus extra
+        fields when available; empty dict on total failure.
+        """
+        result: Dict[str, Any] = {}
+        try:
+            # 最新报告期
+            dates = self._em_datacenter_get(
+                "RPT_MAIN_REPORTDATE",
+                columns="REPORT_DATE",
+                page_size=1,
+                sort_columns="REPORT_DATE",
+                sort_types="-1",
+            )
+            if dates:
+                raw_date = str(dates[0].get("REPORT_DATE") or "")[:10]
+                report_date = raw_date
+            else:
+                report_date = ""
+            filter_str = f'(SECURITY_CODE="{stock_code}")'
+            if report_date:
+                filter_str += f"(REPORT_DATE='{report_date}')"
+            rows = self._em_datacenter_get(
+                "RPT_MAIN_ORGHOLD",
+                columns="ALL",
+                filter_str=filter_str,
+                page_size=8,
+            )
+            if rows:
+                # ORG_TYPE=00 机构汇总（若存在），否则取 01 基金
+                pick = next(
+                    (r for r in rows if str(r.get("ORG_TYPE")) == "00"),
+                    None,
+                )
+                if pick is None:
+                    pick = rows[0]
+                ratio = _safe_float(pick.get("FREESHARES_RATIO"))
+                ratio_change = _safe_float(pick.get("FREESHARES_RATIO_CHANGE"))
+                num = _safe_float(pick.get("HOULD_NUM"))
+                num_change = _safe_float(pick.get("HOLDCHA_NUM"))
+                if ratio is not None or ratio_change is not None or num_change is not None:
+                    if num_change is not None:
+                        result["institution_holding_change"] = num_change
+                    if num is not None:
+                        result["institution_count"] = num
+                    if ratio is not None:
+                        result["institution_holding_ratio"] = ratio
+                    if ratio_change is not None:
+                        result["institution_ratio_change"] = ratio_change
+                    direction = str(pick.get("HOLDCHA") or "").strip()
+                    if direction:
+                        result["hold_direction"] = direction
+                    result["report_date"] = report_date
+                    result["source"] = "eastmoney_zlsj"
+                    return result
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            logger.debug(
+                "[AkshareFundamentalAdapter] zlsj 机构持仓失败 %s: %s",
+                stock_code,
+                type(exc).__name__,
+            )
+
+        # 回退 akshare stock_institute_hold（机构数变化/持股比例增幅）
         inst_df, _inst_source, _inst_errors = self._call_df_candidates(
             [
                 ("stock_institute_hold", {}),
@@ -535,11 +608,15 @@ class AkshareFundamentalAdapter:
             ]
         )
         if inst_df is None:
-            return None
+            return {}
         row = _extract_latest_row(inst_df, stock_code)
         if row is None:
-            return None
-        return _safe_float(_pick_by_keywords(row, ["增减", "变化", "变动", "持股变化"]))
+            return {}
+        change = _safe_float(_pick_by_keywords(row, ["增减", "变化", "变动", "持股变化"]))
+        if change is not None:
+            result["institution_holding_change"] = change
+        result["source"] = "akshare_stock_institute_hold"
+        return result
 
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """

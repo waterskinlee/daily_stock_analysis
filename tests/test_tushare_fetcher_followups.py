@@ -449,8 +449,8 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         )
 
         with patch.object(fetcher, "_check_rate_limit"), patch(
-            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
-            return_value=None,
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holdings_detail",
+            return_value={},
         ):
             result = fetcher.get_fundamental_bundle("600519")
 
@@ -509,13 +509,20 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         fetcher._api.top10_holders.return_value = pd.DataFrame()
 
         with patch.object(fetcher, "_check_rate_limit"), patch(
-            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
-            return_value=12.5,
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holdings_detail",
+            return_value={
+                "institution_holding_change": 12.5,
+                "institution_count": 352,
+                "institution_holding_ratio": 2.42,
+                "source": "akshare_stock_institute_hold",
+            },
         ):
             result = fetcher.get_fundamental_bundle("600519")
 
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["institution"]["institution_holding_change"], 12.5)
+        self.assertEqual(result["institution"]["institution_count"], 352)
+        self.assertEqual(result["institution"]["institution_holding_ratio"], 2.42)
         self.assertIn("institution:akshare_stock_institute_hold", result["source_chain"])
         # fail-open：akshare 异常不破坏 bundle
         self.assertEqual(result["errors"], [])
@@ -532,8 +539,8 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         fetcher._api.top10_holders.side_effect = Exception("quota")
 
         with patch.object(fetcher, "_check_rate_limit"), patch(
-            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
-            return_value=99.0,
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holdings_detail",
+            return_value={"institution_holding_change": 99.0},
         ) as m:
             result = fetcher.get_fundamental_bundle("600519")
 
@@ -563,8 +570,8 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         fetcher._api.top10_holders.return_value = pd.DataFrame()
 
         with patch.object(fetcher, "_check_rate_limit"), patch(
-            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
-            return_value=None,
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holdings_detail",
+            return_value={},
         ):
             result = fetcher.get_fundamental_bundle("600519")
 
@@ -572,3 +579,66 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         dividend = result["earnings"].get("dividend") or {}
         self.assertGreater(len(dividend.get("events", [])), 0)
         self.assertNotIn("dividend", result["errors"])
+
+    # ---- 东财 zlsj 机构持仓 (RPT_MAIN_ORGHOLD) -------------------------------
+
+    def test_get_institution_holdings_detail_prefers_zlsj(self) -> None:
+        """zlsj 直连（RPT_MAIN_ORGHOLD）优先，返回机构数/持股比例/增减。"""
+        from data_provider.fundamental_adapter import AkshareFundamentalAdapter
+
+        adapter = AkshareFundamentalAdapter()
+
+        def _fake_datacenter(report_name, **_kwargs):
+            if report_name == "RPT_MAIN_REPORTDATE":
+                return [{"REPORT_DATE": "2026-06-30"}]
+            if report_name == "RPT_MAIN_ORGHOLD":
+                return [
+                    {
+                        "SECURITY_NAME_ABBR": "贵州茅台",
+                        "ORG_TYPE": "00",
+                        "HOULD_NUM": 988,
+                        "FREESHARES_RATIO": 3.23121759,
+                        "FREESHARES_RATIO_CHANGE": -1,
+                        "HOLDCHA": "减仓",
+                        "HOLDCHA_NUM": -25422467,
+                    }
+                ]
+            return []
+
+        with patch.object(
+            adapter, "_em_datacenter_get", side_effect=_fake_datacenter
+        ), patch.object(adapter, "_call_df_candidates") as m:
+            detail = adapter.get_institution_holdings_detail("600519")
+
+        m.assert_not_called()  # zlsj 命中则不再走 akshare
+        self.assertEqual(detail["institution_holding_change"], -25422467.0)
+        self.assertEqual(detail["institution_count"], 988.0)
+        self.assertAlmostEqual(detail["institution_holding_ratio"], 3.23121759, places=4)
+        self.assertEqual(detail["hold_direction"], "减仓")
+        self.assertEqual(detail["report_date"], "2026-06-30")
+        self.assertEqual(detail["source"], "eastmoney_zlsj")
+
+    def test_get_institution_holdings_detail_falls_back_to_akshare(self) -> None:
+        """zlsj 失败/无数据时回退 akshare stock_institute_hold。"""
+        from data_provider.fundamental_adapter import AkshareFundamentalAdapter
+
+        adapter = AkshareFundamentalAdapter()
+
+        inst_df = pd.DataFrame(
+            {
+                "证券代码": ["600519"],
+                "证券简称": ["贵州茅台"],
+                "机构数变化": [10],
+                "持股比例增幅": [1.5],
+            }
+        )
+
+        with patch.object(adapter, "_em_datacenter_get", side_effect=Exception("datacenter down")), patch.object(
+            adapter,
+            "_call_df_candidates",
+            return_value=(inst_df, "stock_institute_hold", []),
+        ):
+            detail = adapter.get_institution_holdings_detail("600519")
+
+        self.assertEqual(detail["source"], "akshare_stock_institute_hold")
+        self.assertEqual(detail["institution_holding_change"], 10.0)
