@@ -3508,8 +3508,39 @@ class DataFetcherManager:
                 [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
                 ["fundamental stage timeout"],
             )
+
+        def _capital_flow_task() -> Dict[str, Any]:
+            # Prefer TushareFetcher when available (fast keyless proxy, ~1s) so
+            # the budget reliably covers the block; fall back to the akshare
+            # adapter (slow multi-candidate probing) only when tushare is absent
+            # or returned no content.
+            tushare = None
+            for fetcher in self._fetchers:
+                if (
+                    getattr(fetcher, "name", "") == "TushareFetcher"
+                    and getattr(fetcher, "is_available", lambda: False)()
+                    and hasattr(fetcher, "get_capital_flow")
+                ):
+                    tushare = fetcher
+                    break
+            if tushare is not None:
+                try:
+                    payload = tushare.get_capital_flow(stock_code)
+                except Exception as exc:  # noqa: BLE001 - fail-open
+                    logger.warning("tushare capital flow failed for %s: %s", stock_code, exc)
+                    payload = None
+                if isinstance(payload, dict):
+                    has_content = bool(
+                        (isinstance(payload.get("stock_flow"), dict) and any(v is not None for v in payload["stock_flow"].values()))
+                        or (payload.get("sector_rankings") or {}).get("top")
+                        or (payload.get("sector_rankings") or {}).get("bottom")
+                    )
+                    if has_content:
+                        return payload
+            return self._fundamental_adapter.get_capital_flow(stock_code)
+
         payload, err, cost_ms = self._run_with_retry(
-            lambda: self._fundamental_adapter.get_capital_flow(stock_code),
+            _capital_flow_task,
             timeout,
             "capital_flow",
         )

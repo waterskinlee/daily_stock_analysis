@@ -1144,10 +1144,116 @@ class TushareFetcher(BaseFetcher):
         
         # 获取为空或者接口调用失败，返回 None
         return None
-    
-    
 
-    
+    def get_capital_flow(self, stock_code: str, top_n: int = 5) -> Dict[str, Any]:
+        """Return stock + sector capital flow via Tushare Pro.
+
+        Uses ``moneyflow`` (个股资金流向) for the stock and
+        ``moneyflow_ind_ths`` (同花顺行业资金流向) for sector rankings.
+
+        Mirrors ``AkshareFundamentalAdapter.get_capital_flow`` shape so the
+        manager's capital-flow block can consume either provider. Amounts are
+        normalized to 元 (Tushare returns 万元); fail-open.
+        """
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "stock_flow": {},
+            "sector_rankings": {"top": [], "bottom": []},
+            "source_chain": [],
+            "errors": [],
+        }
+        if self._api is None:
+            result["errors"].append("tushare api not initialized")
+            return result
+        if _is_etf_code(stock_code):
+            return result
+
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"convert_code:{type(exc).__name__}")
+            return result
+
+        today = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        latest_trade_date: Optional[str] = None
+
+        try:
+            df = self._call_api_with_rate_limit(
+                "moneyflow",
+                ts_code=ts_code,
+                start_date=start,
+                end_date=today,
+            )
+            if df is None or df.empty:
+                result["errors"].append("moneyflow:empty")
+                result["source_chain"].append("capital_stock:tushare_moneyflow")
+            else:
+                df = df.copy()
+                if "trade_date" in df.columns:
+                    df = df.sort_values("trade_date", ascending=False)
+                latest = df.iloc[0]
+                latest_trade_date = (
+                    str(latest.get("trade_date")) if "trade_date" in df.columns else None
+                )
+
+                def _safe_amount_wan(value: Any) -> Optional[float]:
+                    try:
+                        parsed = float(value)
+                    except (TypeError, ValueError):
+                        return None
+                    return parsed * 10000.0 if parsed == parsed else None
+
+                def _sum_net_wan(n: int) -> Optional[float]:
+                    if n <= 0 or "net_mf_amount" not in df.columns:
+                        return None
+                    window = df.head(n)
+                    vals = pd.to_numeric(window["net_mf_amount"], errors="coerce").dropna()
+                    if vals.empty:
+                        return None
+                    return float(vals.sum()) * 10000.0
+
+                result["stock_flow"] = {
+                    "main_net_inflow": _safe_amount_wan(latest.get("net_mf_amount")) if "net_mf_amount" in df.columns else None,
+                    "inflow_5d": _sum_net_wan(5),
+                    "inflow_10d": _sum_net_wan(10),
+                }
+                result["source_chain"].append("capital_stock:tushare_moneyflow")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"moneyflow:{type(exc).__name__}")
+
+        # Sector rankings: industry net inflow on the stock's latest trade date.
+        try:
+            sector_date = latest_trade_date or datetime.now().strftime("%Y%m%d")
+            sdf = self._call_api_with_rate_limit("moneyflow_ind_ths", trade_date=sector_date)
+            if sdf is not None and not sdf.empty and "industry" in sdf.columns and "net_amount" in sdf.columns:
+                work = sdf[["industry", "net_amount"]].copy()
+                work["net_amount"] = pd.to_numeric(work["net_amount"], errors="coerce")
+                work = work.dropna(subset=["net_amount"])
+                top = work.nlargest(top_n, "net_amount")
+                bottom = work.nsmallest(top_n, "net_amount")
+                result["sector_rankings"] = {
+                    "top": [
+                        {"name": str(row["industry"]), "net_inflow": float(row["net_amount"]) * 10000.0}
+                        for _, row in top.iterrows()
+                    ],
+                    "bottom": [
+                        {"name": str(row["industry"]), "net_inflow": float(row["net_amount"]) * 10000.0}
+                        for _, row in bottom.iterrows()
+                    ],
+                }
+                result["source_chain"].append("capital_sector:tushare_moneyflow_ind_ths")
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"moneyflow_ind_ths:{type(exc).__name__}")
+
+        has_content = bool(
+            (isinstance(result["stock_flow"], dict) and any(v is not None for v in result["stock_flow"].values()))
+            or result["sector_rankings"]["top"]
+            or result["sector_rankings"]["bottom"]
+        )
+        result["status"] = "partial" if has_content else "not_supported"
+        return result
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据

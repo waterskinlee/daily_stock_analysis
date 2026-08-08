@@ -162,6 +162,78 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(fetcher._convert_stock_code("605218"), "605218.SH")
         self.assertEqual(fetcher._convert_stock_code("600519.SS"), "600519.SH")
 
+    # ---- get_capital_flow (moneyflow + moneyflow_ind_ths) ---------------------
+
+    def test_get_capital_flow_populates_stock_and_sector(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.moneyflow.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"] * 12,
+                "trade_date": [
+                    "20260807", "20260806", "20260805", "20260804", "20260803",
+                    "20260731", "20260730", "20260729", "20260728", "20260727",
+                    "20260724", "20260723",
+                ],
+                "net_mf_amount": [
+                    -11454.78, 5000.0, 3000.0, 2000.0, 1000.0,
+                    -500.0, 800.0, 1200.0, -900.0, 700.0,
+                    400.0, -300.0,
+                ],
+            }
+        )
+        fetcher._api.moneyflow_ind_ths.return_value = pd.DataFrame(
+            {
+                "industry": ["医疗服务", "元件", "生物制品", "白酒", "煤炭"],
+                "net_amount": [45.0, 13.0, 20.0, -8.0, -30.0],
+            }
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_capital_flow("600519", top_n=3)
+
+        self.assertEqual(result["status"], "partial")
+        # latest day net main inflow, 万元 -> 元
+        self.assertAlmostEqual(result["stock_flow"]["main_net_inflow"], -11454.78 * 10000, places=2)
+        # 5d / 10d sums
+        self.assertAlmostEqual(result["stock_flow"]["inflow_5d"], (-11454.78 + 5000 + 3000 + 2000 + 1000) * 10000, places=2)
+        self.assertAlmostEqual(
+            result["stock_flow"]["inflow_10d"],
+            (-11454.78 + 5000 + 3000 + 2000 + 1000 - 500 + 800 + 1200 - 900 + 700) * 10000,
+            places=2,
+        )
+        top_names = [item["name"] for item in result["sector_rankings"]["top"]]
+        bottom_names = [item["name"] for item in result["sector_rankings"]["bottom"]]
+        self.assertEqual(top_names, ["医疗服务", "生物制品", "元件"])
+        # bottom_n = top_n (3); with 5 industries the 3rd-largest also lands in bottom
+        self.assertEqual(bottom_names, ["煤炭", "白酒", "元件"])
+        self.assertIn("capital_stock:tushare_moneyflow", result["source_chain"])
+        self.assertIn("capital_sector:tushare_moneyflow_ind_ths", result["source_chain"])
+        self.assertEqual(result["errors"], [])
+
+    def test_get_capital_flow_fail_open_on_empty_moneyflow(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.moneyflow.return_value = pd.DataFrame()
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_capital_flow("600519")
+
+        self.assertEqual(result["status"], "not_supported")
+        self.assertEqual(result["stock_flow"], {})
+        self.assertTrue(any("moneyflow:empty" in e for e in result["errors"]))
+
+    def test_get_capital_flow_fail_open_on_api_error(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.moneyflow.side_effect = Exception("quota")
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_capital_flow("600519")
+
+        self.assertEqual(result["status"], "not_supported")
+        self.assertTrue(any("moneyflow:Exception" in e for e in result["errors"]))
+        # sector source still attempted
+        self.assertEqual(result["sector_rankings"]["top"], [])
+        self.assertEqual(result["sector_rankings"]["bottom"], [])
+
     @patch.dict(sys.modules, {"tushare": MagicMock()})
     def test_legacy_realtime_quote_keeps_sz_hint_as_stock_symbol(self) -> None:
         fetcher = self._make_fetcher()
