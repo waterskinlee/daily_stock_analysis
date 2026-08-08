@@ -212,6 +212,22 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         self.assertEqual(ordered[0], "SinaNews")
         self.assertLess(ordered.index("SinaNews"), ordered.index("Brave"))
 
+    def test_cn_stock_prefers_eastmoney_then_sina(self) -> None:
+        """A股且东财+新浪都开启时：东财资讯 -> 新浪 -> Brave。"""
+        service = SearchService(
+            brave_keys=["brave-test-key"],
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cls_wire_enabled=True,
+            sina_news_enabled=True,
+            em_data_news_enabled=True,
+            sina_news_prefer_for_cn=True,
+        )
+        ordered = [p.name for p in service._providers_for_query("601138", "工业富联")]
+        self.assertEqual(ordered[0], "EastmoneyData")
+        self.assertLess(ordered.index("EastmoneyData"), ordered.index("SinaNews"))
+        self.assertLess(ordered.index("SinaNews"), ordered.index("Brave"))
+
     def test_foreign_stock_keeps_brave_first(self) -> None:
         """美股/港股（英文查询）时保持 Brave 优先，SinaNews 仅作兜底。"""
         service = SearchService(

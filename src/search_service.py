@@ -2220,6 +2220,33 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+# 新浪/东财等中文财经搜索把多词查询当 OR 处理：DSA 通用查询
+# 「名称 代码 股票 最新消息」会被拆词返回台风/高铁等泛化新闻。
+# 这些噪音词/代码需在发给中文搜索前清理，保留核心公司名+事件词。
+_CN_NEWS_NOISE_TERMS = (
+    "股票", "最新消息", "最新", "消息", "A股", "a股", "催化",
+    "上市公司", "个股", "行情", "走势",
+)
+
+
+def _clean_cn_news_query(query: str) -> str:
+    """简化中文新闻查询：去 6 位股票代码与通用噪音词，保留公司名+事件词。
+
+    ``贵州茅台 600519 股票 最新消息`` -> ``贵州茅台``
+    ``工业富联 601138 股票 最新消息`` -> ``工业富联``
+    ``贵州茅台 (年报预告 OR 减持公告)`` -> ``贵州茅台 (年报预告 OR 减持公告)``
+    仅当清理后仍有 ≥2 字内容才返回，否则保持原查询。
+    """
+    q = str(query or "").strip()
+    if not q:
+        return q
+    cleaned = re.sub(r"\b\d{6}\b", " ", q)  # 6 位 A 股代码
+    for term in _CN_NEWS_NOISE_TERMS:
+        cleaned = re.sub(re.escape(term), " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t()（）|")
+    return cleaned if len(cleaned) >= 2 else q
+
+
 class SinaNewsSearchProvider(BaseSearchProvider):
     """
     新浪新闻搜索（free, no API key, 国内直连）。
@@ -2257,28 +2284,13 @@ class SinaNewsSearchProvider(BaseSearchProvider):
         return re.sub(r"\s+", " ", text).strip()
 
     # 新浪把多词查询当 OR 处理：DSA 通用查询「贵州茅台 600519 股票 最新消息」
-    # 会被拆成 OR 词返回台风/高铁等泛化新闻。这些噪音词/代码需在发给新浪前清理。
-    _SINA_NOISE_TERMS = (
-        "股票", "最新消息", "最新", "消息", "A股", "a股", "催化",
-        "上市公司", "个股", "行情", "走势",
-    )
+    # 会被拆成 OR 词返回台风/高铁等泛化新闻。复用共享清理逻辑。
+    _SINA_NOISE_TERMS = _CN_NEWS_NOISE_TERMS
 
     @classmethod
     def _clean_query(cls, query: str) -> str:
-        """简化查询：去掉 DSA 通用噪音词与 6 位股票代码，保留核心公司名+事件词。
-
-        ``贵州茅台 600519 股票 最新消息`` -> ``贵州茅台``
-        ``贵州茅台 (年报预告 OR 减持公告)`` -> ``贵州茅台 (年报预告 OR 减持公告)``
-        仅当清理后仍有 ≥2 字内容才返回，否则保持原查询。
-        """
-        q = str(query or "").strip()
-        if not q:
-            return q
-        cleaned = re.sub(r"\b\d{6}\b", " ", q)  # 6 位 A 股代码
-        for term in cls._SINA_NOISE_TERMS:
-            cleaned = re.sub(re.escape(term), " ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t()（）|")
-        return cleaned if len(cleaned) >= 2 else q
+        """简化查询：去掉 DSA 通用噪音词与 6 位股票代码，保留核心公司名+事件词。"""
+        return _clean_cn_news_query(query)
 
     @staticmethod
     def _format_time(ctime: Any) -> Optional[str]:
@@ -2396,6 +2408,172 @@ class SinaNewsSearchProvider(BaseSearchProvider):
                 provider=self.name,
                 success=False,
                 error_message="新浪新闻搜索未启用",
+                search_time=time.time() - start_time,
+            )
+        response = self._do_search(query, max_results=max_results, days=days)
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 搜索 '%s' 成功，返回 %s 条结果，耗时 %.2fs",
+                self.name,
+                query,
+                len(response.results),
+                response.search_time,
+            )
+        else:
+            logger.debug("[%s] 搜索 '%s' 失败: %s", self.name, query, response.error_message)
+        return response
+
+
+class EastmoneyDataApiSearchProvider(BaseSearchProvider):
+    """
+    东财数据中心资讯搜索（free, no API key, 国内直连）。
+
+    基于 ``data.eastmoney.com/dataapi/search/article`` —— 东财数据中心
+    搜索接口（与主力数据/股东户数同源的 dataapi 系列），非反爬的
+    ``search-api-web.eastmoney.com``（后者对 requests 只返回 passportWeb
+    蜜罐）。2026-08 生产网络实测：requests 直连 200，``keyword=工业富联``
+    返回「工业富联涨停」「工业富联跌超3%」等直接命中标题，覆盖与时效
+    均为中文财经新闻首选。多词查询同新浪按 OR 拆词，复用共享清理逻辑。
+
+    位置：provider 链首位（A股查询优先，质量最高且免费）。
+    """
+
+    DATAAPI_SEARCH_URL = "https://data.eastmoney.com/dataapi/search/article"
+    DATAAPI_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": "https://data.eastmoney.com/",
+    }
+    DATAAPI_TIMEOUT_SECONDS = 10
+
+    def __init__(self, enabled: bool = True):
+        super().__init__([], "EastmoneyData")
+        self._enabled = bool(enabled)
+
+    @property
+    def is_available(self) -> bool:
+        """No API key required — availability is governed by the enable flag."""
+        return self._enabled
+
+    @staticmethod
+    def _clean_title(raw: Any) -> str:
+        text = re.sub(r"<[^>]+>", "", str(raw or ""))
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _clean_query(cls, query: str) -> str:
+        """复用共享清理逻辑：去 6 位代码与噪音词，保留公司名+事件词。"""
+        return _clean_cn_news_query(query)
+
+    @staticmethod
+    def _format_time(raw: Any) -> Optional[str]:
+        """东财 date 格式 ``YYYY-MM-DD HH:MM:SS`` -> ``YYYY-MM-DD HH:MM``。"""
+        s = str(raw or "").strip()
+        if not s:
+            return None
+        try:
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return s[:16] if len(s) >= 16 else (s or None)
+
+    def _do_search(  # type: ignore[override]
+        self,
+        query: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        cutoff = time.time() - max(1, int(days)) * 86400
+        results: List[SearchResult] = []
+        dataapi_query = self._clean_query(query)
+        try:
+            resp = requests.get(
+                self.DATAAPI_SEARCH_URL,
+                params={
+                    "keyword": dataapi_query,
+                    "page": "1",
+                    "pagesize": str(max(10, int(max_results) * 2)),
+                },
+                headers=self.DATAAPI_HEADERS,
+                timeout=self.DATAAPI_TIMEOUT_SECONDS,
+            )
+            if resp.status_code != 200:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=f"EastmoneyData HTTP {resp.status_code}",
+                )
+            payload = resp.json()
+            items = (payload.get("result") or {}).get("cmsArticleWeb") or []
+            if not isinstance(items, list):
+                items = []
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"EastmoneyData 请求失败: {type(exc).__name__}",
+            )
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = self._clean_title(item.get("title"))
+            content = str(item.get("content") or "").strip()
+            if not title and not content:
+                continue
+            try:
+                ctime_ts = datetime.strptime(
+                    str(item.get("date") or "").strip(), "%Y-%m-%d %H:%M:%S"
+                ).timestamp()
+            except (ValueError, TypeError):
+                ctime_ts = 0
+            if ctime_ts and ctime_ts < cutoff:
+                continue
+            media = str(item.get("mediaName") or "").strip() or "东方财富"
+            url = str(item.get("url") or "").strip()
+            results.append(
+                SearchResult(
+                    title=title or (content[:80] or "东方财富"),
+                    snippet=(content or title)[:200],
+                    url=url or "https://finance.eastmoney.com/",
+                    source=media,
+                    published_date=self._format_time(item.get("date")),
+                )
+            )
+            if len(results) >= int(max_results):
+                break
+
+        if not results:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="EastmoneyData 无匹配结果",
+            )
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Search eastmoney dataapi; fail-open when disabled or unreachable."""
+        start_time = time.time()
+        if not self._enabled:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="东财资讯搜索未启用",
                 search_time=time.time() - start_time,
             )
         response = self._do_search(query, max_results=max_results, days=days)
@@ -2818,6 +2996,7 @@ class SearchService:
         news_strategy_profile: str = "short",
         cls_wire_enabled: bool = False,
         sina_news_enabled: bool = False,
+        em_data_news_enabled: bool = False,
         sina_news_prefer_for_cn: bool = True,
     ):
         """
@@ -2849,6 +3028,7 @@ class SearchService:
             "news_strategy_profile": news_strategy_profile,
             "cls_wire_enabled": bool(cls_wire_enabled),
             "sina_news_enabled": bool(sina_news_enabled),
+            "em_data_news_enabled": bool(em_data_news_enabled),
             "sina_news_prefer_for_cn": bool(sina_news_prefer_for_cn),
         }
         self._providers: List[BaseSearchProvider] = []
@@ -2885,6 +3065,12 @@ class SearchService:
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
+
+        # 3.4 东财数据中心资讯搜索（免费无 key，国内直连；中文财经新闻质量
+        #     首选，放新浪之前。多词查询走共享清理。）
+        if em_data_news_enabled:
+            self._providers.append(EastmoneyDataApiSearchProvider(enabled=True))
+            logger.info("已启用东财数据中心资讯搜索（免费无 key，国内直连）")
 
         # 3.5 新浪新闻搜索（免费无 key，国内直连；Brave 429 限流时的稳定兜底，
         #     优先于公共 SearXNG 与 CLS 快讯流）
@@ -4741,10 +4927,11 @@ class SearchService:
         stock_name: str,
         prefer_chinese: Optional[bool] = None,
     ) -> List[BaseSearchProvider]:
-        """Provider 顺序：默认链；A股（6位数字代码，中文查询）时 SinaNews 优先。
+        """Provider 顺序：默认链；A股（6位数字代码，中文查询）时中文免费源优先。
 
         返回新的列表，不修改 self._providers（保持其它调用点/测试预期）。
-        美股/港股（英文查询）保持 Brave 优先，SinaNews 仅作兜底。
+        美股/港股（英文查询）保持 Brave 优先，中文源仅作兜底。
+        A股顺序：东财资讯（质量最高）-> 新浪新闻（兜底）-> 其余（Brave 等）。
         """
         providers = [p for p in self._providers if p.is_available]
         if not providers:
@@ -4756,11 +4943,13 @@ class SearchService:
         is_cn_stock = code.isdigit() and len(code) == 6
         if not is_cn_stock:
             return providers
-        sina = next((p for p in providers if isinstance(p, SinaNewsSearchProvider)), None)
-        if sina is None:
-            return providers
-        rest = [p for p in providers if p is not sina]
-        return [sina] + rest
+        # 中文免费源优先：东财（质量最高）-> 新浪（兜底）
+        preferred = [
+            p for p in providers
+            if isinstance(p, (EastmoneyDataApiSearchProvider, SinaNewsSearchProvider))
+        ]
+        rest = [p for p in providers if p not in preferred]
+        return preferred + rest
 
     def search_stock_events(
         self,
@@ -5371,6 +5560,7 @@ def get_search_service() -> SearchService:
                     news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
                     cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
                     sina_news_enabled=getattr(config, "sina_news_enabled", False),
+                    em_data_news_enabled=getattr(config, "em_data_news_enabled", False),
                     sina_news_prefer_for_cn=getattr(config, "sina_news_prefer_for_cn", True),
                 )
     
