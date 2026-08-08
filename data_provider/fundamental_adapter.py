@@ -521,6 +521,26 @@ class AkshareFundamentalAdapter:
                 continue
         return None, None, errors
 
+    def get_institution_holding_change(self, stock_code: str) -> Optional[float]:
+        """Return latest institution holding change via akshare stock_institute_hold.
+
+        Used by the tushare bundle fallback: xiaodefa does not expose
+        ``top_inst_hold``, so when institution_holding_change is missing we fill
+        it from this keyless akshare feed (~0.7s, fail-open -> None).
+        """
+        inst_df, _inst_source, _inst_errors = self._call_df_candidates(
+            [
+                ("stock_institute_hold", {}),
+                ("stock_institute_recommend", {}),
+            ]
+        )
+        if inst_df is None:
+            return None
+        row = _extract_latest_row(inst_df, stock_code)
+        if row is None:
+            return None
+        return _safe_float(_pick_by_keywords(row, ["增减", "变化", "变动", "持股变化"]))
+
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
         Return normalized fundamental blocks from AkShare with partial tolerance.

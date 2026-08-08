@@ -1438,10 +1438,11 @@ class TushareFetcher(BaseFetcher):
         - earnings.quick_report_summary: express.perf_summary
         - earnings.dividend: dividend (cash_div_tax per-10-shares -> pre-tax per share)
         - institution.top10_holder_change: top10_holders.hold_change
+        - institution.institution_holding_change: akshare stock_institute_hold
+          fallback (xiaodefa 不开放 top_inst_hold)，仅当 tushare 未提供时触发
 
         Fail-open: any interface error is recorded, remaining blocks still
-        populate. ``top_inst_hold`` (机构持股) is NOT exposed by the proxy, so
-        ``institution_holding_change`` stays unset.
+        populate.
         """
         result: Dict[str, Any] = {
             "status": "not_supported",
@@ -1591,6 +1592,25 @@ class TushareFetcher(BaseFetcher):
                     result["source_chain"].append("top10:tushare_top10_holders")
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"top10_holders:{type(exc).__name__}")
+
+        # 8. institution_holding_change: xiaodefa 未开放 top_inst_hold，机构持股
+        # 变化补走 akshare stock_institute_hold（keyless，~0.7s，fail-open）。
+        # 仅在 tushare 已产出内容（growth/earnings/institution 任一非空）且
+        # 缺该字段时触发；若 tushare 整体空，交给 manager 回退整个 akshare
+        # bundle，避免重复调用。
+        if (
+            "institution_holding_change" not in result["institution"]
+            and (result["growth"] or result["earnings"] or result["institution"])
+        ):
+            try:
+                from .fundamental_adapter import AkshareFundamentalAdapter
+
+                change = AkshareFundamentalAdapter().get_institution_holding_change(stock_code)
+                if change is not None:
+                    result["institution"]["institution_holding_change"] = change
+                    result["source_chain"].append("institution:akshare_stock_institute_hold")
+            except Exception as exc:  # noqa: BLE001 - fail-open
+                result["errors"].append(f"institute_hold:{type(exc).__name__}")
 
         has_content = bool(result["growth"] or result["earnings"] or result["institution"])
         result["status"] = "partial" if has_content else "not_supported"

@@ -448,7 +448,10 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
             {"ts_code": ["600519.SH"], "end_date": ["20260331"], "hold_change": [0.5]}
         )
 
-        with patch.object(fetcher, "_check_rate_limit"):
+        with patch.object(fetcher, "_check_rate_limit"), patch(
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
+            return_value=None,
+        ):
             result = fetcher.get_fundamental_bundle("600519")
 
         self.assertEqual(result["status"], "partial")
@@ -487,5 +490,53 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(result["status"], "not_supported")
         self.assertEqual(result["growth"], {})
         self.assertEqual(result["earnings"], {})
+        self.assertEqual(result["institution"], {})
+        self.assertEqual(len(result["errors"]), 7)
+
+    def test_get_fundamental_bundle_institution_fallback_via_akshare(self) -> None:
+        """xiaodefa 无 top_inst_hold -> akshare stock_institute_hold 补 institution_holding_change。"""
+        fetcher = self._make_fetcher()
+        fetcher._api.fina_indicator.return_value = self._fina_df()
+        fetcher._api.income.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "total_revenue": [1], "n_income_attr_p": [1]}
+        )
+        fetcher._api.cashflow.return_value = pd.DataFrame(
+            {"ts_code": ["600519.SH"], "end_date": ["20260331"], "c_fr_sale_sg": [1]}
+        )
+        fetcher._api.forecast.return_value = pd.DataFrame()
+        fetcher._api.express.return_value = pd.DataFrame()
+        fetcher._api.dividend.return_value = pd.DataFrame()
+        fetcher._api.top10_holders.return_value = pd.DataFrame()
+
+        with patch.object(fetcher, "_check_rate_limit"), patch(
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
+            return_value=12.5,
+        ):
+            result = fetcher.get_fundamental_bundle("600519")
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["institution"]["institution_holding_change"], 12.5)
+        self.assertIn("institution:akshare_stock_institute_hold", result["source_chain"])
+        # fail-open：akshare 异常不破坏 bundle
+        self.assertEqual(result["errors"], [])
+
+    def test_get_fundamental_bundle_institution_fallback_skipped_when_empty(self) -> None:
+        """tushare 整体空时不再触发 akshare 机构补全（避免重复调用）。"""
+        fetcher = self._make_fetcher()
+        fetcher._api.fina_indicator.side_effect = Exception("quota")
+        fetcher._api.income.side_effect = Exception("quota")
+        fetcher._api.cashflow.side_effect = Exception("quota")
+        fetcher._api.forecast.side_effect = Exception("quota")
+        fetcher._api.express.side_effect = Exception("quota")
+        fetcher._api.dividend.side_effect = Exception("quota")
+        fetcher._api.top10_holders.side_effect = Exception("quota")
+
+        with patch.object(fetcher, "_check_rate_limit"), patch(
+            "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_institution_holding_change",
+            return_value=99.0,
+        ) as m:
+            result = fetcher.get_fundamental_bundle("600519")
+
+        m.assert_not_called()
         self.assertEqual(result["institution"], {})
         self.assertEqual(len(result["errors"]), 7)
