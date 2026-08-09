@@ -778,3 +778,87 @@ get_capital_flow_tool = ToolDefinition(
 
 
 ALL_DATA_TOOLS.append(get_capital_flow_tool)
+
+
+# ============================================================
+# get_shareholder_actions
+# ============================================================
+
+def _handle_get_shareholder_actions(stock_code: str) -> dict:
+    """Get structured A-share shareholder behavior signals."""
+    manager = _get_fetcher_manager()
+    try:
+        ctx = manager.get_shareholder_actions_context(stock_code)
+    except Exception as exc:
+        logger.warning("get_shareholder_actions failed for %s: %s", stock_code, exc)
+        return {
+            "stock_code": stock_code,
+            "status": "error",
+            "error": f"shareholder actions fetch failed: {exc}",
+        }
+
+    status = ctx.get("status", "not_supported")
+    if status == "not_supported":
+        return {
+            "stock_code": stock_code,
+            "status": "not_supported",
+            "note": "Shareholder action data is only available for A-share companies (not ETFs/indices).",
+        }
+
+    data = ctx.get("data", {})
+    pledge = data.get("pledge") or {}
+    repurchase = data.get("repurchase") or {}
+    holder_trades = data.get("holder_trades") or {}
+    return {
+        "stock_code": stock_code,
+        "status": status,
+        "pledge": {
+            "status": pledge.get("status"),
+            "as_of": pledge.get("as_of"),
+            "pledge_count": pledge.get("pledge_count"),
+            "pledge_ratio": pledge.get("pledge_ratio"),
+            "pledge_ratio_change_pct_points": pledge.get("pledge_ratio_change_pct_points"),
+            "risk_level": pledge.get("risk_level"),
+        },
+        "repurchase": {
+            "status": repurchase.get("status"),
+            "has_active_plan": repurchase.get("has_active_plan"),
+            "latest": repurchase.get("latest"),
+            "recent_records": (repurchase.get("recent_records") or [])[:5],
+        },
+        "holder_trades": {
+            "status": holder_trades.get("status"),
+            "increase_count": holder_trades.get("increase_count"),
+            "decrease_count": holder_trades.get("decrease_count"),
+            "increase_volume": holder_trades.get("increase_volume"),
+            "decrease_volume": holder_trades.get("decrease_volume"),
+            "net_change_volume": holder_trades.get("net_change_volume"),
+            "recent_trades": (holder_trades.get("recent_trades") or [])[:5],
+        },
+        "errors": ctx.get("errors") or [],
+    }
+
+
+get_shareholder_actions_tool = ToolDefinition(
+    name="get_shareholder_actions",
+    description=(
+        "Get structured A-share shareholder behavior signals from Tushare: latest equity-pledge ratio, "
+        "recent company repurchase plans/progress, and major-shareholder/director increases or decreases. "
+        "Use pledge and decreases as risk/supply evidence. A repurchase plan is not completed cash deployment, "
+        "and an increase is not a standalone buy signal. Not for ETFs, indices, HK, or US stocks."
+    ),
+    parameters=[
+        ToolParameter(
+            name="stock_code",
+            type="string",
+            description="A-share company stock code, e.g., '600519'",
+        ),
+    ],
+    handler=_handle_get_shareholder_actions,
+    category="data",
+    policy=_MARKET_DATA_STOCK_POLICY,
+)
+
+
+ALL_DATA_TOOLS.append(get_shareholder_actions_tool)
+

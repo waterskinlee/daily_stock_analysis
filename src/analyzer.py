@@ -3970,6 +3970,60 @@ class GeminiAnalyzer:
 > 热榜高位只代表关注度，不代表买入信号。不得仅因热度或排名上升给出买入结论；必须结合价格位置、量价确认、公告与公司回复交叉验证，热门且高位放量滞涨时优先提示拥挤风险。
 """
 
+        shareholder_block = (
+            fundamental_context.get("shareholder_actions", {})
+            if isinstance(fundamental_context, dict)
+            else {}
+        )
+        shareholder_data = (
+            shareholder_block.get("data", {})
+            if isinstance(shareholder_block, dict)
+            else {}
+        )
+        pledge = (
+            shareholder_data.get("pledge", {})
+            if isinstance(shareholder_data, dict)
+            else {}
+        )
+        repurchase = (
+            shareholder_data.get("repurchase", {})
+            if isinstance(shareholder_data, dict)
+            else {}
+        )
+        holder_trades = (
+            shareholder_data.get("holder_trades", {})
+            if isinstance(shareholder_data, dict)
+            else {}
+        )
+        has_shareholder_actions = any(
+            isinstance(item, dict) and item.get("status") == "ok"
+            for item in (pledge, repurchase, holder_trades)
+        )
+        if has_shareholder_actions:
+            latest_repurchase = repurchase.get("latest") or {}
+            recent_holder_trades = holder_trades.get("recent_trades") or []
+            latest_holder_trade = recent_holder_trades[0] if recent_holder_trades else {}
+            prompt += f"""
+### 股东行为（治理与供给风险过滤器）
+| 指标 | 数值 | 决策含义 |
+|------|------|----------|
+| 质押数据日 | {pledge.get('as_of', 'N/A')} | 判断质押数据时效 |
+| 质押笔数 | {pledge.get('pledge_count', 'N/A')} | 笔数需结合质押比例判断 |
+| 质押比例 | {pledge.get('pledge_ratio', 'N/A')}% | 高比例提示控制人流动性与平仓风险 |
+| 质押比例变化 | {pledge.get('pledge_ratio_change_pct_points', 'N/A')} 个百分点 | 正值表示较上一快照上升 |
+| 质押风险等级 | {pledge.get('risk_level', 'N/A')} | 结构化阈值仅作风险分层 |
+| 是否存在进行中回购 | {repurchase.get('has_active_plan', False)} | 预案/实施不等于完成 |
+| 最新回购公告日 | {latest_repurchase.get('announcement_date', 'N/A')} | 判断回购信息时效 |
+| 最新回购状态 | {latest_repurchase.get('status', 'N/A')} | 区分预案、实施与完成 |
+| 最新回购金额 | {latest_repurchase.get('amount', 'N/A')} | 不得把计划金额当作已投入金额 |
+| 近一年增持记录数 | {holder_trades.get('increase_count', 'N/A')} | 增持仅作治理信心线索 |
+| 近一年减持记录数 | {holder_trades.get('decrease_count', 'N/A')} | 减持提示潜在股份供给压力 |
+| 净增减持股数 | {holder_trades.get('net_change_volume', 'N/A')} | 正值=净增持，负值=净减持 |
+| 最近股东行为 | {latest_holder_trade.get('announcement_date', 'N/A')} / {latest_holder_trade.get('holder_name', 'N/A')} / {latest_holder_trade.get('direction', 'N/A')} / {latest_holder_trade.get('change_volume', 'N/A')}股 | 核验方向、主体与时效 |
+
+> 回购预案或实施不等于必然完成，不得把拟回购金额当作已投入资金；增持不得单独解释为买入信号；减持与高质押应提高风险权重，并结合股价位置、公告进度与控制人背景判断。
+"""
+
         # 添加三大法人动向（台股筹码过滤器）— tw-only；仅当 institution 区块 status='ok'
         # 且有净额时注入，其他市场 status='not_supported' 会跳过，严格 additive。
         institution_block = (

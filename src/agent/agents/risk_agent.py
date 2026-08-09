@@ -33,6 +33,7 @@ class RiskAgent(BaseAgent):
         "search_stock_news",
         "get_realtime_quote",
         "get_stock_info",
+        "get_shareholder_actions",
     ]
 
     def system_prompt(self, ctx: AgentContext) -> str:
@@ -75,8 +76,8 @@ Return **only** a JSON object:
   "signal_adjustment": "none|downgrade_one|downgrade_two|veto"
 }
 
-Important: be thorough but factual. Only flag risks backed by evidence \
-from your search results. Do NOT invent risks.
+Important: call get_shareholder_actions for A-share companies and prioritize its structured pledge, repurchase and holder-trade fields over keyword inference. A repurchase plan is not completed execution, and shareholder increases are not standalone buy evidence. Be thorough but factual. Only flag risks backed by evidence from your search results or structured tools. Do NOT invent risks.
+
 """
 
     def build_user_message(self, ctx: AgentContext) -> str:

@@ -1348,6 +1348,227 @@ class TushareFetcher(BaseFetcher):
         result["status"] = "partial" if has_content else "not_supported"
         return result
 
+    def get_shareholder_actions(
+        self,
+        stock_code: str,
+        lookback_days: int = 365,
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        """Return structured pledge, repurchase and holder-trade signals.
+
+        The three Tushare feeds are independent and therefore fail open. Dates
+        and field names are normalized for downstream prompts/tools; raw share
+        units from ``pledge_stat`` remain explicitly labelled as 万股.
+        """
+        result: Dict[str, Any] = {
+            "status": "not_supported",
+            "pledge": {"status": "not_supported"},
+            "repurchase": {"status": "not_supported", "recent_records": []},
+            "holder_trades": {"status": "not_supported", "recent_trades": []},
+            "source_chain": [],
+            "errors": [],
+        }
+        if self._api is None:
+            result["errors"].append("tushare api not initialized")
+            return result
+        if _is_etf_code(stock_code):
+            return result
+
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"convert_code:{type(exc).__name__}")
+            return result
+
+        normalized_lookback = max(1, int(lookback_days))
+        normalized_limit = max(1, min(int(max_results), 50))
+        cutoff = (datetime.now() - timedelta(days=normalized_lookback)).strftime("%Y%m%d")
+        content_sources = 0
+        failed_sources = 0
+
+        def _date_text(value: Any) -> Optional[str]:
+            if value is None or pd.isna(value):
+                return None
+            text = str(value).strip().split(".", 1)[0]
+            if len(text) == 8 and text.isdigit():
+                return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+            return text or None
+
+        def _source(provider: str, status: str, started: float) -> None:
+            result["source_chain"].append(
+                {
+                    "provider": provider,
+                    "result": status,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                }
+            )
+
+        # 1. Latest whole-company equity pledge snapshot.
+        started = time.monotonic()
+        try:
+            pledge_df = self._call_api_with_rate_limit("pledge_stat", ts_code=ts_code)
+            if pledge_df is None or pledge_df.empty:
+                result["pledge"] = {"status": "empty"}
+                _source("tushare_pledge_stat", "empty", started)
+            else:
+                work = pledge_df.copy()
+                if "end_date" in work.columns:
+                    work = work.sort_values("end_date", ascending=False)
+                latest = work.iloc[0]
+                pledge_ratio = _num(latest.get("pledge_ratio"))
+                previous_ratio = _num(work.iloc[1].get("pledge_ratio")) if len(work.index) > 1 else None
+                if pledge_ratio is None:
+                    risk_level = "none"
+                elif pledge_ratio >= 50:
+                    risk_level = "high"
+                elif pledge_ratio >= 30:
+                    risk_level = "medium"
+                elif pledge_ratio >= 15:
+                    risk_level = "low"
+                else:
+                    risk_level = "none"
+                result["pledge"] = {
+                    "status": "ok",
+                    "as_of": _date_text(latest.get("end_date")),
+                    "pledge_count": int(value) if (value := _num(latest.get("pledge_count"))) is not None else None,
+                    "unrestricted_pledged_shares_10k": _num(latest.get("unrest_pledge")),
+                    "restricted_pledged_shares_10k": _num(latest.get("rest_pledge")),
+                    "total_shares_10k": _num(latest.get("total_share")),
+                    "pledge_ratio": pledge_ratio,
+                    "pledge_ratio_change_pct_points": (
+                        round(pledge_ratio - previous_ratio, 4)
+                        if pledge_ratio is not None and previous_ratio is not None
+                        else None
+                    ),
+                    "risk_level": risk_level,
+                }
+                content_sources += 1
+                _source("tushare_pledge_stat", "ok", started)
+        except Exception as exc:  # noqa: BLE001
+            failed_sources += 1
+            result["pledge"] = {"status": "failed"}
+            result["errors"].append(f"pledge_stat:{type(exc).__name__}")
+            _source("tushare_pledge_stat", "failed", started)
+
+        # 2. Recent company repurchase announcements. Do not sum amounts across
+        # status updates because Tushare can return multiple rows for one plan.
+        started = time.monotonic()
+        try:
+            repurchase_df = self._call_api_with_rate_limit("repurchase", ts_code=ts_code)
+            if repurchase_df is None or repurchase_df.empty:
+                result["repurchase"] = {"status": "empty", "recent_records": []}
+                _source("tushare_repurchase", "empty", started)
+            else:
+                work = repurchase_df.copy()
+                if "ann_date" in work.columns:
+                    work["ann_date"] = work["ann_date"].astype(str)
+                    work = work[work["ann_date"] >= cutoff].sort_values("ann_date", ascending=False)
+                records: List[Dict[str, Any]] = []
+                for _, row in work.head(normalized_limit).iterrows():
+                    records.append(
+                        {
+                            "announcement_date": _date_text(row.get("ann_date")),
+                            "end_date": _date_text(row.get("end_date")),
+                            "expiry_date": _date_text(row.get("exp_date")),
+                            "status": str(row.get("proc") or "").strip() or None,
+                            "volume": _num(row.get("vol")),
+                            "amount": _num(row.get("amount")),
+                            "price_high": _num(row.get("high_limit")),
+                            "price_low": _num(row.get("low_limit")),
+                        }
+                    )
+                if records:
+                    inactive_statuses = {"完成", "停止实施", "终止", "到期失效"}
+                    result["repurchase"] = {
+                        "status": "ok",
+                        "has_active_plan": any(item.get("status") not in inactive_statuses for item in records),
+                        "latest": records[0],
+                        "recent_records": records,
+                    }
+                    content_sources += 1
+                    _source("tushare_repurchase", "ok", started)
+                else:
+                    result["repurchase"] = {"status": "empty", "recent_records": []}
+                    _source("tushare_repurchase", "empty", started)
+        except Exception as exc:  # noqa: BLE001
+            failed_sources += 1
+            result["repurchase"] = {"status": "failed", "recent_records": []}
+            result["errors"].append(f"repurchase:{type(exc).__name__}")
+            _source("tushare_repurchase", "failed", started)
+
+        # 3. Recent major-shareholder/director increase and decrease records.
+        started = time.monotonic()
+        try:
+            trade_df = self._call_api_with_rate_limit("stk_holdertrade", ts_code=ts_code)
+            if trade_df is None or trade_df.empty:
+                result["holder_trades"] = {"status": "empty", "recent_trades": []}
+                _source("tushare_stk_holdertrade", "empty", started)
+            else:
+                work = trade_df.copy()
+                if "ann_date" in work.columns:
+                    work["ann_date"] = work["ann_date"].astype(str)
+                    work = work[work["ann_date"] >= cutoff].sort_values("ann_date", ascending=False)
+                records = []
+                increase_volume = 0.0
+                decrease_volume = 0.0
+                increase_count = 0
+                decrease_count = 0
+                for _, row in work.head(normalized_limit).iterrows():
+                    raw_direction = str(row.get("in_de") or "").strip().upper()
+                    direction = "increase" if raw_direction == "IN" else "decrease" if raw_direction == "DE" else "unknown"
+                    volume = _num(row.get("change_vol"))
+                    if direction == "increase":
+                        increase_count += 1
+                        increase_volume += volume or 0.0
+                    elif direction == "decrease":
+                        decrease_count += 1
+                        decrease_volume += volume or 0.0
+                    records.append(
+                        {
+                            "announcement_date": _date_text(row.get("ann_date")),
+                            "holder_name": str(row.get("holder_name") or "").strip() or None,
+                            "holder_type": str(row.get("holder_type") or "").strip() or None,
+                            "direction": direction,
+                            "change_volume": volume,
+                            "change_ratio": _num(row.get("change_ratio")),
+                            "average_price": _num(row.get("avg_price")),
+                            "after_shares": _num(row.get("after_share")),
+                            "after_ratio": _num(row.get("after_ratio")),
+                            "begin_date": _date_text(row.get("begin_date")),
+                            "close_date": _date_text(row.get("close_date")),
+                        }
+                    )
+                if records:
+                    result["holder_trades"] = {
+                        "status": "ok",
+                        "increase_count": increase_count,
+                        "decrease_count": decrease_count,
+                        "increase_volume": increase_volume,
+                        "decrease_volume": decrease_volume,
+                        "net_change_volume": increase_volume - decrease_volume,
+                        "recent_trades": records,
+                    }
+                    content_sources += 1
+                    _source("tushare_stk_holdertrade", "ok", started)
+                else:
+                    result["holder_trades"] = {"status": "empty", "recent_trades": []}
+                    _source("tushare_stk_holdertrade", "empty", started)
+        except Exception as exc:  # noqa: BLE001
+            failed_sources += 1
+            result["holder_trades"] = {"status": "failed", "recent_trades": []}
+            result["errors"].append(f"stk_holdertrade:{type(exc).__name__}")
+            _source("tushare_stk_holdertrade", "failed", started)
+
+        if content_sources:
+            result["status"] = "partial" if failed_sources else "ok"
+        elif failed_sources == 3:
+            result["status"] = "failed"
+        elif failed_sources:
+            result["status"] = "partial"
+        else:
+            result["status"] = "empty"
+        return result
+
     # 概念板块指数缓存：dc_index 全量 5000 行，短 TTL 避免重复拉取打满限速。
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 120.0
     _concept_rankings_cache: Dict[int, Tuple[float, Optional[Tuple[List[Dict], List[Dict]]]]] = {}

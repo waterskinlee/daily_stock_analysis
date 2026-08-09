@@ -2763,6 +2763,7 @@ class DataFetcherManager:
             "growth",
             "earnings",
             "institution",
+            "shareholder_actions",
             "capital_flow",
             "dragon_tiger",
             "lockup",
@@ -2794,6 +2795,12 @@ class DataFetcherManager:
                 [reason],
             ),
             "institution": self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                [reason],
+            ),
+            "shareholder_actions": self._build_fundamental_block(
                 "not_supported",
                 {},
                 [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
@@ -2882,6 +2889,7 @@ class DataFetcherManager:
             "growth": {},
             "earnings": {},
             "institution": {},
+            "shareholder_actions": {},
             "capital_flow": {},
             "dragon_tiger": {},
             "lockup": {},
@@ -2971,8 +2979,8 @@ class DataFetcherManager:
             list(adapter_errors),
         )
 
-        # capital_flow / dragon_tiger / lockup / boards: no offshore data feed today -> not_supported.
-        for block in ("capital_flow", "dragon_tiger", "lockup", "boards"):
+        # A-share-only market activity / shareholder blocks have no offshore feed.
+        for block in ("shareholder_actions", "capital_flow", "dragon_tiger", "lockup", "boards"):
             result_ctx[block] = self._build_fundamental_block(
                 "not_supported",
                 {},
@@ -3056,13 +3064,24 @@ class DataFetcherManager:
             "growth": growth_status,
             "earnings": earnings_status,
             "institution": institution_status,
+            "shareholder_actions": "not_supported",
             "capital_flow": "not_supported",
             "dragon_tiger": "not_supported",
             "lockup": "not_supported",
             "boards": "not_supported",
         }
         result_ctx["coverage"] = block_statuses
-        for block in ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "lockup", "boards"):
+        for block in (
+            "valuation",
+            "growth",
+            "earnings",
+            "institution",
+            "shareholder_actions",
+            "capital_flow",
+            "dragon_tiger",
+            "lockup",
+            "boards",
+        ):
             result_ctx["errors"].extend(result_ctx[block].get("errors", []))
             result_ctx["source_chain"].extend(result_ctx[block].get("source_chain", []))
 
@@ -3105,6 +3124,7 @@ class DataFetcherManager:
             "growth",
             "earnings",
             "institution",
+            "shareholder_actions",
             "capital_flow",
             "dragon_tiger",
             "lockup",
@@ -3181,6 +3201,7 @@ class DataFetcherManager:
             "growth": {},
             "earnings": {},
             "institution": {},
+            "shareholder_actions": {},
             "capital_flow": {},
             "dragon_tiger": {},
             "lockup": {},
@@ -3277,6 +3298,14 @@ class DataFetcherManager:
                     quick_eps = {}
                 quick_eps_ms = int((time.time() - eps_start) * 1000)
                 _consume_budget(quick_eps_ms)
+
+            shareholder_budget = min(fetch_timeout, remaining_seconds)
+            shareholder_start = time.time()
+            result_ctx["shareholder_actions"] = self.get_shareholder_actions_context(
+                stock_code,
+                budget_seconds=shareholder_budget,
+            )
+            _consume_budget(int((time.time() - shareholder_start) * 1000))
 
             lockup_budget = min(fetch_timeout, remaining_seconds)
             lockup_start = time.time()
@@ -3443,9 +3472,17 @@ class DataFetcherManager:
                 earnings_errors + earnings_extra_errors_ttm,
             )
 
+
+        # Shareholder behavior is A-share company data; ETFs have no equivalent block.
         # capital flow
         if is_etf:
             result_ctx["capital_flow"] = self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["etf not fully supported"],
+            )
+            result_ctx["shareholder_actions"] = self._build_fundamental_block(
                 "not_supported",
                 {},
                 [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
@@ -3496,6 +3533,7 @@ class DataFetcherManager:
             "growth": result_ctx["growth"].get("status", "not_supported"),
             "earnings": result_ctx["earnings"].get("status", "not_supported"),
             "institution": result_ctx["institution"].get("status", "not_supported"),
+            "shareholder_actions": result_ctx["shareholder_actions"].get("status", "not_supported"),
             "capital_flow": result_ctx["capital_flow"].get("status", "not_supported"),
             "dragon_tiger": result_ctx["dragon_tiger"].get("status", "not_supported"),
             "lockup": result_ctx["lockup"].get("status", "not_supported"),
@@ -3507,6 +3545,7 @@ class DataFetcherManager:
             "growth",
             "earnings",
             "institution",
+            "shareholder_actions",
             "capital_flow",
             "dragon_tiger",
             "lockup",
@@ -3536,6 +3575,99 @@ class DataFetcherManager:
                 }
             self._prune_fundamental_cache(cache_ttl, cache_max_entries)
         return result_ctx
+
+    def get_shareholder_actions_context(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """股权质押、公司回购与重要股东增减持块（Tushare，fail-open）。"""
+        from src.config import get_config
+
+        config = get_config()
+        stock_code = normalize_stock_code(stock_code)
+        timeout = float(
+            budget_seconds
+            if budget_seconds is not None
+            else config.fundamental_fetch_timeout_seconds
+        )
+        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
+                ["not supported"],
+            )
+        if timeout <= 0:
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "fundamental_pipeline", "result": "failed", "duration_ms": 0}],
+                ["fundamental stage timeout"],
+            )
+
+        tushare = None
+        for fetcher in self._fetchers:
+            if (
+                getattr(fetcher, "name", "") == "TushareFetcher"
+                and getattr(fetcher, "is_available", lambda: False)()
+                and hasattr(fetcher, "get_shareholder_actions")
+            ):
+                tushare = fetcher
+                break
+        if tushare is None:
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "tushare_shareholder_actions", "result": "not_supported", "duration_ms": 0}],
+                ["tushare shareholder actions unavailable"],
+            )
+
+        payload, err, cost_ms = self._run_with_retry(
+            lambda: tushare.get_shareholder_actions(stock_code),
+            timeout,
+            "shareholder_actions",
+        )
+        if not isinstance(payload, dict):
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "tushare_shareholder_actions", "result": "failed", "duration_ms": cost_ms}],
+                [err or "shareholder actions failed"],
+            )
+
+        source_status = str(payload.get("status", "not_supported"))
+        has_content = any(
+            isinstance(payload.get(name), dict)
+            and payload[name].get("status") == "ok"
+            for name in ("pledge", "repurchase", "holder_trades")
+        )
+        if source_status == "ok" and has_content:
+            block_status = "ok"
+        elif has_content:
+            block_status = "partial"
+        elif source_status == "failed":
+            block_status = "failed"
+        elif source_status == "partial":
+            block_status = "partial"
+        else:
+            block_status = "not_supported"
+
+        return self._build_fundamental_block(
+            block_status,
+            {
+                "pledge": payload.get("pledge", {}),
+                "repurchase": payload.get("repurchase", {}),
+                "holder_trades": payload.get("holder_trades", {}),
+            },
+            self._normalize_source_chain(
+                payload.get("source_chain", []),
+                "tushare_shareholder_actions",
+                block_status,
+                cost_ms,
+            ),
+            list(payload.get("errors", [])) + ([err] if err else []),
+        )
 
     def get_capital_flow_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
         """资金流向块（fail-open）。"""
