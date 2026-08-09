@@ -2984,7 +2984,7 @@ def _build_screening_context(config: Config, *, max_results: Optional[int] = Non
         "dsa": {
             "contract_version": "1",
             "mode": "pre_rank_light",
-            "max_candidates": DSA_PRE_RANK_CONTEXT_MAX_CANDIDATES,
+            "max_candidates": _resolve_dsa_llm_max_candidates(max_results),
             "include_news": False,
             "news_max_results": 0,
             "capabilities": [
@@ -3452,7 +3452,15 @@ def get_dsa_candidate_context(
     include_news: bool = False,
     include_fundamentals: bool = True,
     mode: str = "pre_rank_light",
+    max_candidates: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Get per-candidate DSA context (quote/fundamentals/news/events).
+
+    Used by pre-rank LLM context collection (candidate_context_max_candidates).
+    Each pick is fetched individually — no "random selection"; the cap only
+    limits HOW MANY top picks get enriched, and provider.max_candidates now
+    follows _resolve_dsa_llm_max_candidates(max_results).
+    """
     candidate = {"code": stock_code, "name": stock_name, "raw": {}}
     context = _build_dsa_candidate_context(
         candidate,
@@ -3525,7 +3533,7 @@ def _enrich_candidates_with_dsa(
     return candidates, {
         "enabled": True,
         "max_candidates": limit,
-        "requested_count": limit,
+        "requested_count": len(candidates),
         "enriched_count": enriched_count,
         "warnings": _dedupe_strings(warnings),
     }
