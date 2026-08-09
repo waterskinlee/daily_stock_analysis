@@ -124,12 +124,24 @@ class MarketStructureService:
             market_theme_payload,
             related_boards,
         )
+        existing_constituents = self._safe_cast_market_list(
+            market_theme_payload.get("hotspot_constituents"),
+        )
+        existing_leaders = self._safe_cast_market_list(
+            market_theme_payload.get("leader_stocks"),
+        )
+        has_existing_role_evidence = self._has_stock_role_evidence(
+            stock_code,
+            primary_theme,
+            existing_constituents,
+            existing_leaders,
+        )
         if (
             self.hotspot_details_enabled
             and primary_theme is not None
             and primary_theme_has_market_match
+            and not has_existing_role_evidence
         ):
-
             market_theme_payload = self._enrich_matched_theme_evidence(
                 market_theme_payload,
                 primary_theme=primary_theme,
