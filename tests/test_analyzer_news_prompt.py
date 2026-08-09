@@ -248,8 +248,7 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
                             "primary_source": "eastmoney_hot_rank",
                         },
                     },
-                }
-                ,
+                },
                 "shareholder_actions": {
                     "status": "ok",
                     "data": {

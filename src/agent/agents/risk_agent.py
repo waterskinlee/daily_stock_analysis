@@ -76,7 +76,11 @@ Return **only** a JSON object:
   "signal_adjustment": "none|downgrade_one|downgrade_two|veto"
 }
 
-Important: call get_shareholder_actions for A-share companies and prioritize its structured pledge, repurchase and holder-trade fields over keyword inference. A repurchase plan is not completed execution, and shareholder increases are not standalone buy evidence. Be thorough but factual. Only flag risks backed by evidence from your search results or structured tools. Do NOT invent risks.
+Important: call get_shareholder_actions for A-share companies and prioritize its \
+structured pledge, repurchase and holder-trade fields over keyword inference. A \
+repurchase plan is not completed execution, and shareholder increases are not \
+standalone buy evidence. Be thorough but factual. Only flag risks backed by \
+evidence from your search results or structured tools. Do NOT invent risks.
 
 """
 

@@ -444,11 +444,11 @@ daily_stock_analysis/
 | `FUNDAMENTAL_CACHE_MAX_ENTRIES` | 基本面缓存最大条目数（TTL 内按时间淘汰） | `256` | 可选 |
 
 > 行为说明：
-> - A 股：按 `valuation/growth/earnings/institution/capital_flow/dragon_tiger/lockup/boards` 聚合能力返回；`lockup`（限售解禁，东财 datacenter 直连）与 `earnings.consensus_eps`（同花顺一致预期）为免费无 key 直连数据源，失败时 fail-open；
-> - ETF：返回可得项，缺失能力标记为 `not_supported`，整体不影响原流程；
-> - 美股/港股：通过 yfinance 适配器返回 `valuation/growth/earnings/belong_boards`（来源 `info.sector`/`industry`），`institution/capital_flow/dragon_tiger/lockup/boards` 暂无对应数据源仍标记 `not_supported`；yfinance 不可用或字段缺失时整体降级回 `not_supported`，仍走 fail-open；
-> - 日股/韩股：当前仅走 Yfinance 基础路径获取日线与实时行情；`institution`、`capital_flow`、`dragon_tiger`、`lockup`、`boards` 等依赖 A 股专属源/离岸完整版的能力会降级为 `not_supported`（详见 [市场支持与边界](market-support.md)）；
-> - 台股：在美股/港股 offshore 基础路径之外，`institution` 区块额外展示三大法人原始买卖超净额（TWSE T86 / TPEx，默认开启、fail-open，取不到数据时维持 `not_supported`）；`capital_flow`、`dragon_tiger`、`lockup`、`boards` 仍为 `not_supported`；
+> - A 股：按 `valuation/growth/earnings/institution/shareholder_actions/capital_flow/dragon_tiger/lockup/boards` 聚合能力返回；`shareholder_actions` 通过 Tushare/xiaodefa 输出股权质押、回购进度和重要股东/董监高增减持，`lockup`（限售解禁，东财 datacenter 直连）与 `earnings.consensus_eps`（同花顺一致预期）为免费无 key 直连数据源，任一子源失败时 fail-open；
+> - ETF：返回可得项，`shareholder_actions` 等公司主体专属能力标记为 `not_supported`，整体不影响原流程；
+> - 美股/港股：通过 yfinance 适配器返回 `valuation/growth/earnings/belong_boards`（来源 `info.sector`/`industry`），`institution/shareholder_actions/capital_flow/dragon_tiger/lockup/boards` 暂无对应数据源仍标记 `not_supported`；yfinance 不可用或字段缺失时整体降级回 `not_supported`，仍走 fail-open；
+> - 日股/韩股：当前仅走 Yfinance 基础路径获取日线与实时行情；`institution`、`shareholder_actions`、`capital_flow`、`dragon_tiger`、`lockup`、`boards` 等依赖 A 股专属源/离岸完整版的能力会降级为 `not_supported`（详见 [市场支持与边界](market-support.md)）；
+> - 台股：在美股/港股 offshore 基础路径之外，`institution` 区块额外展示三大法人原始买卖超净额（TWSE T86 / TPEx，默认开启、fail-open，取不到数据时维持 `not_supported`）；`shareholder_actions`、`capital_flow`、`dragon_tiger`、`lockup`、`boards` 仍为 `not_supported`；
 > - 任何异常走 fail-open，仅记录错误，不影响技术面/新闻/筹码主链路。
 > - 配置 `TICKFLOW_API_KEY` 后，TickFlow 会作为可选 A 股日 K 数据源和大盘复盘增强源实例化；`TICKFLOW_PRIORITY` 只影响日 K/通用数据源回退链。实时行情优先级由 `REALTIME_SOURCE_PRIORITY` 单独控制，只有显式包含 `tickflow` 时才会使用 TickFlow 实时行情。`REALTIME_SOURCE_PRIORITY` 中排在 `tickflow` 前面的数据源会先被尝试。
 > - TickFlow 日 K 默认 `TICKFLOW_KLINE_ADJUST=none`；日线 `volume` 从手统一转为股，`amount` 保持元口径。

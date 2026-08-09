@@ -1479,11 +1479,15 @@ class TushareFetcher(BaseFetcher):
                     )
                 if records:
                     inactive_statuses = {"完成", "停止实施", "终止", "到期失效"}
-                    plan_statuses = [
-                        str(value).strip()
-                        for value in work["proc"].tolist()
-                        if value is not None and not pd.isna(value) and str(value).strip()
-                    ] if "proc" in work.columns else []
+                    plan_statuses = (
+                        [
+                            str(value).strip()
+                            for value in work["proc"].tolist()
+                            if value is not None and not pd.isna(value) and str(value).strip()
+                        ]
+                        if "proc" in work.columns
+                        else []
+                    )
                     result["repurchase"] = {
                         "status": "ok",
                         "has_active_plan": any(status not in inactive_statuses for status in plan_statuses),
@@ -1520,7 +1524,13 @@ class TushareFetcher(BaseFetcher):
                 decrease_count = 0
                 for _, row in work.iterrows():
                     raw_direction = str(row.get("in_de") or "").strip().upper()
-                    direction = "increase" if raw_direction == "IN" else "decrease" if raw_direction == "DE" else "unknown"
+                    direction = (
+                        "increase"
+                        if raw_direction == "IN"
+                        else "decrease"
+                        if raw_direction == "DE"
+                        else "unknown"
+                    )
                     volume = _num(row.get("change_vol"))
                     if direction == "increase":
                         increase_count += 1
