@@ -423,6 +423,50 @@ class TestEastmoneyDataApiSearchProvider(unittest.TestCase):
         params = mock_get.call_args.kwargs["params"]
         self.assertEqual(params["keyword"], "立讯精密")
         self.assertEqual(params["pagesize"], "100")
+    def test_falls_back_to_code_query_when_name_has_no_recent_results(self) -> None:
+        provider = EastmoneyDataApiSearchProvider(enabled=True)
+        now = datetime.now()
+        stale_date = (now - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
+        fresh_date = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        name_payload = {
+            "result": {
+                "cmsArticleWeb": [
+                    {
+                        "title": "立讯精密旧结果",
+                        "content": "旧内容",
+                        "date": stale_date,
+                    }
+                ]
+            }
+        }
+        code_payload = {
+            "result": {
+                "cmsArticleWeb": [
+                    {
+                        "title": "立讯精密：已耗资约10亿元回购股份",
+                        "content": "公司回购进展",
+                        "date": fresh_date,
+                    }
+                ]
+            }
+        }
+        responses = [
+            MagicMock(status_code=200, json=lambda: name_payload),
+            MagicMock(status_code=200, json=lambda: code_payload),
+        ]
+        with patch("src.search_service.requests.get", side_effect=responses) as mock_get:
+            response = provider.search(
+                "立讯精密 002475 股票 最新消息",
+                max_results=1,
+                days=7,
+            )
+
+        self.assertTrue(response.success)
+        self.assertEqual([item.title for item in response.results], ["立讯精密：已耗资约10亿元回购股份"])
+        self.assertEqual(
+            [call.kwargs["params"]["keyword"] for call in mock_get.call_args_list],
+            ["立讯精密", "002475"],
+        )
 
 
 class TestCninfoIrmSearchProvider(unittest.TestCase):
