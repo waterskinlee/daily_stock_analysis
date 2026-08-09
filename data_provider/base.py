@@ -3581,7 +3581,7 @@ class DataFetcherManager:
         stock_code: str,
         budget_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """股权质押、公司回购与重要股东增减持块（Tushare，fail-open）。"""
+        """股权质押、公司回购、重要股东增减持与股东户数块（Tushare，fail-open）。"""
         from src.config import get_config
 
         config = get_config()
@@ -3640,7 +3640,7 @@ class DataFetcherManager:
         has_content = any(
             isinstance(payload.get(name), dict)
             and payload[name].get("status") == "ok"
-            for name in ("pledge", "repurchase", "holder_trades")
+            for name in ("pledge", "repurchase", "holder_trades", "holder_concentration")
         )
         if source_status == "ok" and has_content:
             block_status = "ok"
@@ -3659,6 +3659,7 @@ class DataFetcherManager:
                 "pledge": payload.get("pledge", {}),
                 "repurchase": payload.get("repurchase", {}),
                 "holder_trades": payload.get("holder_trades", {}),
+                "holder_concentration": payload.get("holder_concentration", {}),
             },
             self._normalize_source_chain(
                 payload.get("source_chain", []),

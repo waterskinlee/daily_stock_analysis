@@ -809,6 +809,7 @@ def _handle_get_shareholder_actions(stock_code: str) -> dict:
     pledge = data.get("pledge") or {}
     repurchase = data.get("repurchase") or {}
     holder_trades = data.get("holder_trades") or {}
+    holder_concentration = data.get("holder_concentration") or {}
     return {
         "stock_code": stock_code,
         "status": status,
@@ -835,6 +836,17 @@ def _handle_get_shareholder_actions(stock_code: str) -> dict:
             "net_change_volume": holder_trades.get("net_change_volume"),
             "recent_trades": (holder_trades.get("recent_trades") or [])[:5],
         },
+        "holder_concentration": {
+            "status": holder_concentration.get("status"),
+            "as_of": holder_concentration.get("as_of"),
+            "announcement_date": holder_concentration.get("announcement_date"),
+            "holder_count": holder_concentration.get("holder_count"),
+            "previous_holder_count": holder_concentration.get("previous_holder_count"),
+            "change_count": holder_concentration.get("change_count"),
+            "change_pct": holder_concentration.get("change_pct"),
+            "trend": holder_concentration.get("trend"),
+            "recent_records": (holder_concentration.get("recent_records") or [])[:5],
+        },
         "errors": ctx.get("errors") or [],
     }
 
@@ -843,9 +855,10 @@ get_shareholder_actions_tool = ToolDefinition(
     name="get_shareholder_actions",
     description=(
         "Get structured A-share shareholder behavior signals from Tushare: latest equity-pledge ratio, "
-        "recent company repurchase plans/progress, and major-shareholder/director increases or decreases. "
-        "Use pledge and decreases as risk/supply evidence. A repurchase plan is not completed cash deployment, "
-        "and an increase is not a standalone buy signal. Not for ETFs, indices, HK, or US stocks."
+        "periodic shareholder-count concentration trend, recent company repurchase plans/progress, and "
+        "major-shareholder/director increases or decreases. Use pledge, dispersing holder counts and "
+        "decreases as risk/supply evidence. A repurchase plan is not completed cash deployment, and an "
+        "increase is not a standalone buy signal. Not for ETFs, indices, HK, or US stocks."
     ),
     parameters=[
         ToolParameter(

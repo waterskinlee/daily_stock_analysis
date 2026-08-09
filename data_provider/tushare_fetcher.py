@@ -1354,9 +1354,9 @@ class TushareFetcher(BaseFetcher):
         lookback_days: int = 365,
         max_results: int = 10,
     ) -> Dict[str, Any]:
-        """Return structured pledge, repurchase and holder-trade signals.
+        """Return structured pledge, repurchase, holder-trade and holder-count signals.
 
-        The three Tushare feeds are independent and therefore fail open. Dates
+        The four Tushare feeds are independent and therefore fail open. Dates
         and field names are normalized for downstream prompts/tools; raw share
         units from ``pledge_stat`` remain explicitly labelled as 万股.
         """
@@ -1365,6 +1365,7 @@ class TushareFetcher(BaseFetcher):
             "pledge": {"status": "not_supported"},
             "repurchase": {"status": "not_supported", "recent_records": []},
             "holder_trades": {"status": "not_supported", "recent_trades": []},
+            "holder_concentration": {"status": "not_supported", "recent_records": []},
             "source_chain": [],
             "errors": [],
         }
@@ -1574,16 +1575,83 @@ class TushareFetcher(BaseFetcher):
             result["holder_trades"] = {"status": "failed", "recent_trades": []}
             result["errors"].append(f"stk_holdertrade:{type(exc).__name__}")
             _source("tushare_stk_holdertrade", "failed", started)
+        # 4. Periodic shareholder-count snapshots as a concentration signal.
+        started = time.monotonic()
+        try:
+            holder_number_df = self._call_api_with_rate_limit("stk_holdernumber", ts_code=ts_code)
+            if holder_number_df is None or holder_number_df.empty:
+                result["holder_concentration"] = {"status": "empty", "recent_records": []}
+                _source("tushare_stk_holdernumber", "empty", started)
+            else:
+                work = holder_number_df.copy()
+                if "holder_num" in work.columns:
+                    work["holder_num"] = pd.to_numeric(work["holder_num"], errors="coerce")
+                    work = work.dropna(subset=["holder_num"])
+                else:
+                    work = work.iloc[0:0]
+                sort_columns = [column for column in ("ann_date", "end_date") if column in work.columns]
+                if sort_columns:
+                    work = work.sort_values(sort_columns, ascending=[False] * len(sort_columns))
+                if work.empty:
+                    result["holder_concentration"] = {"status": "empty", "recent_records": []}
+                    _source("tushare_stk_holdernumber", "empty", started)
+                else:
+                    latest = work.iloc[0]
+                    latest_count = _num(latest.get("holder_num"))
+                    previous_count = _num(work.iloc[1].get("holder_num")) if len(work.index) > 1 else None
+                    change_count = (
+                        latest_count - previous_count
+                        if latest_count is not None and previous_count is not None
+                        else None
+                    )
+                    change_pct = (
+                        round(change_count / previous_count * 100.0, 4)
+                        if change_count is not None and previous_count and previous_count > 0
+                        else None
+                    )
+                    if change_count is None or change_count == 0:
+                        trend = "stable"
+                    elif change_count < 0:
+                        trend = "concentrating"
+                    else:
+                        trend = "dispersing"
+                    recent_records = [
+                        {
+                            "announcement_date": _date_text(row.get("ann_date")),
+                            "as_of": _date_text(row.get("end_date")),
+                            "holder_count": _num(row.get("holder_num")),
+                        }
+                        for _, row in work.head(normalized_limit).iterrows()
+                    ]
+                    result["holder_concentration"] = {
+                        "status": "ok",
+                        "as_of": _date_text(latest.get("end_date")),
+                        "announcement_date": _date_text(latest.get("ann_date")),
+                        "holder_count": latest_count,
+                        "previous_holder_count": previous_count,
+                        "change_count": change_count,
+                        "change_pct": change_pct,
+                        "trend": trend,
+                        "recent_records": recent_records,
+                    }
+                    content_sources += 1
+                    _source("tushare_stk_holdernumber", "ok", started)
+        except Exception as exc:  # noqa: BLE001
+            failed_sources += 1
+            result["holder_concentration"] = {"status": "failed", "recent_records": []}
+            result["errors"].append(f"stk_holdernumber:{type(exc).__name__}")
+            _source("tushare_stk_holdernumber", "failed", started)
 
         if content_sources:
             result["status"] = "partial" if failed_sources else "ok"
-        elif failed_sources == 3:
+        elif failed_sources == 4:
             result["status"] = "failed"
         elif failed_sources:
             result["status"] = "partial"
         else:
             result["status"] = "empty"
         return result
+
 
     # 概念板块指数缓存：dc_index 全量 5000 行，短 TTL 避免重复拉取打满限速。
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 120.0

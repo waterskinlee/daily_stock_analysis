@@ -3995,13 +3995,27 @@ class GeminiAnalyzer:
             if isinstance(shareholder_data, dict)
             else {}
         )
+        holder_concentration = (
+            shareholder_data.get("holder_concentration", {})
+            if isinstance(shareholder_data, dict)
+            else {}
+        )
         has_shareholder_actions = any(
             isinstance(item, dict) and item.get("status") == "ok"
-            for item in (pledge, repurchase, holder_trades)
+            for item in (pledge, repurchase, holder_trades, holder_concentration)
         )
         if has_shareholder_actions:
             latest_repurchase = repurchase.get("latest") or {}
             recent_holder_trades = holder_trades.get("recent_trades") or []
+            latest_holder_concentration = holder_concentration.get("recent_records") or []
+            latest_holder_snapshot = (
+                latest_holder_concentration[0] if latest_holder_concentration else {}
+            )
+            holder_trend_text = {
+                "concentrating": "筹码集中",
+                "dispersing": "筹码分散",
+                "stable": "基本稳定",
+            }.get(holder_concentration.get("trend"), holder_concentration.get("trend", "N/A"))
             latest_holder_trade = recent_holder_trades[0] if recent_holder_trades else {}
             prompt += f"""
 ### 股东行为（治理与供给风险过滤器）
@@ -4019,9 +4033,16 @@ class GeminiAnalyzer:
 | 近一年增持记录数 | {holder_trades.get('increase_count', 'N/A')} | 增持仅作治理信心线索 |
 | 近一年减持记录数 | {holder_trades.get('decrease_count', 'N/A')} | 减持提示潜在股份供给压力 |
 | 净增减持股数 | {holder_trades.get('net_change_volume', 'N/A')} | 正值=净增持，负值=净减持 |
+| 股东户数数据日 | {holder_concentration.get('as_of', 'N/A')} | 定期披露数据，注意与行情时点错位 |
+| 股东户数 | {holder_concentration.get('holder_count', 'N/A')} | 名义账户数量，不等于主动资金数量 |
+| 股东户数变化 | {holder_concentration.get('change_count', 'N/A')} | 负值表示户数减少、筹码集中线索 |
+| 股东户数变化比例 | {holder_concentration.get('change_pct', 'N/A')}% | 仅作集中度变化参考 |
+| 筹码集中趋势 | {holder_trend_text} | 必须结合价格、成交量和公告交叉验证 |
+| 最近户数快照 | {latest_holder_snapshot.get('holder_count', 'N/A')}（{latest_holder_snapshot.get('announcement_date', 'N/A')}） | 核验最新披露记录 |
 | 最近股东行为 | {latest_holder_trade.get('announcement_date', 'N/A')} / {latest_holder_trade.get('holder_name', 'N/A')} / {latest_holder_trade.get('direction', 'N/A')} / {latest_holder_trade.get('change_volume', 'N/A')}股 | 核验方向、主体与时效 |
 
 > 回购预案或实施不等于必然完成，不得把拟回购金额当作已投入资金；增持不得单独解释为买入信号；减持与高质押应提高风险权重，并结合股价位置、公告进度与控制人背景判断。
+> 股东户数减少只代表名义持有人数量变化，不得直接推断主力吸筹或买入；股东户数增加、减少和集中趋势都必须结合价格位置、成交量、股东行为及公告交叉验证。
 """
 
         # 添加三大法人动向（台股筹码过滤器）— tw-only；仅当 institution 区块 status='ok'

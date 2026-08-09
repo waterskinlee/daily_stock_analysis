@@ -45,7 +45,7 @@ Your task: search for and evaluate ALL potential risk factors, then \
 output a structured JSON risk assessment.
 
 ## Mandatory Risk Checks
-1. **Insider / Major Shareholder Activity** — sell-downs (减持), pledges
+1. **Insider / Major Shareholder Activity** — sell-downs (减持), pledges, holder-count dispersion
 2. **Earnings Warnings** — pre-loss, downward revisions (业绩预亏, 业绩变脸)
 3. **Regulatory** — penalties, investigations, violations (监管处罚, 立案调查)
 4. **Industry Policy** — headwinds, sector crackdowns
@@ -77,9 +77,10 @@ Return **only** a JSON object:
 }
 
 Important: call get_shareholder_actions for A-share companies and prioritize its \
-structured pledge, repurchase and holder-trade fields over keyword inference. A \
-repurchase plan is not completed execution, and shareholder increases are not \
-standalone buy evidence. Be thorough but factual. Only flag risks backed by \
+structured pledge, repurchase, holder-trade and holder-count fields over keyword \
+inference. A repurchase plan is not completed execution; shareholder increases \
+are not standalone buy evidence; fewer holder accounts do not prove institutional \
+accumulation. Be thorough but factual. Only flag risks backed by \
 evidence from your search results or structured tools. Do NOT invent risks.
 
 """
