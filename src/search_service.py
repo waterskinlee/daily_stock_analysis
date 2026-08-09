@@ -2850,9 +2850,9 @@ class EastmoneyDataApiSearchProvider(BaseSearchProvider):
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         ),
-        "Referer": "https://data.eastmoney.com/",
     }
     DATAAPI_TIMEOUT_SECONDS = 10
+    DATAAPI_PAGE_SIZE = 100
 
     def __init__(self, enabled: bool = True):
         super().__init__([], "EastmoneyData")
@@ -2884,6 +2884,17 @@ class EastmoneyDataApiSearchProvider(BaseSearchProvider):
         except ValueError:
             return s[:16] if len(s) >= 16 else (s or None)
 
+    @staticmethod
+    def _timestamp(raw: Any) -> float:
+        """Parse an Eastmoney timestamp for freshness filtering and ordering."""
+        try:
+            return datetime.strptime(
+                str(raw or "").strip(), "%Y-%m-%d %H:%M:%S"
+            ).timestamp()
+        except (OSError, TypeError, ValueError):
+            return 0.0
+
+
     def _do_search(  # type: ignore[override]
         self,
         query: str,
@@ -2899,7 +2910,7 @@ class EastmoneyDataApiSearchProvider(BaseSearchProvider):
                 params={
                     "keyword": dataapi_query,
                     "page": "1",
-                    "pagesize": str(max(10, int(max_results) * 2)),
+                    "pagesize": str(self.DATAAPI_PAGE_SIZE),
                 },
                 headers=self.DATAAPI_HEADERS,
                 timeout=self.DATAAPI_TIMEOUT_SECONDS,
@@ -2916,6 +2927,11 @@ class EastmoneyDataApiSearchProvider(BaseSearchProvider):
             items = (payload.get("result") or {}).get("cmsArticleWeb") or []
             if not isinstance(items, list):
                 items = []
+            items = [item for item in items if isinstance(item, dict)]
+            items.sort(
+                key=lambda item: self._timestamp(item.get("date")),
+                reverse=True,
+            )
         except Exception as exc:  # noqa: BLE001 - fail-open
             return SearchResponse(
                 query=query,
