@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - [修复] Agent 模式在执行前统一预取并注入个股新闻，复用同一响应写入历史 `news_content`、`news_result_count` 和分析上下文包，避免报告已使用新闻但持久化诊断仍标记新闻缺失。
 
+- [修复] 市场题材结构按 Tushare `dc_index` 最新快照和板块代码生成唯一排行，保留排行龙头证据并按需补充匹配题材的成分股；个股板块支持“CRO概念”等规范化别名及交易所后缀代码匹配，避免重复题材、空龙头列表和已上榜个股误降级为边缘股。
+
 ## [3.29.0] - 2026-08-02
 
 ### 发布亮点
