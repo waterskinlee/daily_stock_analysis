@@ -284,7 +284,7 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         )
 
         with patch.object(fetcher, "_check_rate_limit"):
-            result = fetcher.get_shareholder_actions("600519", lookback_days=365)
+            result = fetcher.get_shareholder_actions("600519", lookback_days=365, max_results=1)
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["pledge"]["pledge_ratio"], 34.07)
@@ -294,6 +294,8 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(result["holder_trades"]["decrease_count"], 1)
         self.assertEqual(result["holder_trades"]["increase_count"], 1)
         self.assertEqual(result["holder_trades"]["net_change_volume"], -2200000.0)
+        self.assertEqual(len(result["repurchase"]["recent_records"]), 1)
+        self.assertEqual(len(result["holder_trades"]["recent_trades"]), 1)
         providers = [item["provider"] for item in result["source_chain"]]
         self.assertEqual(
             providers,
