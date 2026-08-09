@@ -1479,9 +1479,14 @@ class TushareFetcher(BaseFetcher):
                     )
                 if records:
                     inactive_statuses = {"完成", "停止实施", "终止", "到期失效"}
+                    plan_statuses = [
+                        str(value).strip()
+                        for value in work["proc"].tolist()
+                        if value is not None and not pd.isna(value) and str(value).strip()
+                    ] if "proc" in work.columns else []
                     result["repurchase"] = {
                         "status": "ok",
-                        "has_active_plan": any(item.get("status") not in inactive_statuses for item in records),
+                        "has_active_plan": any(status not in inactive_statuses for status in plan_statuses),
                         "latest": records[0],
                         "recent_records": records,
                     }
@@ -1513,7 +1518,7 @@ class TushareFetcher(BaseFetcher):
                 decrease_volume = 0.0
                 increase_count = 0
                 decrease_count = 0
-                for _, row in work.head(normalized_limit).iterrows():
+                for _, row in work.iterrows():
                     raw_direction = str(row.get("in_de") or "").strip().upper()
                     direction = "increase" if raw_direction == "IN" else "decrease" if raw_direction == "DE" else "unknown"
                     volume = _num(row.get("change_vol"))
@@ -1523,21 +1528,22 @@ class TushareFetcher(BaseFetcher):
                     elif direction == "decrease":
                         decrease_count += 1
                         decrease_volume += volume or 0.0
-                    records.append(
-                        {
-                            "announcement_date": _date_text(row.get("ann_date")),
-                            "holder_name": str(row.get("holder_name") or "").strip() or None,
-                            "holder_type": str(row.get("holder_type") or "").strip() or None,
-                            "direction": direction,
-                            "change_volume": volume,
-                            "change_ratio": _num(row.get("change_ratio")),
-                            "average_price": _num(row.get("avg_price")),
-                            "after_shares": _num(row.get("after_share")),
-                            "after_ratio": _num(row.get("after_ratio")),
-                            "begin_date": _date_text(row.get("begin_date")),
-                            "close_date": _date_text(row.get("close_date")),
-                        }
-                    )
+                    if len(records) < normalized_limit:
+                        records.append(
+                            {
+                                "announcement_date": _date_text(row.get("ann_date")),
+                                "holder_name": str(row.get("holder_name") or "").strip() or None,
+                                "holder_type": str(row.get("holder_type") or "").strip() or None,
+                                "direction": direction,
+                                "change_volume": volume,
+                                "change_ratio": _num(row.get("change_ratio")),
+                                "average_price": _num(row.get("avg_price")),
+                                "after_shares": _num(row.get("after_share")),
+                                "after_ratio": _num(row.get("after_ratio")),
+                                "begin_date": _date_text(row.get("begin_date")),
+                                "close_date": _date_text(row.get("close_date")),
+                            }
+                        )
                 if records:
                     result["holder_trades"] = {
                         "status": "ok",
