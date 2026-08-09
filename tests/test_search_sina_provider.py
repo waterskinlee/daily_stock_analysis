@@ -6,6 +6,7 @@ Regression tests for SinaNewsSearchProvider (免费新浪新闻搜索兜底).
 import sys
 import time
 import unittest
+from datetime import datetime, timedelta
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ except Exception:
 
 from src.search_service import (
     CninfoIrmSearchProvider,
+    EastmoneyDataApiSearchProvider,
     SearchResponse,
     SearchResult,
     SearchService,
@@ -376,6 +378,51 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         original = [p.name for p in service._providers]
         _ = service._providers_for_query("600519", "贵州茅台")
         self.assertEqual([p.name for p in service._providers], original)
+
+
+class TestEastmoneyDataApiSearchProvider(unittest.TestCase):
+    """东财数据中心返回顺序不稳定时仍应取到近期资讯。"""
+
+    def test_fetches_wide_page_and_sorts_recent_items_before_cutoff(self) -> None:
+        provider = EastmoneyDataApiSearchProvider(enabled=True)
+        now = datetime.now()
+        fresh_date = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        stale_date = (now - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
+        payload = {
+            "result": {
+                "cmsArticleWeb": [
+                    {
+                        "title": "旧结果",
+                        "content": "旧内容",
+                        "date": stale_date,
+                        "mediaName": "东方财富",
+                        "url": "https://example.com/old",
+                    },
+                    {
+                        "title": "最新公告",
+                        "content": "最新内容",
+                        "date": fresh_date,
+                        "mediaName": "东方财富",
+                        "url": "https://example.com/new",
+                    },
+                ]
+            }
+        }
+        with patch(
+            "src.search_service.requests.get",
+            return_value=MagicMock(status_code=200, json=lambda: payload),
+        ) as mock_get:
+            response = provider.search(
+                "立讯精密 002475 股票 最新消息",
+                max_results=1,
+                days=7,
+            )
+
+        self.assertTrue(response.success)
+        self.assertEqual([item.title for item in response.results], ["最新公告"])
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["keyword"], "立讯精密")
+        self.assertEqual(params["pagesize"], "100")
 
 
 class TestCninfoIrmSearchProvider(unittest.TestCase):
