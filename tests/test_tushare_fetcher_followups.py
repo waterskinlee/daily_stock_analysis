@@ -391,6 +391,53 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         # 行业板块 (AI算力, idx_type != 概念板块) 被过滤
         self.assertNotIn("AI算力", [item["name"] for item in top] + [item["name"] for item in bottom])
 
+    def test_get_concept_rankings_uses_latest_snapshot_and_unique_themes(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.dc_index.return_value = pd.DataFrame(
+            {
+                "ts_code": [
+                    "BK0899.DC",
+                    "BK0899.DC",
+                    "BK0899.DC",
+                    "BK1063.DC",
+                    "BK0883.DC",
+                    "BK9999.DC",
+                ],
+                "trade_date": [
+                    "20260809",
+                    "20260808",
+                    "20260807",
+                    "20260809",
+                    "20260809",
+                    "20260808",
+                ],
+                "name": ["CRO", "CRO", "CRO", "重组蛋白", "数字货币", "昨日异动"],
+                "idx_type": ["概念板块"] * 6,
+                "pct_change": [10.84, 10.84, 10.84, 7.9, -1.93, 99.0],
+                "leading": ["百花医药", "百花医药", "百花医药", "百普赛斯", "芯原股份", "旧龙头"],
+                "leading_code": [
+                    "600721.SH",
+                    "600721.SH",
+                    "600721.SH",
+                    "301080.SZ",
+                    "688521.SH",
+                    "000001.SZ",
+                ],
+            }
+        )
+        TushareFetcher.clear_concept_rankings_cache_for_tests()
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_concept_rankings(2)
+
+        self.assertIsNotNone(result)
+        top, bottom = result
+        self.assertEqual([item["name"] for item in top], ["CRO", "重组蛋白"])
+        self.assertEqual([item["name"] for item in bottom], ["数字货币", "重组蛋白"])
+        self.assertEqual(top[0]["leading_code"], "600721.SH")
+        self.assertEqual(len({item["name"] for item in top}), len(top))
+
+
     def test_get_concept_rankings_caches_by_n(self) -> None:
         fetcher = self._make_fetcher()
         fetcher._api.dc_index.return_value = self._concept_df()

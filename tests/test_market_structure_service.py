@@ -181,6 +181,8 @@ class _ThemedHotspotService:
         lagging_themes=None,
         hotspot_constituents=None,
         leader_stocks=None,
+        detail_constituents=None,
+        detail_leaders=None,
     ) -> None:
         self.active_themes = active_themes or []
         self.leading_concepts = leading_concepts or []
@@ -188,6 +190,9 @@ class _ThemedHotspotService:
         self.lagging_themes = lagging_themes or []
         self.hotspot_constituents = hotspot_constituents or []
         self.leader_stocks = leader_stocks or []
+        self.detail_constituents = detail_constituents or []
+        self.detail_leaders = detail_leaders or []
+        self.detail_calls = []
 
     def get_hotspots(
         self,
@@ -209,6 +214,17 @@ class _ThemedHotspotService:
             "hotspot_constituents": self.hotspot_constituents,
             "leader_stocks": self.leader_stocks,
         }
+
+    def get_hotspot_detail(self, theme_name: str, market: str = "cn"):
+        self.detail_calls.append((theme_name, market))
+        return {
+            "status": "ok",
+            "theme_name": theme_name,
+            "market": market,
+            "hotspot_constituents": self.detail_constituents,
+            "leader_stocks": self.detail_leaders,
+        }
+
 
 
 class _BlockingRankingFetcherManager:
@@ -328,6 +344,49 @@ def test_market_hotspot_service_builds_theme_context_from_dsa_rankings() -> None
     assert context["active_themes"][0]["name"] == "机器人概念"
     assert context["leading_concepts"][0]["change_pct"] == 4.2
     assert context["theme_breadth"]["leading_concept_count"] == 1
+
+def test_market_hotspot_service_deduplicates_rankings_and_keeps_leader_evidence() -> None:
+    service = MarketHotspotService(fetcher_manager=_FakeFetcherManager())
+
+    context = service.get_hotspots(
+        market="cn",
+        trade_date="2026-08-07",
+        sector_rankings={"top": [], "bottom": []},
+        concept_rankings={
+            "top": [
+                {
+                    "name": "CRO",
+                    "change_pct": 10.84,
+                    "leading": "百花医药",
+                    "leading_code": "600721.SH",
+                },
+                {
+                    "name": "CRO",
+                    "change_pct": 10.84,
+                    "leading": "百花医药",
+                    "leading_code": "600721.SH",
+                },
+                {
+                    "name": "重组蛋白",
+                    "change_pct": 7.9,
+                    "leading": "百普赛斯",
+                    "leading_code": "301080.SZ",
+                },
+            ],
+            "bottom": [
+                {"name": "数字货币", "change_pct": -1.93},
+                {"name": "数字货币", "change_pct": -1.93},
+            ],
+        },
+    )
+
+    assert [item["name"] for item in context["leading_concepts"]] == ["CRO", "重组蛋白"]
+    assert [item["name"] for item in context["active_themes"]] == ["CRO", "重组蛋白"]
+    assert [item["name"] for item in context["lagging_themes"]] == ["数字货币"]
+    assert context["leader_stocks"] == context["hotspot_constituents"]
+    assert context["leader_stocks"][0]["code"] == "600721.SH"
+    assert context["leader_stocks"][0]["theme"] == "CRO"
+
 
 
 def test_market_hotspot_service_caches_rankings_per_instance() -> None:
@@ -728,6 +787,54 @@ def test_market_structure_service_combines_market_and_stock_layers() -> None:
     assert position["theme_phase"] == "accelerating"
     assert position["stock_role"] == "edge"
     assert "leader_stocks" in position["missing_fields"]
+
+def test_market_structure_service_enriches_alias_matched_theme_constituents() -> None:
+    hotspot_service = _ThemedHotspotService(
+        leading_concepts=[{"name": "CRO", "change_pct": 10.84, "rank": 1}],
+        detail_constituents=[
+            {"code": "300024.SZ", "name": "主题成员", "topic": "CRO"},
+            {"code": "600721.SH", "name": "百花医药", "topic": "CRO"},
+        ],
+        detail_leaders=[
+            {"code": "600721.SH", "name": "百花医药", "topic": "CRO"},
+        ],
+    )
+    service = MarketStructureService(
+        fetcher_manager=_FakeFetcherManager(),
+        hotspot_service=hotspot_service,
+    )
+    fundamental_context = {
+        "market": "cn",
+        "belong_boards": [{"name": "CRO概念", "type": "概念"}],
+        "concept_boards": {
+            "status": "ok",
+            "data": {
+                "top": [{"name": "CRO", "change_pct": 10.84, "rank": 1}],
+                "bottom": [],
+            },
+        },
+    }
+
+    context = service.build_context(
+        code="300024",
+        stock_name="主题成员",
+        market="cn",
+        fundamental_context=fundamental_context,
+        trade_date="2026-08-07",
+    )
+
+    theme_context = context["market_theme_context"]
+    position = context["stock_market_position"]
+    assert hotspot_service.detail_calls == [("CRO", "cn")]
+    assert theme_context["hotspot_constituents"][0]["code"] == "300024.SZ"
+    assert theme_context["leader_stocks"][0]["code"] == "600721.SH"
+    assert position["primary_theme"]["name"] == "CRO"
+    assert position["stock_role"] == "follower"
+    assert position["status"] == "ok"
+    assert "theme_ranking_match" not in position["missing_fields"]
+    assert "hotspot_constituents" not in position["missing_fields"]
+    assert "leader_stocks" not in position["missing_fields"]
+
 
 
 def test_market_structure_service_recognizes_leader_only_for_matching_theme() -> None:
