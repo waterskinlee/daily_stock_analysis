@@ -219,6 +219,22 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
                             "top": [{"name": "电池"}],
                             "bottom": [{"name": "化工"}],
                         },
+                        "block_trades": {
+                            "status": "ok",
+                            "latest_date": "2026-03-31",
+                            "trade_count": 4,
+                            "total_amount": 88000000,
+                            "discount_trade_count": 3,
+                            "premium_trade_count": 1,
+                        },
+                        "margin_trading": {
+                            "status": "ok",
+                            "trade_date": "2026-03-31",
+                            "financing_balance": 4200000000,
+                            "financing_net_buy_amount": -36000000,
+                            "financing_net_buy_5d": -120000000,
+                            "financing_net_buy_10d": -210000000,
+                        },
                     },
                 }
             },
@@ -231,6 +247,11 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         self.assertIn("-1200000", prompt)
         self.assertIn("接近压力且主力流出时不得追买", prompt)
         self.assertIn("洗盘观察", prompt)
+        self.assertIn("大宗交易与两融（资金风险过滤器）", prompt)
+        self.assertIn("88000000", prompt)
+        self.assertIn("折价成交笔数", prompt)
+        self.assertIn("-120000000", prompt)
+        self.assertIn("折价大宗交易与融资净偿还不得解释为利好", prompt)
 
     def test_prompt_prefers_context_news_window_days(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):

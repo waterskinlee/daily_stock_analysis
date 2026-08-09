@@ -636,6 +636,67 @@ class TestFundamentalContext(unittest.TestCase):
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.5)
         self.assertEqual(ctx["status"], "not_supported")
 
+    def test_capital_flow_merges_tushare_with_eastmoney_market_activity(self) -> None:
+        tushare = SimpleNamespace(
+            name="TushareFetcher",
+            priority=0,
+            is_available=lambda: True,
+            get_capital_flow=lambda _stock_code: {
+                "status": "partial",
+                "stock_flow": {
+                    "main_net_inflow": 1500000.0,
+                    "inflow_5d": 8000000.0,
+                    "inflow_10d": 15000000.0,
+                },
+                "sector_rankings": {"top": [{"name": "白酒"}], "bottom": []},
+                "source_chain": ["capital_stock:tushare_moneyflow"],
+                "errors": [],
+            },
+        )
+        manager = DataFetcherManager(fetchers=[tushare])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=120,
+            fundamental_stage_timeout_seconds=1.5,
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+        block_trades = {
+            "status": "ok",
+            "latest_date": "2026-08-03",
+            "trade_count": 3,
+            "total_amount": 50000000.0,
+            "discount_trade_count": 1,
+            "premium_trade_count": 1,
+            "recent_trades": [{"trade_date": "2026-08-03", "deal_amount": 20000000.0}],
+            "source_chain": [{"provider": "eastmoney_block_trades", "result": "ok", "duration_ms": 12}],
+            "errors": [],
+        }
+        margin_trading = {
+            "status": "ok",
+            "trade_date": "2026-08-07",
+            "financing_balance": 17544302364.0,
+            "financing_net_buy_amount": 17663935.0,
+            "financing_net_buy_5d": 131725962.0,
+            "source_chain": [{"provider": "eastmoney_margin_trading", "result": "ok", "duration_ms": 10}],
+            "errors": [],
+        }
+
+        with patch("src.config.get_config", return_value=cfg), \
+                patch.object(manager._fundamental_adapter, "get_block_trades", return_value=block_trades) as block_mock, \
+                patch.object(manager._fundamental_adapter, "get_margin_trading", return_value=margin_trading) as margin_mock:
+            ctx = manager.get_capital_flow_context("600519", budget_seconds=0.8)
+
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["data"]["stock_flow"]["main_net_inflow"], 1500000.0)
+        self.assertEqual(ctx["data"]["block_trades"]["trade_count"], 3)
+        self.assertEqual(ctx["data"]["margin_trading"]["financing_net_buy_5d"], 131725962.0)
+        providers = [item.get("provider") for item in ctx["source_chain"] if isinstance(item, dict)]
+        self.assertIn("eastmoney_block_trades", providers)
+        self.assertIn("eastmoney_margin_trading", providers)
+        block_mock.assert_called_once_with("600519")
+        margin_mock.assert_called_once_with("600519")
+
     def test_get_belong_boards_from_capability_probe(self) -> None:
         fetcher = _DummyBoardFetcher(
             "EfinanceFetcher",

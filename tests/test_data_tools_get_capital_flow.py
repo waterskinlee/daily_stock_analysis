@@ -29,6 +29,22 @@ class _DummyManagerOk:
                     "top": [{"name": "白酒", "inflow": 5e8}, {"name": "半导体", "inflow": 3e8}],
                     "bottom": [{"name": "煤炭", "inflow": -2e8}],
                 },
+                "block_trades": {
+                    "status": "ok",
+                    "latest_date": "2026-08-03",
+                    "trade_count": 3,
+                    "total_amount": 50000000.0,
+                    "discount_trade_count": 1,
+                    "premium_trade_count": 1,
+                    "recent_trades": [{"trade_date": "2026-08-03", "deal_amount": 20000000.0}],
+                },
+                "margin_trading": {
+                    "status": "ok",
+                    "trade_date": "2026-08-07",
+                    "financing_balance": 17544302364.0,
+                    "financing_net_buy_amount": 17663935.0,
+                    "financing_net_buy_5d": 131725962.0,
+                },
             },
             "errors": [],
         }
@@ -66,6 +82,10 @@ class TestGetCapitalFlowContract(unittest.TestCase):
         self.assertIn("sector_rankings", result)
         self.assertIn("top_inflow_sectors", result["sector_rankings"])
         self.assertIn("top_outflow_sectors", result["sector_rankings"])
+        self.assertEqual(result["block_trades"]["trade_count"], 3)
+        self.assertEqual(result["block_trades"]["total_amount"], 50000000.0)
+        self.assertEqual(result["margin_trading"]["trade_date"], "2026-08-07")
+        self.assertEqual(result["margin_trading"]["financing_net_buy_5d"], 131725962.0)
         # At most 3 items are returned per ranking list
         self.assertLessEqual(len(result["sector_rankings"]["top_inflow_sectors"]), 3)
         self.assertEqual(result["errors"], [])

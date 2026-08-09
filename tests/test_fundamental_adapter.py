@@ -172,6 +172,124 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(payload.get("ttm_event_count"), 1)
         self.assertAlmostEqual(payload.get("ttm_cash_dividend_per_share"), 0.3, places=6)
 
+    # ---- Eastmoney block trades + margin trading direct HTTP -------------------
+
+    def test_block_trades_summarize_recent_deals(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        today = datetime.now().date()
+        latest_date = (today - timedelta(days=2)).isoformat()
+        prior_date = (today - timedelta(days=10)).isoformat()
+        stale_date = (today - timedelta(days=120)).isoformat()
+        rows = [
+            {
+                "SECURITY_CODE": "600519",
+                "TRADE_DATE": f"{latest_date} 00:00:00",
+                "DEAL_PRICE": 100.0,
+                "CLOSE_PRICE": 102.0,
+                "PREMIUM_RATIO": -1.96,
+                "DEAL_VOLUME": 10000,
+                "DEAL_AMT": 1000000,
+                "TURNOVER_RATE": 0.02,
+                "BUYER_NAME": "机构A",
+                "SELLER_NAME": "机构B",
+            },
+            {
+                "SECURITY_CODE": "600519",
+                "TRADE_DATE": f"{prior_date} 00:00:00",
+                "DEAL_PRICE": 105.0,
+                "CLOSE_PRICE": 103.0,
+                "PREMIUM_RATIO": 1.94,
+                "DEAL_VOLUME": 20000,
+                "DEAL_AMT": 2100000,
+                "TURNOVER_RATE": 0.04,
+                "BUYER_NAME": "机构C",
+                "SELLER_NAME": "机构D",
+            },
+            {
+                "SECURITY_CODE": "600519",
+                "TRADE_DATE": f"{stale_date} 00:00:00",
+                "PREMIUM_RATIO": -5.0,
+                "DEAL_AMT": 9999999,
+            },
+        ]
+
+        with patch.object(adapter, "_em_datacenter_get", return_value=rows) as mock_get:
+            result = adapter.get_block_trades("600519", lookback_days=90, max_results=10)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["latest_date"], latest_date)
+        self.assertEqual(result["trade_count"], 2)
+        self.assertEqual(result["total_amount"], 3100000.0)
+        self.assertEqual(result["discount_trade_count"], 1)
+        self.assertEqual(result["premium_trade_count"], 1)
+        self.assertEqual(len(result["recent_trades"]), 2)
+        self.assertEqual(result["recent_trades"][0]["buyer_name"], "机构A")
+        mock_get.assert_called_once_with(
+            "RPT_DATA_BLOCKTRADE",
+            filter_str='(SECURITY_CODE="600519")',
+            page_size=50,
+            sort_columns="TRADE_DATE",
+            sort_types="-1",
+        )
+
+    def test_margin_trading_maps_latest_detail(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        rows = [
+            {
+                "DATE": "2026-08-07 00:00:00",
+                "SCODE": "600519",
+                "RZYE": 17544302364,
+                "RQYE": 130500431.16,
+                "RZRQYE": 17674802795.16,
+                "RZMRE": 333336970,
+                "RZCHE": 315673035,
+                "RZJME": 17663935,
+                "RZJME3D": 124564266,
+                "RZJME5D": 131725962,
+                "RZJME10D": -364724496,
+                "RQYL": 99678,
+                "RQMCL": 1100,
+                "RQCHL": 4200,
+                "RQJMG": -3100,
+                "RQJMG5D": -17532,
+                "RZYEZB": 1.07197612,
+                "FIN_BALANCE_GR": 0.100783359408,
+            }
+        ]
+
+        with patch.object(adapter, "_em_datacenter_get", return_value=rows) as mock_get:
+            result = adapter.get_margin_trading("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["trade_date"], "2026-08-07")
+        self.assertEqual(result["financing_balance"], 17544302364.0)
+        self.assertEqual(result["securities_lending_balance"], 130500431.16)
+        self.assertEqual(result["margin_balance"], 17674802795.16)
+        self.assertEqual(result["financing_net_buy_amount"], 17663935.0)
+        self.assertEqual(result["financing_net_buy_5d"], 131725962.0)
+        self.assertEqual(result["securities_net_sold_volume"], -3100.0)
+        self.assertEqual(result["securities_net_sold_volume_5d"], -17532.0)
+        mock_get.assert_called_once_with(
+            "RPTA_WEB_RZRQ_GGMX",
+            filter_str='(SCODE="600519")',
+            page_size=10,
+            sort_columns="DATE",
+            sort_types="-1",
+        )
+
+    def test_market_activity_adapters_fail_open(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        with patch.object(adapter, "_em_datacenter_get", side_effect=ConnectionError("reset")):
+            block_trades = adapter.get_block_trades("600519")
+            margin_trading = adapter.get_margin_trading("600519")
+
+        self.assertEqual(block_trades["status"], "failed")
+        self.assertEqual(block_trades["recent_trades"], [])
+        self.assertTrue(any("block_trades" in error for error in block_trades["errors"]))
+        self.assertEqual(margin_trading["status"], "failed")
+        self.assertIsNone(margin_trading["trade_date"])
+        self.assertTrue(any("margin_trading" in error for error in margin_trading["errors"]))
+
     # ---- Eastmoney lockup (限售解禁) direct HTTP --------------------------------
 
     @staticmethod
