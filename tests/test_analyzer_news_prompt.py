@@ -235,6 +235,18 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
                             "financing_net_buy_5d": -120000000,
                             "financing_net_buy_10d": -210000000,
                         },
+                        "popularity": {
+                            "status": "ok",
+                            "rank": 11,
+                            "rank_change": -3,
+                            "eastmoney_rank": 11,
+                            "ths_rank": 18,
+                            "heat": 188800,
+                            "concepts": ["锂电池", "隔膜"],
+                            "tag": "机构关注",
+                            "is_top_20": True,
+                            "primary_source": "eastmoney_hot_rank",
+                        },
                     },
                 }
             },
@@ -252,6 +264,14 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         self.assertIn("折价成交笔数", prompt)
         self.assertIn("-120000000", prompt)
         self.assertIn("折价大宗交易与融资净偿还不得解释为利好", prompt)
+        self.assertIn("人气热榜（短线拥挤度过滤器）", prompt)
+        self.assertIn("东财人气排名", prompt)
+        self.assertIn("11", prompt)
+        self.assertIn("同花顺热榜排名", prompt)
+        self.assertIn("188800", prompt)
+        self.assertIn("锂电池、隔膜", prompt)
+        self.assertIn("热榜高位只代表关注度，不代表买入信号", prompt)
+        self.assertIn("不得仅因热度或排名上升给出买入结论", prompt)
 
     def test_prompt_prefers_context_news_window_days(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):

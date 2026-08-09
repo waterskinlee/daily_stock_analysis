@@ -24,7 +24,13 @@ except Exception:
     import fake_useragent
     fake_useragent.UserAgent = lambda *a, **k: type("U", (), {"random": "test"})()
 
-from src.search_service import SearchService, SinaNewsSearchProvider
+from src.search_service import (
+    CninfoIrmSearchProvider,
+    SearchResponse,
+    SearchResult,
+    SearchService,
+    SinaNewsSearchProvider,
+)
 
 _NOW = int(time.time())
 
@@ -370,6 +376,125 @@ class TestSinaNewsSearchProvider(unittest.TestCase):
         original = [p.name for p in service._providers]
         _ = service._providers_for_query("600519", "贵州茅台")
         self.assertEqual([p.name for p in service._providers], original)
+
+
+class TestCninfoIrmSearchProvider(unittest.TestCase):
+    """巨潮互动易必须作为官方公司回复补充，而不是替换常规新闻。"""
+
+    @staticmethod
+    def _response(payload, status_code=200):
+        return MagicMock(status_code=status_code, json=lambda: payload)
+
+    def test_maps_answered_company_replies_and_uses_query_params(self) -> None:
+        provider = CninfoIrmSearchProvider(enabled=True)
+        fresh_question = (_NOW - 3600) * 1000
+        fresh_reply = (_NOW - 60) * 1000
+        lookup = {"data": [{"stockCode": "002475", "shortName": "立讯精密", "secid": "9900014448"}]}
+        questions = {
+            "rows": [
+                {
+                    "stockCode": "002475",
+                    "companyShortName": "立讯精密",
+                    "mainContent": "AI 高速互连业务是否已经进入批量出货？",
+                    "attachedContent": "公司相关战略合作聚焦光、铜高速互连，业务按计划推进。",
+                    "attachedAuthor": "立讯精密",
+                    "pubDate": fresh_question,
+                    "updateDate": fresh_reply,
+                    "indexId": "123",
+                },
+                {
+                    "stockCode": "002475",
+                    "companyShortName": "立讯精密",
+                    "mainContent": "尚未回复的问题",
+                    "attachedContent": None,
+                    "pubDate": fresh_question,
+                    "indexId": "124",
+                },
+            ]
+        }
+
+        with patch(
+            "src.search_service.requests.post",
+            side_effect=[self._response(lookup), self._response(questions)],
+        ) as post_mock:
+            response = provider.search("立讯精密 002475 股票 最新消息", max_results=3, days=7)
+
+        self.assertTrue(response.success)
+        self.assertEqual(len(response.results), 1)
+        item = response.results[0]
+        self.assertIn("AI 高速互连", item.title)
+        self.assertIn("公司回复", item.snippet)
+        self.assertIn("按计划推进", item.snippet)
+        self.assertEqual(item.source, "巨潮互动易")
+        self.assertEqual(item.relevance_category, "direct_company_news")
+        self.assertEqual(item.published_date, time.strftime("%Y-%m-%d %H:%M", time.localtime(fresh_reply / 1000)))
+        self.assertEqual(post_mock.call_args_list[0].kwargs["data"], {"keyWord": "002475"})
+        second_kwargs = post_mock.call_args_list[1].kwargs
+        self.assertEqual(second_kwargs["params"]["orgId"], "9900014448")
+        self.assertEqual(second_kwargs["params"]["stockcode"], "002475")
+        self.assertNotIn("data", second_kwargs)
+
+    def test_drops_stale_replies_and_fails_open(self) -> None:
+        provider = CninfoIrmSearchProvider(enabled=True)
+        stale = (_NOW - 20 * 86400) * 1000
+        lookup = {"data": [{"stockCode": "002475", "secid": "9900014448"}]}
+        questions = {
+            "rows": [{
+                "stockCode": "002475",
+                "companyShortName": "立讯精密",
+                "mainContent": "旧问题",
+                "attachedContent": "旧回复",
+                "updateDate": stale,
+                "indexId": "old",
+            }]
+        }
+        with patch(
+            "src.search_service.requests.post",
+            side_effect=[self._response(lookup), self._response(questions)],
+        ):
+            stale_response = provider.search("002475", max_results=3, days=7)
+        self.assertFalse(stale_response.success)
+        self.assertEqual(stale_response.results, [])
+
+        with patch("src.search_service.requests.post", side_effect=ConnectionError("reset")):
+            failed_response = provider.search("002475", max_results=3, days=7)
+        self.assertFalse(failed_response.success)
+        self.assertEqual(failed_response.results, [])
+        self.assertIn("请求失败", failed_response.error_message or "")
+
+    def test_search_service_uses_interactions_without_replacing_news_chain(self) -> None:
+        service = SearchService(
+            searxng_base_urls=[],
+            searxng_public_instances_enabled=False,
+            cninfo_irm_enabled=True,
+        )
+        interaction = SearchResponse(
+            query="002475 互动易",
+            provider="CninfoIRM",
+            success=True,
+            results=[SearchResult(
+                title="立讯精密公司回复：高速互连业务按计划推进",
+                snippet="投资者提问：业务进展？\n公司回复：按计划推进。",
+                url="https://irm.cninfo.com.cn/ircs/company/companyDetail?stockcode=002475",
+                source="巨潮互动易",
+                published_date=time.strftime("%Y-%m-%d %H:%M", time.localtime(_NOW - 60)),
+                relevance_score=100,
+                relevance_category="direct_company_news",
+                relevance_reasons=["官方公司回复"],
+            )],
+        )
+        with patch.object(service._interaction_provider, "search", return_value=interaction):
+            response = service.search_stock_news("002475", "立讯精密", max_results=3)
+            intel = service.search_comprehensive_intel("002475", "立讯精密", max_searches=0)
+
+        self.assertTrue(service.is_available)
+        self.assertEqual(response.provider, "CninfoIRM")
+        self.assertEqual(len(response.results), 1)
+        self.assertIn("company_interactions", intel)
+        self.assertEqual(intel["company_interactions"].results[0].source, "巨潮互动易")
+        report = service.format_intel_report(intel, "立讯精密")
+        self.assertIn("公司互动回复", report)
+        self.assertIn("高速互连业务按计划推进", report)
 
 
 if __name__ == "__main__":

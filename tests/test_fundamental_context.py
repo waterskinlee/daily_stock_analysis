@@ -638,6 +638,9 @@ class TestFundamentalContext(unittest.TestCase):
                 }), \
                 patch.object(manager._fundamental_adapter, "get_margin_trading", return_value={
                     "status": "empty", "source_chain": [], "errors": [],
+                }), \
+                patch.object(manager._fundamental_adapter, "get_stock_popularity", return_value={
+                    "status": "empty", "is_ranked": False, "rank": None, "source_chain": [], "errors": [],
                 }):
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.5)
         self.assertEqual(ctx["status"], "not_supported")
@@ -687,21 +690,40 @@ class TestFundamentalContext(unittest.TestCase):
             "source_chain": [{"provider": "eastmoney_margin_trading", "result": "ok", "duration_ms": 10}],
             "errors": [],
         }
+        popularity = {
+            "status": "ok",
+            "is_ranked": True,
+            "rank": 11,
+            "rank_change": -3,
+            "eastmoney_rank": 11,
+            "ths_rank": None,
+            "heat": None,
+            "concepts": [],
+            "is_top_20": True,
+            "primary_source": "eastmoney_hot_rank",
+            "top_stocks": [{"rank": 1, "code": "603259", "name": "药明康德"}],
+            "source_chain": [{"provider": "eastmoney_hot_rank", "result": "ok", "duration_ms": 9}],
+            "errors": [],
+        }
 
         with patch("src.config.get_config", return_value=cfg), \
                 patch.object(manager._fundamental_adapter, "get_block_trades", return_value=block_trades) as block_mock, \
-                patch.object(manager._fundamental_adapter, "get_margin_trading", return_value=margin_trading) as margin_mock:
+                patch.object(manager._fundamental_adapter, "get_margin_trading", return_value=margin_trading) as margin_mock, \
+                patch.object(manager._fundamental_adapter, "get_stock_popularity", return_value=popularity) as popularity_mock:
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.8)
 
         self.assertEqual(ctx["status"], "ok")
         self.assertEqual(ctx["data"]["stock_flow"]["main_net_inflow"], 1500000.0)
         self.assertEqual(ctx["data"]["block_trades"]["trade_count"], 3)
         self.assertEqual(ctx["data"]["margin_trading"]["financing_net_buy_5d"], 131725962.0)
+        self.assertEqual(ctx["data"]["popularity"]["rank"], 11)
         providers = [item.get("provider") for item in ctx["source_chain"] if isinstance(item, dict)]
         self.assertIn("eastmoney_block_trades", providers)
         self.assertIn("eastmoney_margin_trading", providers)
+        self.assertIn("eastmoney_hot_rank", providers)
         block_mock.assert_called_once_with("600519")
         margin_mock.assert_called_once_with("600519")
+        popularity_mock.assert_called_once_with("600519")
 
     def test_get_belong_boards_from_capability_probe(self) -> None:
         fetcher = _DummyBoardFetcher(

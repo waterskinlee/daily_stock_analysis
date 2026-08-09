@@ -290,6 +290,95 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertIsNone(margin_trading["trade_date"])
         self.assertTrue(any("margin_trading" in error for error in margin_trading["errors"]))
 
+    # ---- THS + Eastmoney stock popularity / crowding ---------------------------
+
+    @staticmethod
+    def _http_json(payload, status_code=200):
+        response = MagicMock(status_code=status_code)
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_stock_popularity_merges_eastmoney_rank_with_ths_heat(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        AkshareFundamentalAdapter.clear_popularity_cache_for_tests()
+        ths_payload = {
+            "data": {
+                "stock_list": [
+                    {
+                        "order": 1,
+                        "code": "603259",
+                        "name": "药明康德",
+                        "rate": "403572.0",
+                        "rise_and_fall": 8.49,
+                        "hot_rank_chg": 0,
+                        "tag": {"concept_tag": ["创新药"], "popularity_tag": ""},
+                    },
+                    {
+                        "order": 12,
+                        "code": "600519",
+                        "name": "贵州茅台",
+                        "rate": "188800.0",
+                        "rise_and_fall": 0.5,
+                        "hot_rank_chg": 2,
+                        "tag": {"concept_tag": ["白酒"], "popularity_tag": "机构关注"},
+                    },
+                ]
+            }
+        }
+        em_payload = {
+            "data": [
+                {"sc": "SH603259", "rk": 1, "hisRc": 0},
+                {"sc": "SH600519", "rk": 11, "hisRc": -3},
+            ]
+        }
+
+        with patch("data_provider.fundamental_adapter.requests.get", return_value=self._http_json(ths_payload)) as get_mock, \
+                patch("data_provider.fundamental_adapter.requests.post", return_value=self._http_json(em_payload)) as post_mock:
+            result = adapter.get_stock_popularity("600519", period="hour", top_n=100)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["is_ranked"])
+        self.assertEqual(result["rank"], 11)
+        self.assertEqual(result["rank_change"], -3)
+        self.assertEqual(result["eastmoney_rank"], 11)
+        self.assertEqual(result["ths_rank"], 12)
+        self.assertEqual(result["heat"], 188800.0)
+        self.assertEqual(result["concepts"], ["白酒"])
+        self.assertEqual(result["tag"], "机构关注")
+        self.assertTrue(result["is_top_20"])
+        self.assertEqual(result["primary_source"], "eastmoney_hot_rank")
+        self.assertEqual(result["top_stocks"][0]["code"], "603259")
+        self.assertEqual(get_mock.call_args.kwargs["params"]["type"], "hour")
+        self.assertEqual(post_mock.call_args.kwargs["json"]["pageSize"], 100)
+
+    def test_stock_popularity_survives_single_source_failure(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        AkshareFundamentalAdapter.clear_popularity_cache_for_tests()
+        em_payload = {"data": [{"sc": "SH600519", "rk": 11, "hisRc": -3}]}
+        with patch("data_provider.fundamental_adapter.requests.get", side_effect=ConnectionError("ths reset")), \
+                patch("data_provider.fundamental_adapter.requests.post", return_value=self._http_json(em_payload)):
+            result = adapter.get_stock_popularity("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["rank"], 11)
+        self.assertEqual(result["ths_status"], "failed")
+        self.assertEqual(result["eastmoney_status"], "ok")
+        self.assertTrue(any("ths_hot" in error for error in result["errors"]))
+
+    def test_stock_popularity_fails_open_when_both_sources_fail(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        AkshareFundamentalAdapter.clear_popularity_cache_for_tests()
+        with patch("data_provider.fundamental_adapter.requests.get", side_effect=ConnectionError("ths reset")), \
+                patch("data_provider.fundamental_adapter.requests.post", side_effect=ConnectionError("em reset")):
+            result = adapter.get_stock_popularity("600519")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["is_ranked"])
+        self.assertIsNone(result["rank"])
+        self.assertEqual(result["top_stocks"], [])
+        self.assertEqual(len(result["errors"]), 2)
+
     # ---- Eastmoney lockup (限售解禁) direct HTTP --------------------------------
 
     @staticmethod

@@ -45,6 +45,20 @@ class _DummyManagerOk:
                     "financing_net_buy_amount": 17663935.0,
                     "financing_net_buy_5d": 131725962.0,
                 },
+                "popularity": {
+                    "status": "ok",
+                    "is_ranked": True,
+                    "rank": 11,
+                    "rank_change": -3,
+                    "eastmoney_rank": 11,
+                    "ths_rank": None,
+                    "heat": None,
+                    "concepts": ["白酒"],
+                    "tag": "机构关注",
+                    "is_top_20": True,
+                    "primary_source": "eastmoney_hot_rank",
+                    "top_stocks": [{"rank": 1, "code": "603259", "name": "药明康德"}],
+                },
             },
             "errors": [],
         }
@@ -86,6 +100,11 @@ class TestGetCapitalFlowContract(unittest.TestCase):
         self.assertEqual(result["block_trades"]["total_amount"], 50000000.0)
         self.assertEqual(result["margin_trading"]["trade_date"], "2026-08-07")
         self.assertEqual(result["margin_trading"]["financing_net_buy_5d"], 131725962.0)
+        self.assertEqual(result["popularity"]["rank"], 11)
+        self.assertEqual(result["popularity"]["rank_change"], -3)
+        self.assertEqual(result["popularity"]["concepts"], ["白酒"])
+        self.assertTrue(result["popularity"]["is_top_20"])
+        self.assertEqual(result["popularity"]["top_stocks"][0]["name"], "药明康德")
         # At most 3 items are returned per ranking list
         self.assertLessEqual(len(result["sector_rankings"]["top_inflow_sectors"]), 3)
         self.assertEqual(result["errors"], [])
