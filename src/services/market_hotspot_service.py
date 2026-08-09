@@ -54,6 +54,7 @@ class MarketHotspotService:
         ranking_fetch_timeout_seconds: Optional[float] = None,
         failure_cache_ttl_seconds: Optional[float] = None,
         success_cache_ttl_seconds: Optional[float] = None,
+        hotspot_detail_fetcher: Optional[Callable[[str], Dict[str, Any]]] = None,
     ) -> None:
         self.fetcher_manager = fetcher_manager or DataFetcherManager()
         self._ranking_fetch_timeout_seconds = ranking_fetch_timeout_seconds
@@ -67,11 +68,13 @@ class MarketHotspotService:
             if success_cache_ttl_seconds is None
             else success_cache_ttl_seconds
         )
+        self._hotspot_detail_fetcher = hotspot_detail_fetcher
         self._hotspots_cache: Dict[
             Tuple[str, Optional[str], int],
             Dict[str, Any],
         ] = {}
         self._hotspots_cache_lock = threading.Lock()
+
 
     def get_hotspots(
         self,
@@ -144,6 +147,13 @@ class MarketHotspotService:
             list(leading_industries) + list(leading_concepts),
             limit=limit,
         )
+        ranking_leaders = self._build_ranking_leaders(
+            [
+                (top_industries, "industry"),
+                (top_concepts, "concept"),
+            ]
+        )
+
 
         missing_fields: List[str] = []
         if not leading_industries and not bottom_industries:
@@ -176,6 +186,11 @@ class MarketHotspotService:
             # lagging concept whenever the industry list fills the limit, which
             # removes valid evidence from downstream stock-board matching.
             lagging_themes=lagging_themes,
+            # A ranking leader is already verified as one constituent of its
+            # theme. Preserve that minimal evidence even before richer detail is
+            # fetched for the current stock's matched primary theme.
+            hotspot_constituents=[dict(item) for item in ranking_leaders],
+            leader_stocks=[dict(item) for item in ranking_leaders],
             theme_breadth=ThemeBreadth(
                 active_count=len(active_themes),
                 leading_industry_count=len(leading_industries),
@@ -189,6 +204,7 @@ class MarketHotspotService:
                 errors=errors,
             ),
         )
+
         payload = dump_market_structure_model(context)
         if uses_preloaded_rankings:
             return payload
@@ -250,15 +266,123 @@ class MarketHotspotService:
         return top_items, bottom_items
 
     def get_hotspot_detail(self, theme_name: str, market: str = "cn") -> Dict[str, Any]:
-        """Return an explicit placeholder for richer hotspot detail evidence."""
+        """Fetch bounded constituent/leader evidence for one matched theme."""
         normalized_market = str(market or "cn").strip().lower() or "cn"
-        status = "unknown" if normalized_market == "cn" else "not_supported"
+        normalized_theme = self._optional_text(theme_name)
+        if normalized_market != "cn":
+            return {
+                "theme_name": normalized_theme or "",
+                "market": normalized_market,
+                "status": "not_supported",
+                "hotspot_constituents": [],
+                "leader_stocks": [],
+                "missing_fields": ["hotspot_constituents", "leader_stocks"],
+            }
+        if not normalized_theme:
+            return {
+                "theme_name": "",
+                "market": normalized_market,
+                "status": "unknown",
+                "hotspot_constituents": [],
+                "leader_stocks": [],
+                "missing_fields": ["theme_name", "hotspot_constituents", "leader_stocks"],
+            }
+
+        try:
+            fetcher = self._hotspot_detail_fetcher or self._fetch_screening_hotspot_detail
+            raw_detail = fetcher(normalized_theme)
+        except Exception as exc:
+            logger.debug("market hotspot detail fetch failed theme=%s: %s", normalized_theme, exc)
+            return {
+                "theme_name": normalized_theme,
+                "market": normalized_market,
+                "status": "unknown",
+                "hotspot_constituents": [],
+                "leader_stocks": [],
+                "missing_fields": ["hotspot_constituents", "leader_stocks"],
+                "errors": [str(exc)],
+            }
+
+        if not isinstance(raw_detail, dict):
+            return {
+                "theme_name": normalized_theme,
+                "market": normalized_market,
+                "status": "unknown",
+                "hotspot_constituents": [],
+                "leader_stocks": [],
+                "missing_fields": ["hotspot_constituents", "leader_stocks"],
+                "errors": ["hotspot detail provider returned an invalid payload"],
+            }
+
+        summary = raw_detail.get("summary")
+        summary = summary if isinstance(summary, dict) else {}
+        raw_constituents = raw_detail.get("hotspot_constituents")
+        if not isinstance(raw_constituents, list):
+            raw_constituents = raw_detail.get("stocks")
+        raw_leaders = raw_detail.get("leader_stocks")
+        if not isinstance(raw_leaders, list):
+            raw_leaders = summary.get("leader_stocks")
+
+        constituents = self._normalize_hotspot_stocks(raw_constituents, normalized_theme)
+        leaders = self._normalize_hotspot_stocks(raw_leaders, normalized_theme)
+        if not constituents and leaders:
+            constituents = [dict(item) for item in leaders]
+        missing_fields = []
+        if not constituents:
+            missing_fields.append("hotspot_constituents")
+        if not leaders:
+            missing_fields.append("leader_stocks")
+
         return {
-            "theme_name": str(theme_name or "").strip(),
+            "theme_name": normalized_theme,
+            "canonical_theme": self._optional_text(summary.get("canonical_topic")) or normalized_theme,
             "market": normalized_market,
-            "status": status,
-            "missing_fields": ["hotspot_route", "hotspot_constituents", "leader_stocks"],
+            "status": "ok" if constituents or leaders else "unknown",
+            "hotspot_constituents": constituents,
+            "leader_stocks": leaders,
+            "missing_fields": missing_fields,
+            "provider": self._optional_text(summary.get("provider_used") or raw_detail.get("provider")),
+            "errors": list(summary.get("source_errors") or raw_detail.get("errors") or []),
         }
+
+    @staticmethod
+    def _fetch_screening_hotspot_detail(theme_name: str) -> Dict[str, Any]:
+        from src.services.screening import hotspot as screening_hotspot
+        from src.services.screening_service import DsaEastMoneyHotspotProvider
+
+        detail = screening_hotspot.get_hotspot_detail(
+            theme_name,
+            provider=DsaEastMoneyHotspotProvider(),
+            top_stocks=10,
+        )
+        return screening_hotspot.hotspot_detail_to_dict(detail)
+
+    @classmethod
+    def _normalize_hotspot_stocks(cls, items: Any, theme_name: str) -> List[Dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str]] = set()
+        theme_key = theme_name.casefold()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            code = cls._optional_text(
+                record.get("code") or record.get("stock_code") or record.get("symbol")
+            )
+            name = cls._optional_text(record.get("name") or record.get("stock_name"))
+            if not code and not name:
+                continue
+            dedupe_key = ((code or name or "").casefold(), theme_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            record.setdefault("theme", theme_name)
+            record.setdefault("theme_name", theme_name)
+            normalized.append(record)
+        return normalized
+
 
     def get_concept_rankings(
         self,
@@ -564,6 +688,43 @@ class MarketHotspotService:
         else:
             future.set_result(result)
 
+    def _build_ranking_leaders(
+        self,
+        ranking_groups: List[Tuple[Any, ThemeRankSource]],
+    ) -> List[Dict[str, Any]]:
+        leaders: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str]] = set()
+        for items, theme_source in ranking_groups:
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                theme_name = self._optional_text(item.get("name"))
+                change_pct = self._safe_float(item.get("change_pct"))
+                if not theme_name or (change_pct is not None and change_pct <= 0):
+                    continue
+                code = self._optional_text(item.get("leading_code") or item.get("leader_code"))
+                name = self._optional_text(item.get("leading") or item.get("leader"))
+                if not code and not name:
+                    continue
+                dedupe_key = ((code or name or "").casefold(), theme_name.casefold())
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                leaders.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "theme": theme_name,
+                        "theme_name": theme_name,
+                        "theme_source": theme_source,
+                        "role": "核心龙头",
+                        "evidence_source": "ranking_leader",
+                    }
+                )
+        return leaders
+
     def _normalize_ranked_items(
         self,
         items: Any,
@@ -573,6 +734,7 @@ class MarketHotspotService:
             return []
 
         normalized: List[RankedThemeItem] = []
+        seen_names: Set[str] = set()
         for index, item in enumerate(items, 1):
             if not isinstance(item, dict):
                 continue
@@ -584,6 +746,10 @@ class MarketHotspotService:
             )
             if not name:
                 continue
+            name_key = name.casefold()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
             change_pct = self._safe_float(
                 item.get("change_pct")
                 if "change_pct" in item
@@ -605,6 +771,7 @@ class MarketHotspotService:
             )
         return normalized
 
+
     def _build_active_themes(
         self,
         items: List[RankedThemeItem],
@@ -617,7 +784,12 @@ class MarketHotspotService:
         positive_items.sort(key=lambda item: item.change_pct or 0, reverse=True)
 
         active: List[MarketThemeItem] = []
-        for item in positive_items[:limit]:
+        seen_names: Set[str] = set()
+        for item in positive_items:
+            name_key = item.name.casefold()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
             active.append(
                 MarketThemeItem(
                     name=item.name,
@@ -631,6 +803,8 @@ class MarketHotspotService:
                     reason="industry/concept ranking gain",
                 )
             )
+            if len(active) >= limit:
+                break
         return active
 
     @staticmethod

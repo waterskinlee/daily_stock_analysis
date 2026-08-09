@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from typing import Any, Dict, List, Optional
 
 from data_provider import DataFetcherManager
+from data_provider.base import normalize_stock_code as normalize_data_provider_stock_code
 
 from src.schemas.market_structure import (
     MARKET_STRUCTURE_SCHEMA_VERSION,
@@ -95,7 +97,6 @@ class MarketStructureService:
             sector_rankings=sector_rankings_payload,
             concept_rankings=concept_rankings_payload,
         )
-        market_theme_context = MarketThemeContext.model_validate(market_theme_payload)
 
         related_sector_rankings = self._merge_rankings_for_board_matching(
             sector_rankings=sector_rankings,
@@ -119,6 +120,13 @@ class MarketStructureService:
             market_theme_payload,
             related_boards,
         )
+        if primary_theme is not None and primary_theme_has_market_match:
+            market_theme_payload = self._enrich_matched_theme_evidence(
+                market_theme_payload,
+                primary_theme=primary_theme,
+                market=normalized_market,
+            )
+        market_theme_context = MarketThemeContext.model_validate(market_theme_payload)
         has_primary_market_evidence = self._has_primary_market_evidence(primary_theme)
         hotspot_constituents = self._safe_cast_market_list(
             market_theme_payload.get("hotspot_constituents"),
@@ -126,6 +134,7 @@ class MarketStructureService:
         leader_stocks = self._safe_cast_market_list(
             market_theme_payload.get("leader_stocks"),
         )
+
         has_stock_role_evidence = self._has_stock_role_evidence(
             stock_code,
             primary_theme,
@@ -276,6 +285,69 @@ class MarketStructureService:
             )
         )
 
+    def _enrich_matched_theme_evidence(
+        self,
+        market_theme_payload: Dict[str, Any],
+        *,
+        primary_theme: PrimaryTheme,
+        market: str,
+    ) -> Dict[str, Any]:
+        fetch_detail = getattr(self.hotspot_service, "get_hotspot_detail", None)
+        if not callable(fetch_detail):
+            return market_theme_payload
+        try:
+            detail = fetch_detail(primary_theme.name, market=market)
+        except Exception as exc:
+            logger.debug(
+                "matched market theme detail fetch failed theme=%s: %s",
+                primary_theme.name,
+                exc,
+            )
+            return market_theme_payload
+        if not isinstance(detail, dict):
+            return market_theme_payload
+
+        enriched = dict(market_theme_payload)
+        for field in ("hotspot_constituents", "leader_stocks"):
+            detail_items = detail.get(field)
+            annotated_detail_items: List[Dict[str, Any]] = []
+            if isinstance(detail_items, list):
+                for item in detail_items:
+                    if not isinstance(item, dict):
+                        continue
+                    record = dict(item)
+                    if not self._extract_item_themes(record):
+                        record["theme"] = primary_theme.name
+                    annotated_detail_items.append(record)
+            enriched[field] = self._merge_thematic_evidence(
+                enriched.get(field),
+                annotated_detail_items,
+            )
+        return enriched
+
+    @classmethod
+    def _merge_thematic_evidence(cls, *values: Any) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for value in values:
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                code = cls._normalize_stock_code(cls._extract_stock_code(item))
+                name = str(item.get("name") or item.get("stock_name") or "").strip().casefold()
+                identity = code or name
+                themes = tuple(sorted(cls._extract_item_themes(item)))
+                if not identity:
+                    continue
+                dedupe_key = (identity, themes)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                merged.append(dict(item))
+        return merged
+
     def _build_related_boards(
         self,
         boards: Any,
@@ -381,7 +453,11 @@ class MarketStructureService:
         if not related_boards:
             return None, False
 
-        related_names = {board.name for board in related_boards}
+        related_names = {
+            self._normalize_theme_name(board.name): board
+            for board in related_boards
+            if self._normalize_theme_name(board.name)
+        }
         candidates: List[Dict[str, Any]] = []
         for field in (
             "active_themes",
@@ -395,12 +471,14 @@ class MarketStructureService:
 
         for item in candidates:
             name = self._optional_text(item.get("name"))
-            if not name or name not in related_names:
+            normalized_name = self._normalize_theme_name(name or "")
+            if not name or not normalized_name or normalized_name not in related_names:
                 continue
             source = self._theme_source(item.get("source"))
             if source in {"concept", "industry"}:
                 if not any(
-                    board.name == name and board.source == source
+                    self._normalize_theme_name(board.name) == normalized_name
+                    and board.source == source
                     for board in related_boards
                 ):
                     continue
@@ -423,6 +501,7 @@ class MarketStructureService:
             rank=first.rank,
             change_pct=first.change_pct,
         ), False
+
 
     @staticmethod
     def _select_ranked_related_board(
@@ -543,7 +622,7 @@ class MarketStructureService:
             return False
 
         for item in items:
-            candidate_code = cls._extract_stock_code(item)
+            candidate_code = cls._normalize_stock_code(cls._extract_stock_code(item))
             if not candidate_code or candidate_code != normalized_stock_code:
                 continue
             themes = cls._extract_item_themes(item)
@@ -564,12 +643,13 @@ class MarketStructureService:
                 return normalized.upper()
         return ""
 
-    @staticmethod
-    def _extract_item_themes(item: Dict[str, Any]) -> set[str]:
+    @classmethod
+    def _extract_item_themes(cls, item: Dict[str, Any]) -> set[str]:
         themes: set[str] = set()
         for key in (
             "theme",
             "theme_name",
+            "themes",
             "topic",
             "topic_name",
             "industry",
@@ -582,19 +662,38 @@ class MarketStructureService:
             "theme_name_en",
             "topic_name_cn",
             "topic_name_en",
+            "aliases",
         ):
-            value = str(item.get(key) or "").strip().lower()
-            if value:
-                themes.add(value)
+            raw_value = item.get(key)
+            values = raw_value if isinstance(raw_value, (list, tuple, set)) else [raw_value]
+            for value in values:
+                normalized = cls._normalize_theme_name(str(value or ""))
+                if normalized:
+                    themes.add(normalized)
         return themes
+
 
     @staticmethod
     def _normalize_theme_name(value: str) -> str:
-        return str(value or "").strip().lower()
+        text = str(value or "").strip().casefold()
+        text = re.sub(r"[\s_\-./]+", "", text)
+        for suffix in ("概念板块", "行业板块", "conceptboard", "themeboard", "概念", "题材", "板块", "concept", "theme"):
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[: -len(suffix)]
+                break
+        return re.sub(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+$", "", text)
+
 
     @staticmethod
     def _normalize_stock_code(value: str) -> str:
-        return str(value or "").strip().upper()
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return normalize_data_provider_stock_code(text).upper()
+        except Exception:
+            return text.upper()
+
 
     @staticmethod
     def _has_primary_market_evidence(primary_theme: Optional[PrimaryTheme]) -> bool:
@@ -628,12 +727,20 @@ class MarketStructureService:
     def _find_ranking_item(name: str, rankings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(rankings, dict):
             return None
+        normalized_name = MarketStructureService._normalize_theme_name(name)
+        if not normalized_name:
+            return None
         for field in ("top", "bottom"):
             items = rankings.get(field)
             if not isinstance(items, list):
                 continue
             for item in items:
-                if isinstance(item, dict) and str(item.get("name") or "").strip() == name:
+                if not isinstance(item, dict):
+                    continue
+                item_name = MarketStructureService._normalize_theme_name(
+                    str(item.get("name") or "")
+                )
+                if item_name == normalized_name:
                     return item
         return None
 

@@ -1368,9 +1368,9 @@ class TushareFetcher(BaseFetcher):
     def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """获取概念/题材涨跌榜（东财板块指数，dc_index 过滤概念板块）。
 
-        与 akshare ``stock_board_concept_name_em`` 同口径（东财概念板块），
-        单次请求拉全量板块指数（~5000 行），按 pct_change 取涨跌幅榜。
-        短 TTL 缓存避免高频重复拉取触发 xiaodefa 限速。
+        ``dc_index`` 返回多个日期的全量板块快照，周末还可能复写最近
+        交易日数据。排行必须先固定到最新快照，再按板块代码去重；否则
+        同一题材会占据多个 Top-N 席位。
         """
         if self._api is None:
             return None
@@ -1399,22 +1399,50 @@ class TushareFetcher(BaseFetcher):
         concept = df[df["idx_type"] == "概念板块"].copy()
         if concept.empty or "name" not in concept.columns:
             return None
+
+        if "trade_date" in concept.columns:
+            trade_dates = pd.to_numeric(concept["trade_date"], errors="coerce")
+            if trade_dates.notna().any():
+                concept = concept.loc[trade_dates.eq(trade_dates.max())].copy()
+
         concept["pct_change"] = pd.to_numeric(concept["pct_change"], errors="coerce")
         concept = concept.dropna(subset=["pct_change"])
         if concept.empty:
             return None
 
+        dedupe_columns = ["ts_code"] if "ts_code" in concept.columns else ["name"]
+        concept = concept.drop_duplicates(subset=dedupe_columns, keep="first")
+        if concept.empty:
+            return None
+
+        def build_item(row: pd.Series) -> Dict[str, Any]:
+            item: Dict[str, Any] = {
+                "name": str(row["name"]),
+                "change_pct": float(row["pct_change"]),
+            }
+            text_fields = {
+                "ts_code": "code",
+                "trade_date": "trade_date",
+                "leading": "leading",
+                "leading_code": "leading_code",
+            }
+            for source_field, target_field in text_fields.items():
+                value = row.get(source_field)
+                if value is None or pd.isna(value):
+                    continue
+                text = str(value).strip()
+                if text:
+                    item[target_field] = text
+            leading_pct = pd.to_numeric(row.get("leading_pct"), errors="coerce")
+            if pd.notna(leading_pct):
+                item["leading_pct"] = float(leading_pct)
+            return item
+
         top = concept.nlargest(normalized_n, "pct_change")
         bottom = concept.nsmallest(normalized_n, "pct_change")
         payload = (
-            [
-                {"name": str(row["name"]), "change_pct": float(row["pct_change"])}
-                for _, row in top.iterrows()
-            ],
-            [
-                {"name": str(row["name"]), "change_pct": float(row["pct_change"])}
-                for _, row in bottom.iterrows()
-            ],
+            [build_item(row) for _, row in top.iterrows()],
+            [build_item(row) for _, row in bottom.iterrows()],
         )
         with self._concept_lock():
             self._concept_rankings_cache[normalized_n] = (

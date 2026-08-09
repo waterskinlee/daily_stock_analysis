@@ -118,7 +118,16 @@ def _normalize_sector_ranking_items(value: Any) -> List[Dict[str, Any]]:
         if not name_text:
             continue
         ranking_item: Dict[str, Any] = {"name": name_text}
-        for optional_field in ("code", "source", "updated_at"):
+        for optional_field in (
+            "code",
+            "source",
+            "updated_at",
+            "trade_date",
+            "leading",
+            "leading_code",
+            "leader",
+            "leader_code",
+        ):
             if item.get(optional_field) is not None:
                 optional_text = str(item.get(optional_field)).strip()
                 if optional_text:
@@ -126,6 +135,9 @@ def _normalize_sector_ranking_items(value: Any) -> List[Dict[str, Any]]:
         change_pct = _safe_float(item.get("change_pct"))
         if change_pct is not None:
             ranking_item["change_pct"] = change_pct
+        leading_pct = _safe_float(item.get("leading_pct"))
+        if leading_pct is not None:
+            ranking_item["leading_pct"] = leading_pct
         rank = _safe_int(item.get("rank"))
         if rank is not None:
             ranking_item["rank"] = rank
