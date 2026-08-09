@@ -373,6 +373,10 @@ daily_stock_analysis/
 | `SEARXNG_BASE_URLS` | SearXNG 自建实例（无配额兜底，需在 settings.yml 启用 format: json）；留空时默认自动发现公共实例 | 可选 |
 | `SEARXNG_PUBLIC_INSTANCES_ENABLED` | 是否在 `SEARXNG_BASE_URLS` 为空时自动从 `searx.space` 获取公共实例（默认 `true`） | 可选 |
 | `CLS_WIRE_ENABLED` | 是否启用「7x24 快讯直连」兜底新闻源（免费无 key）：优先财联社电报，接口不可用时回退东财 7x24 快讯；全部搜索引擎失败时仍可提供最新电报（默认 `false`） | 可选 |
+| `SINA_NEWS_ENABLED` | 是否启用新浪新闻搜索（免费无 key，默认 `false`） | 可选 |
+| `EM_DATA_NEWS_ENABLED` | 是否启用东财数据中心资讯搜索（免费无 key，默认 `false`） | 可选 |
+| `THS_NEWS_ENABLED` | 是否启用同花顺个股新闻列表（免费无 key，默认 `false`） | 可选 |
+| `CNINFO_IRM_ENABLED` | 是否启用巨潮互动易已回复公司问答；未回复提问不会进入分析，结果遵循新闻时效窗口（免费无 key，默认 `false`） | 可选 |
 | `NEWS_STRATEGY_PROFILE` | 新闻策略窗口档位：`ultra_short`(1天)/`short`(3天)/`medium`(7天)/`long`(30天)；实际窗口取与 `NEWS_MAX_AGE_DAYS` 的最小值 | 默认 `short` |
 | `NEWS_MAX_AGE_DAYS` | 新闻最大时效（天），搜索时限制结果在近期内 | 默认 `3` |
 | `BIAS_THRESHOLD` | 乖离率阈值（%），超过提示不追高；强势趋势股自动放宽到 1.5 倍 | 默认 `5.0` |

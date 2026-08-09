@@ -437,6 +437,10 @@ git push -u origin main
 | `SEARXNG_BASE_URLS` | SearXNG 自建实例（无配额兜底，需在 settings.yml 启用 format: json）；留空时默认自动发现公共实例 | 可选 |
 | `SEARXNG_PUBLIC_INSTANCES_ENABLED` | 是否在 `SEARXNG_BASE_URLS` 为空时自动从 `searx.space` 获取公共实例（默认 `true`） | 可选 |
 | `CLS_WIRE_ENABLED` | 启用「7x24 快讯直连」兜底新闻源（免费无 key，默认 `false`） | 可选 |
+| `SINA_NEWS_ENABLED` | 启用新浪新闻搜索（免费无 key，默认 `false`） | 可选 |
+| `EM_DATA_NEWS_ENABLED` | 启用东财数据中心资讯搜索（免费无 key，默认 `false`） | 可选 |
+| `THS_NEWS_ENABLED` | 启用同花顺个股新闻列表（免费无 key，默认 `false`） | 可选 |
+| `CNINFO_IRM_ENABLED` | 启用巨潮互动易已回复公司问答；未回复提问不进入分析（免费无 key，默认 `false`） | 可选 |
 | `TUSHARE_TOKEN` | Tushare Token | 可选 |
 | `GEMINI_MODEL` | 模型名称（默认 gemini-2.0-flash） | 可选 |
 

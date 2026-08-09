@@ -336,6 +336,10 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 | `SEARXNG_BASE_URLS` | SearXNG self-hosted instances (quota-free fallback, enable format: json in settings.yml); when empty the app auto-discovers public instances | Optional |
 | `SEARXNG_PUBLIC_INSTANCES_ENABLED` | Auto-discover public SearXNG instances from `searx.space` when `SEARXNG_BASE_URLS` is empty (default `true`) | Optional |
 | `CLS_WIRE_ENABLED` | Enable the keyless 7x24 wire fallback news source (CLS telegraph preferred, Eastmoney 7x24 fallback when the CLS endpoint is unavailable); surfaces fresh telegraph headlines when every search engine fails (default `false`) | Optional |
+| `SINA_NEWS_ENABLED` | Enable the keyless Sina news search provider (default `false`) | Optional |
+| `EM_DATA_NEWS_ENABLED` | Enable the keyless Eastmoney Data news provider (default `false`) | Optional |
+| `THS_NEWS_ENABLED` | Enable the keyless THS stock-news feed (default `false`) | Optional |
+| `CNINFO_IRM_ENABLED` | Enable answered CNInfo investor Q&A for A-share companies; unanswered questions are excluded and replies obey the news freshness window (default `false`) | Optional |
 
 > Behavior note: Search and social sentiment are optional enhancement services. If either service fails to initialize, the system logs a warning and degrades gracefully by skipping that stage without blocking the core analysis flow.
 
