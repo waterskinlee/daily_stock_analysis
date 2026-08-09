@@ -1400,6 +1400,61 @@ class StockAnalysisPipeline:
                 )
                 logger.info(f"[{code}] Agent mode: local intelligence evidence injected into news_context")
 
+            # Prefetch the same direct-company news channel used by Agent tools.
+            # The Agent's later search_stock_news call becomes a cache hit, while
+            # the context pack and safety guardrails can see news from the start.
+            base_agent_news_context = initial_context.get("news_context")
+            agent_news_response = None
+            agent_news_target_name = ""
+
+            def _apply_agent_news_response(response: Any, *, target_name: str) -> bool:
+                nonlocal agent_news_response, agent_news_target_name
+                results = getattr(response, "results", None) or []
+                if not getattr(response, "success", False) or not results:
+                    return False
+
+                # Preserve the structured response for history persistence even
+                # when a custom/test response cannot render prompt context.
+                agent_news_response = response
+                agent_news_target_name = target_name
+                formatter = getattr(response, "to_context", None)
+                if not callable(formatter):
+                    return False
+                news_text = formatter(max_results=5)
+                if not isinstance(news_text, str) or not news_text.strip():
+                    return False
+
+                context_parts = [
+                    value.strip()
+                    for value in (base_agent_news_context, news_text)
+                    if isinstance(value, str) and value.strip()
+                ]
+                initial_context["news_context"] = "\n\n".join(context_parts)
+                initial_context["news_result_count"] = len(results)
+                return True
+
+            if (
+                self.search_service is not None
+                and self.search_service.is_available
+                and not self._is_placeholder_stock_name(stock_name, code)
+            ):
+                try:
+                    prefetched_news = self.search_service.search_stock_news(
+                        stock_code=code,
+                        stock_name=stock_name,
+                        max_results=5,
+                    )
+                    if _apply_agent_news_response(prefetched_news, target_name=stock_name):
+                        logger.info(
+                            "[%s] Agent 模式: 已预取 %s 条新闻并写入分析上下文",
+                            code,
+                            len(prefetched_news.results),
+                        )
+                except Exception as exc:
+                    logger.warning("[%s] Agent 模式预取新闻失败，继续由 Agent 检索: %s", code, exc)
+
+
+
             # Issue #1066: ensure deep history is in DB before agent tools run
             self._ensure_agent_history(code)
 
@@ -1477,6 +1532,51 @@ class StockAnalysisPipeline:
             )
             if result:
                 result.query_id = query_id
+            resolved_stock_name = result.name if result and result.name else stock_name
+
+            # Placeholder names can only be resolved after the Agent returns.
+            # Fetch once with the resolved identity, then rebuild the public
+            # overview before guardrails and persistence consume it.
+            news_context_updated = False
+            if (
+                self.search_service is not None
+                and self.search_service.is_available
+                and (
+                    agent_news_response is None
+                    or agent_news_target_name != resolved_stock_name
+                )
+            ):
+                try:
+                    resolved_news = self.search_service.search_stock_news(
+                        stock_code=code,
+                        stock_name=resolved_stock_name,
+                        max_results=5,
+                    )
+                    news_context_updated = _apply_agent_news_response(
+                        resolved_news,
+                        target_name=resolved_stock_name,
+                    )
+                except Exception as exc:
+                    logger.warning("[%s] Agent 模式回写新闻上下文失败: %s", code, exc)
+
+            if news_context_updated:
+                _, analysis_context_pack_overview = self._build_analysis_context_pack_outputs(
+                    self._build_agent_analysis_artifacts(
+                        code=code,
+                        stock_name=resolved_stock_name,
+                        market=market,
+                        phase=market_phase_context,
+                        initial_context=initial_context,
+                        fundamental_context=fundamental_context,
+                        query_id=query_id,
+                        base_context=analysis_context,
+                        portfolio_context=portfolio_context,
+                    ),
+                    report_language=report_language,
+                    code=code,
+                    query_id=query_id,
+                )
+
             # Agent weak integrity: placeholder fill only, no LLM retry
             if result and getattr(self.config, "report_integrity_enabled", False):
                 from src.analyzer import check_content_integrity, apply_placeholder_fill
@@ -1633,30 +1733,31 @@ class StockAnalysisPipeline:
                         )
                     )
 
-            resolved_stock_name = result.name if result and result.name else stock_name
-
-            # 保存新闻情报到数据库（Agent 工具结果仅用于 LLM 上下文，未持久化，Fixes #396）
-            # 使用 search_stock_news（与 Agent 工具调用逻辑一致），仅 1 次 API 调用，无额外延迟
-            if self.search_service is not None and self.search_service.is_available:
+            # Persist the same response that populated Agent context. Normal
+            # runs reuse the prefetch; placeholder-name runs use the resolved
+            # post-Agent response. No additional upstream request is needed.
+            if (
+                agent_news_response is not None
+                and agent_news_target_name == resolved_stock_name
+            ):
                 try:
-                    news_response = self.search_service.search_stock_news(
-                        stock_code=code,
-                        stock_name=resolved_stock_name,
-                        max_results=5
+                    query_context = self._build_query_context(query_id=query_id)
+                    self.db.save_news_intel(
+                        code=code,
+                        name=resolved_stock_name,
+                        dimension="latest_news",
+                        query=agent_news_response.query,
+                        response=agent_news_response,
+                        query_context=query_context,
                     )
-                    if news_response.success and news_response.results:
-                        query_context = self._build_query_context(query_id=query_id)
-                        self.db.save_news_intel(
-                            code=code,
-                            name=resolved_stock_name,
-                            dimension="latest_news",
-                            query=news_response.query,
-                            response=news_response,
-                            query_context=query_context
-                        )
-                        logger.info(f"[{code}] Agent 模式: 新闻情报已保存 {len(news_response.results)} 条")
+                    logger.info(
+                        "[%s] Agent 模式: 新闻情报已保存 %s 条",
+                        code,
+                        len(agent_news_response.results),
+                    )
                 except Exception as e:
                     logger.warning(f"[{code}] Agent 模式保存新闻情报失败: {e}")
+
 
             # 保存分析历史记录
             if result and result.success:
@@ -1667,6 +1768,7 @@ class StockAnalysisPipeline:
                             "stock_name": resolved_stock_name,
                         },
                         news_content=initial_context.get("news_context"),
+                        news_result_count=initial_context.get("news_result_count"),
                         realtime_quote=realtime_quote,
                         chip_data=chip_data,
                         analysis_context_pack_overview=analysis_context_pack_overview,
@@ -1678,7 +1780,7 @@ class StockAnalysisPipeline:
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
-                        news_content=None,
+                        news_content=initial_context.get("news_context"),
                         context_snapshot=agent_context_snapshot,
                         save_snapshot=self.save_context_snapshot,
                     )
@@ -2881,7 +2983,7 @@ class StockAnalysisPipeline:
             chip_data=initial_context.get("chip_distribution"),
             fundamental_context=fundamental_context,
             news_context=initial_context.get("news_context"),
-            news_result_count=None,
+            news_result_count=initial_context.get("news_result_count"),
             metadata={
                 "query_id": query_id,
                 "trigger_source": self.query_source,
