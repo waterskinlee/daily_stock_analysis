@@ -2609,6 +2609,227 @@ class ThsStockNewsProvider(BaseSearchProvider):
         return response
 
 
+
+class CninfoIrmSearchProvider(BaseSearchProvider):
+    """巨潮互动易公司回复（free, no API key, 国内直连）。
+
+    巨潮接口需要先按股票代码查询 ``orgId``，再以 POST + query string
+    获取问答。这里只准入已经由公司回复且仍在请求时间窗内的记录；未回复
+    的投资者提问不作为事实依据进入分析上下文。
+    """
+
+    LOOKUP_URL = "https://irm.cninfo.com.cn/newircs/index/queryKeyboardInfo"
+    QUESTION_URL = "https://irm.cninfo.com.cn/newircs/company/question"
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://irm.cninfo.com.cn/",
+    }
+    TIMEOUT_SECONDS = 10
+
+    def __init__(self, enabled: bool = True):
+        super().__init__([], "CninfoIRM")
+        self._enabled = bool(enabled)
+
+    @property
+    def is_available(self) -> bool:
+        """No API key required — availability is governed by the enable flag."""
+        return self._enabled
+
+    @staticmethod
+    def _extract_stock_code(query: str) -> Optional[str]:
+        match = re.search(r"\b(\d{6})\b", str(query or ""))
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _clean_text(raw: Any) -> str:
+        text = re.sub(r"<[^>]+>", "", str(raw or ""))
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _timestamp_seconds(raw: Any) -> Optional[float]:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value / 1000.0 if value >= 10_000_000_000 else value
+
+    def _do_search(
+        self,
+        query: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        stock_code = self._extract_stock_code(query)
+        if stock_code is None:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="CninfoIRM 需要 6 位 A 股代码",
+            )
+
+        try:
+            lookup_response = requests.post(
+                self.LOOKUP_URL,
+                data={"keyWord": stock_code},
+                headers=self.HEADERS,
+                timeout=self.TIMEOUT_SECONDS,
+            )
+            if lookup_response.status_code != 200:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=f"CninfoIRM lookup HTTP {lookup_response.status_code}",
+                )
+            lookup_rows = (lookup_response.json() or {}).get("data") or []
+            if not isinstance(lookup_rows, list):
+                lookup_rows = []
+            matched = next(
+                (
+                    row
+                    for row in lookup_rows
+                    if isinstance(row, dict)
+                    and str(row.get("stockCode") or "").strip() == stock_code
+                ),
+                None,
+            )
+            if matched is None and lookup_rows and isinstance(lookup_rows[0], dict):
+                matched = lookup_rows[0]
+            org_id = str((matched or {}).get("secid") or "").strip()
+            if not org_id:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message="CninfoIRM 未找到公司 orgId",
+                )
+
+            page_size = min(100, max(30, int(max_results) * 4))
+            raw_rows: List[Dict[str, Any]] = []
+            for page_num in range(1, 4):
+                question_response = requests.post(
+                    self.QUESTION_URL,
+                    params={
+                        "_t": 1,
+                        "stockcode": stock_code,
+                        "orgId": org_id,
+                        "pageSize": page_size,
+                        "pageNum": page_num,
+                        "keyWord": "",
+                        "startDay": "",
+                        "endDay": "",
+                    },
+                    headers=self.HEADERS,
+                    timeout=self.TIMEOUT_SECONDS,
+                )
+                if question_response.status_code != 200:
+                    return SearchResponse(
+                        query=query,
+                        results=[],
+                        provider=self.name,
+                        success=False,
+                        error_message=f"CninfoIRM question HTTP {question_response.status_code}",
+                    )
+                payload = question_response.json() or {}
+                page_rows = payload.get("rows") or (payload.get("data") or {}).get("rows") or []
+                if not isinstance(page_rows, list):
+                    page_rows = []
+                raw_rows.extend(row for row in page_rows if isinstance(row, dict))
+                answered_count = sum(
+                    1 for row in raw_rows if self._clean_text(row.get("attachedContent"))
+                )
+                if len(page_rows) < page_size or answered_count >= int(max_results):
+                    break
+        except Exception as exc:  # noqa: BLE001 - external source, fail-open
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"CninfoIRM 请求失败: {type(exc).__name__}",
+            )
+
+        cutoff = time.time() - max(1, int(days)) * 86400
+        candidates: List[Tuple[float, SearchResult]] = []
+        for row in raw_rows:
+            if str(row.get("stockCode") or stock_code).strip() != stock_code:
+                continue
+            question = self._clean_text(row.get("mainContent"))
+            answer = self._clean_text(row.get("attachedContent"))
+            if not question or not answer:
+                continue
+            reply_ts = self._timestamp_seconds(
+                row.get("attachedPubDate") or row.get("updateDate") or row.get("pubDate")
+            )
+            if reply_ts is None or reply_ts < cutoff:
+                continue
+            company = self._clean_text(row.get("companyShortName")) or stock_code
+            answerer = self._clean_text(row.get("attachedAuthor")) or company
+            candidates.append(
+                (
+                    reply_ts,
+                    SearchResult(
+                        title=f"{company}公司回应：{question[:72]}",
+                        snippet=f"投资者提问：{question[:300]}\n公司回复（{answerer}）：{answer[:600]}",
+                        url=(
+                            "https://irm.cninfo.com.cn/ircs/company/companyDetail"
+                            f"?stockcode={stock_code}&orgId={org_id}"
+                        ),
+                        source="巨潮互动易",
+                        published_date=datetime.fromtimestamp(reply_ts).strftime("%Y-%m-%d %H:%M"),
+                        relevance_score=100,
+                        relevance_category="direct_company_news",
+                        relevance_reasons=["官方公司回复", f"股票代码直接命中:{stock_code}"],
+                    ),
+                )
+            )
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        results = [item[1] for item in candidates[: max(1, int(max_results))]]
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=bool(results),
+            error_message=None if results else "CninfoIRM 无近期已回复记录",
+        )
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """Search answered company interactions; fail-open when unavailable."""
+        start_time = time.time()
+        if not self._enabled:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="巨潮互动易未启用",
+                search_time=time.time() - start_time,
+            )
+        response = self._do_search(query, max_results=max_results, days=days)
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 搜索 '%s' 成功，返回 %s 条公司回复，耗时 %.2fs",
+                self.name,
+                query,
+                len(response.results),
+                response.search_time,
+            )
+        else:
+            logger.debug("[%s] 搜索 '%s' 失败: %s", self.name, query, response.error_message)
+        return response
+
 class EastmoneyDataApiSearchProvider(BaseSearchProvider):
     """
     东财数据中心资讯搜索（free, no API key, 国内直连）。
@@ -3218,6 +3439,7 @@ class SearchService:
         sina_news_enabled: bool = False,
         em_data_news_enabled: bool = False,
         ths_news_enabled: bool = False,
+        cninfo_irm_enabled: bool = False,
         sina_news_prefer_for_cn: bool = True,
     ):
         """
@@ -3235,6 +3457,7 @@ class SearchService:
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
             cls_wire_enabled: 财联社 7x24 快讯直连（免费无 key，最后兜底）
+            cninfo_irm_enabled: 巨潮互动易公司回复（免费无 key，独立补充常规新闻）
         """
         self._constructor_kwargs: Dict[str, Any] = {
             "bocha_keys": list(bocha_keys or []),
@@ -3251,9 +3474,13 @@ class SearchService:
             "sina_news_enabled": bool(sina_news_enabled),
             "em_data_news_enabled": bool(em_data_news_enabled),
             "ths_news_enabled": bool(ths_news_enabled),
+            "cninfo_irm_enabled": bool(cninfo_irm_enabled),
             "sina_news_prefer_for_cn": bool(sina_news_prefer_for_cn),
         }
         self._providers: List[BaseSearchProvider] = []
+        self._interaction_provider = CninfoIrmSearchProvider(enabled=cninfo_irm_enabled)
+        if self._interaction_provider.is_available:
+            logger.info("已启用巨潮互动易公司回复（免费无 key，独立补充新闻）")
         self._sina_news_prefer_for_cn = bool(sina_news_prefer_for_cn)
         self.news_max_age_days = max(1, news_max_age_days)
         raw_profile = (news_strategy_profile or "short").strip().lower()
@@ -3525,8 +3752,10 @@ class SearchService:
 
     @property
     def is_available(self) -> bool:
-        """检查是否有可用的搜索引擎"""
-        return any(p.is_available for p in self._providers)
+        """检查是否有可用的搜索引擎或公司互动源。"""
+        return self._interaction_provider.is_available or any(
+            provider.is_available for provider in self._providers
+        )
 
     def _cache_key(self, query: str, max_results: int, days: int) -> str:
         """Build a cache key from query parameters."""
@@ -4857,6 +5086,85 @@ class SearchService:
             if cache_owner and cache_event is not None:
                 self._release_cache_fill(cache_key, cache_event)
 
+    def _search_company_interactions(
+        self,
+        stock_code: str,
+        stock_name: str,
+        *,
+        max_results: int,
+        days: int,
+    ) -> SearchResponse:
+        """Fetch official answered IRM records for one A-share company."""
+        query = f"{stock_name} {stock_code} 互动易 公司回复"
+        code = str(stock_code or "").strip().split(".", 1)[0]
+        if (
+            not self._interaction_provider.is_available
+            or not re.fullmatch(r"\d{6}", code)
+            or self.is_index_or_etf(code, stock_name)
+        ):
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._interaction_provider.name,
+                success=False,
+                error_message="CninfoIRM 不适用于该证券或未启用",
+            )
+        try:
+            return self._interaction_provider.search(
+                query,
+                max_results=max(1, int(max_results)),
+                days=max(1, int(days)),
+            )
+        except Exception as exc:  # noqa: BLE001 - optional enrichment, fail-open
+            logger.warning("CninfoIRM search failed for %s: %s", code, exc)
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._interaction_provider.name,
+                success=False,
+                error_message=f"CninfoIRM 请求失败: {type(exc).__name__}",
+            )
+
+    @staticmethod
+    def _merge_stock_news_with_interactions(
+        news_response: SearchResponse,
+        interaction_response: SearchResponse,
+        *,
+        max_results: int,
+    ) -> SearchResponse:
+        """Reserve context capacity for official replies without replacing news."""
+        interactions = (
+            list(interaction_response.results)
+            if interaction_response.success and interaction_response.results
+            else []
+        )
+        if not interactions:
+            return news_response
+
+        limit = max(1, int(max_results))
+        news = list(news_response.results) if news_response.success and news_response.results else []
+        if not news:
+            return SearchResponse(
+                query=interaction_response.query,
+                results=interactions[:limit],
+                provider=interaction_response.provider,
+                success=True,
+                search_time=interaction_response.search_time,
+            )
+        if limit == 1:
+            return news_response
+
+        interaction_slots = min(len(interactions), max(1, limit // 3))
+        news_slots = limit - interaction_slots
+        combined = news[:news_slots] + interactions[:interaction_slots]
+        return SearchResponse(
+            query=news_response.query,
+            results=combined,
+            provider=f"{news_response.provider}+{interaction_response.provider}",
+            success=True,
+            search_time=news_response.search_time + interaction_response.search_time,
+        )
+
     def search_stock_news(
         self,
         stock_code: str,
@@ -4960,6 +5268,12 @@ class SearchService:
                 error_message=cached.error_message,
             )
             return cached
+        interaction_response = self._search_company_interactions(
+            stock_code,
+            stock_name,
+            max_results=max_results,
+            days=search_days,
+        )
 
         try:
             # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
@@ -5069,8 +5383,13 @@ class SearchService:
                             provider.name,
                             stats["direct_count"],
                         )
-                        self._put_cache(cache_key, limited_response)
-                        return limited_response
+                        merged_response = self._merge_stock_news_with_interactions(
+                            limited_response,
+                            interaction_response,
+                            max_results=max_results,
+                        )
+                        self._put_cache(cache_key, merged_response)
+                        return merged_response
 
                     if prefer_chinese and stats["direct_count"] > 0:
                         logger.info(
@@ -5125,26 +5444,38 @@ class SearchService:
                         )
 
             if best_ranked_response is not None:
-                self._put_cache(cache_key, best_ranked_response)
-                return best_ranked_response
+                merged_response = self._merge_stock_news_with_interactions(
+                    best_ranked_response,
+                    interaction_response,
+                    max_results=max_results,
+                )
+                self._put_cache(cache_key, merged_response)
+                return merged_response
 
             if had_provider_success:
-                return SearchResponse(
+                empty_response = SearchResponse(
                     query=query,
                     results=[],
                     provider="Filtered",
                     success=True,
                     error_message=None,
                 )
-            
-            # 所有引擎都失败
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider="None",
-                success=False,
-                error_message="所有搜索引擎都不可用或搜索失败"
+            else:
+                empty_response = SearchResponse(
+                    query=query,
+                    results=[],
+                    provider="None",
+                    success=False,
+                    error_message="所有搜索引擎都不可用或搜索失败",
+                )
+            merged_response = self._merge_stock_news_with_interactions(
+                empty_response,
+                interaction_response,
+                max_results=max_results,
             )
+            if merged_response.success and merged_response.results:
+                self._put_cache(cache_key, merged_response)
+            return merged_response
         finally:
             if cache_owner and cache_event is not None:
                 self._release_cache_fill(cache_key, cache_event)
@@ -5426,6 +5757,14 @@ class SearchService:
         search_days = self._effective_news_window_days()
         target_per_dimension = 3
         provider_max_results = self._provider_request_size(target_per_dimension)
+        interaction_response = self._search_company_interactions(
+            stock_code,
+            stock_name,
+            max_results=4,
+            days=search_days,
+        )
+        if interaction_response.success and interaction_response.results:
+            results["company_interactions"] = interaction_response
 
         logger.info(
             (
@@ -5550,10 +5889,19 @@ class SearchService:
         lines = [f"【{stock_name} 情报搜索结果】"]
         
         # 维度展示顺序
-        display_order = ['latest_news', 'announcements', 'market_analysis', 'risk_check', 'earnings', 'industry']
+        display_order = [
+            'latest_news',
+            'company_interactions',
+            'announcements',
+            'market_analysis',
+            'risk_check',
+            'earnings',
+            'industry',
+        ]
 
         dim_labels = {
             'latest_news': '📰 最新消息',
+            'company_interactions': '公司互动回复',
             'announcements': '📋 公司公告',
             'market_analysis': '📈 机构分析',
             'risk_check': '⚠️ 风险排查',
@@ -5828,6 +6176,7 @@ def get_search_service() -> SearchService:
                     sina_news_enabled=getattr(config, "sina_news_enabled", False),
                     em_data_news_enabled=getattr(config, "em_data_news_enabled", False),
                     ths_news_enabled=getattr(config, "ths_news_enabled", False),
+                    cninfo_irm_enabled=getattr(config, "cninfo_irm_enabled", False),
                     sina_news_prefer_for_cn=getattr(config, "sina_news_prefer_for_cn", True),
                 )
     

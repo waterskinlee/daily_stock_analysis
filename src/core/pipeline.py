@@ -289,6 +289,11 @@ class StockAnalysisPipeline:
                 news_max_age_days=self.config.news_max_age_days,
                 news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
                 cls_wire_enabled=getattr(self.config, "cls_wire_enabled", False),
+                sina_news_enabled=getattr(self.config, "sina_news_enabled", False),
+                em_data_news_enabled=getattr(self.config, "em_data_news_enabled", False),
+                ths_news_enabled=getattr(self.config, "ths_news_enabled", False),
+                cninfo_irm_enabled=getattr(self.config, "cninfo_irm_enabled", False),
+                sina_news_prefer_for_cn=getattr(self.config, "sina_news_prefer_for_cn", True),
             )
         except Exception as exc:
             logger.warning("搜索服务初始化失败，将以无搜索模式运行: %s", exc, exc_info=True)

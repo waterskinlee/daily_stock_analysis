@@ -14,6 +14,7 @@ import logging
 import random
 import re
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -285,6 +286,12 @@ class AkshareFundamentalAdapter:
         "Referer": "https://basic.10jqka.com.cn/",
     }
     _HTTP_TIMEOUT_SEC = 15
+    _THS_HOT_URL = "https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/stock"
+    _EM_HOT_URL = "https://emappdata.eastmoney.com/stockrank/getAllCurrentList"
+    _EM_HOT_BODY = {"appId": "appId01", "globalId": "786e4c21-70dc-435a-93bb-38"}
+    _POPULARITY_CACHE_TTL_SECONDS = 60
+    _popularity_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    _popularity_cache_lock = threading.RLock()
 
     def _em_datacenter_get(
         self,
@@ -573,6 +580,213 @@ class AkshareFundamentalAdapter:
                 }
             )
         return result
+
+    @classmethod
+    def clear_popularity_cache_for_tests(cls) -> None:
+        """Clear the short-lived market-list cache used by deterministic tests."""
+        with cls._popularity_cache_lock:
+            cls._popularity_cache.clear()
+
+    def _get_popularity_snapshot(self, period: str, top_n: int) -> Dict[str, Any]:
+        """Fetch and cache THS/Eastmoney market-wide popularity lists."""
+        cache_key = (period, top_n)
+        now = time.time()
+        with self._popularity_cache_lock:
+            cached = self._popularity_cache.get(cache_key)
+            if cached and now - float(cached.get("cached_at") or 0) <= self._POPULARITY_CACHE_TTL_SECONDS:
+                return cached
+
+        ths_rows: List[Dict[str, Any]] = []
+        em_rows: List[Dict[str, Any]] = []
+        source_chain: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        ths_status = "failed"
+        em_status = "failed"
+
+        started_at = time.time()
+        try:
+            response = requests.get(
+                self._THS_HOT_URL,
+                params={"stock_type": "a", "type": period, "list_type": "normal"},
+                headers=self._THS_HEADERS,
+                timeout=self._HTTP_TIMEOUT_SEC,
+            )
+            response.raise_for_status()
+            raw_rows = ((response.json() or {}).get("data") or {}).get("stock_list") or []
+            if not isinstance(raw_rows, list):
+                raw_rows = []
+            for item in raw_rows:
+                if not isinstance(item, dict):
+                    continue
+                code = _normalize_code(item.get("code"))
+                rank_value = _safe_float(item.get("order"))
+                if not code or rank_value is None:
+                    continue
+                tag = item.get("tag") if isinstance(item.get("tag"), dict) else {}
+                ths_rows.append(
+                    {
+                        "rank": int(rank_value),
+                        "code": code,
+                        "name": _safe_str(item.get("name")),
+                        "heat": _safe_float(item.get("rate")),
+                        "pct": _safe_float(item.get("rise_and_fall")),
+                        "rank_change": _safe_float(item.get("hot_rank_chg")),
+                        "concepts": list(tag.get("concept_tag") or []),
+                        "tag": _safe_str(tag.get("popularity_tag")),
+                    }
+                )
+            ths_rows.sort(key=lambda item: item["rank"])
+            ths_status = "ok" if ths_rows else "empty"
+            source_chain.append(
+                {
+                    "provider": "ths_hot_list",
+                    "result": ths_status,
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - external feed, fail-open
+            errors.append(f"ths_hot:{type(exc).__name__}")
+            source_chain.append(
+                {
+                    "provider": "ths_hot_list",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+
+        started_at = time.time()
+        try:
+            response = requests.post(
+                self._EM_HOT_URL,
+                json={
+                    **self._EM_HOT_BODY,
+                    "marketType": "",
+                    "pageNo": 1,
+                    "pageSize": top_n,
+                },
+                headers=self._EM_HEADERS,
+                timeout=self._HTTP_TIMEOUT_SEC,
+            )
+            response.raise_for_status()
+            raw_rows = (response.json() or {}).get("data") or []
+            if not isinstance(raw_rows, list):
+                raw_rows = []
+            for item in raw_rows:
+                if not isinstance(item, dict):
+                    continue
+                security_code = _safe_str(item.get("sc")).upper()
+                code = _normalize_code(security_code)
+                rank_value = _safe_float(item.get("rk"))
+                if not code or rank_value is None:
+                    continue
+                em_rows.append(
+                    {
+                        "rank": int(rank_value),
+                        "code": code,
+                        "name": "",
+                        "price": None,
+                        "pct": None,
+                        "rank_change": _safe_float(item.get("hisRc")),
+                    }
+                )
+            em_rows.sort(key=lambda item: item["rank"])
+            em_status = "ok" if em_rows else "empty"
+            source_chain.append(
+                {
+                    "provider": "eastmoney_hot_rank",
+                    "result": em_status,
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - external feed, fail-open
+            errors.append(f"eastmoney_hot:{type(exc).__name__}")
+            source_chain.append(
+                {
+                    "provider": "eastmoney_hot_rank",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+
+        snapshot = {
+            "cached_at": now,
+            "ths_rows": ths_rows,
+            "em_rows": em_rows,
+            "ths_status": ths_status,
+            "em_status": em_status,
+            "source_chain": source_chain,
+            "errors": errors,
+        }
+        if ths_status != "failed" or em_status != "failed":
+            with self._popularity_cache_lock:
+                self._popularity_cache[cache_key] = snapshot
+        return snapshot
+
+    def get_stock_popularity(
+        self,
+        stock_code: str,
+        period: str = "hour",
+        top_n: int = 100,
+    ) -> Dict[str, Any]:
+        """Return stock popularity rank and short-term crowding evidence.
+
+        Eastmoney rank is the primary rank when available. THS independently
+        enriches heat, concept tags, and its own hot-list position. A high rank
+        measures attention only; callers must not interpret it as a buy signal.
+        """
+        code = _normalize_code(stock_code)
+        normalized_period = str(period or "hour").strip().lower()
+        if normalized_period not in {"hour", "day"}:
+            normalized_period = "hour"
+        normalized_top_n = max(1, min(100, int(top_n)))
+        snapshot = self._get_popularity_snapshot(normalized_period, normalized_top_n)
+        ths_rows = snapshot.get("ths_rows") or []
+        em_rows = snapshot.get("em_rows") or []
+        ths_target = next((item for item in ths_rows if item.get("code") == code), None)
+        em_target = next((item for item in em_rows if item.get("code") == code), None)
+
+        primary = em_target or ths_target
+        primary_source = (
+            "eastmoney_hot_rank" if em_target else "ths_hot_list" if ths_target else None
+        )
+        rank = primary.get("rank") if primary else None
+        rank_change = primary.get("rank_change") if primary else None
+        top_source = ths_rows if ths_rows else em_rows
+        top_stocks = [
+            {
+                key: item.get(key)
+                for key in ("rank", "code", "name", "heat", "pct", "concepts", "tag")
+                if key in item
+            }
+            for item in top_source[:5]
+        ]
+
+        both_failed = snapshot.get("ths_status") == "failed" and snapshot.get("em_status") == "failed"
+        return {
+            "status": "ok" if primary else "failed" if both_failed else "empty",
+            "period": normalized_period,
+            "as_of": datetime.now().isoformat(timespec="seconds"),
+            "is_ranked": primary is not None,
+            "rank": rank,
+            "rank_change": rank_change,
+            "eastmoney_rank": em_target.get("rank") if em_target else None,
+            "ths_rank": ths_target.get("rank") if ths_target else None,
+            "heat": ths_target.get("heat") if ths_target else None,
+            "pct": ths_target.get("pct") if ths_target else None,
+            "concepts": list(ths_target.get("concepts") or []) if ths_target else [],
+            "tag": ths_target.get("tag") if ths_target else "",
+            "is_top_20": isinstance(rank, int) and rank <= 20,
+            "is_top_50": isinstance(rank, int) and rank <= 50,
+            "primary_source": primary_source,
+            "list_size": max(len(ths_rows), len(em_rows)),
+            "ths_status": snapshot.get("ths_status"),
+            "eastmoney_status": snapshot.get("em_status"),
+            "top_stocks": top_stocks,
+            "source_chain": list(snapshot.get("source_chain") or []),
+            "errors": list(snapshot.get("errors") or []),
+        }
 
     def get_lockup_schedule(
         self,

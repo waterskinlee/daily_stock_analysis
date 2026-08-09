@@ -693,6 +693,7 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
     sector_rankings = data.get("sector_rankings") or {}
     block_trades = data.get("block_trades") or {}
     margin_trading = data.get("margin_trading") or {}
+    popularity = data.get("popularity") or {}
     errors = ctx.get("errors") or []
 
     return {
@@ -730,6 +731,24 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
             "securities_net_sold_volume": margin_trading.get("securities_net_sold_volume"),
             "securities_net_sold_volume_5d": margin_trading.get("securities_net_sold_volume_5d"),
         },
+        "popularity": {
+            "status": popularity.get("status"),
+            "period": popularity.get("period"),
+            "as_of": popularity.get("as_of"),
+            "is_ranked": popularity.get("is_ranked"),
+            "rank": popularity.get("rank"),
+            "rank_change": popularity.get("rank_change"),
+            "eastmoney_rank": popularity.get("eastmoney_rank"),
+            "ths_rank": popularity.get("ths_rank"),
+            "heat": popularity.get("heat"),
+            "pct": popularity.get("pct"),
+            "concepts": (popularity.get("concepts") or [])[:5],
+            "tag": popularity.get("tag"),
+            "is_top_20": popularity.get("is_top_20"),
+            "is_top_50": popularity.get("is_top_50"),
+            "primary_source": popularity.get("primary_source"),
+            "top_stocks": (popularity.get("top_stocks") or [])[:5],
+        },
         "errors": errors,
     }
 
@@ -737,10 +756,11 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
 get_capital_flow_tool = ToolDefinition(
     name="get_capital_flow",
     description=(
-        "Get structured A-share capital-flow signals: main-force net inflow, "
-        "sector rankings, recent block trades (大宗交易), and stock-level margin "
-        "financing / securities lending detail (融资融券). Use discount trades and "
-        "multi-day financing net buys as risk filters; not for ETFs, indices, HK, or US stocks."
+        "Get structured A-share capital-flow and crowding signals: main-force net inflow, "
+        "sector rankings, recent block trades (大宗交易), stock-level margin financing / "
+        "securities lending detail (融资融券), and THS/Eastmoney popularity ranks. Treat "
+        "popularity as attention/crowding evidence only, never as a standalone buy signal; "
+        "not for ETFs, indices, HK, or US stocks."
     ),
     parameters=[
         ToolParameter(

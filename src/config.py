@@ -984,6 +984,7 @@ class Config:
     sina_news_enabled: bool = False  # 新浪新闻搜索 API（免费无 key，国内直连；默认关，与 CLS 快讯一致，生产显式开启）
     em_data_news_enabled: bool = False  # 东财数据中心资讯搜索（免费无 key，国内直连，中文新闻首选；默认关，生产显式开启）
     ths_news_enabled: bool = False  # 同花顺个股新闻列表（免费无 key，国内直连，个股维度新闻流；默认关，生产显式开启）
+    cninfo_irm_enabled: bool = False  # 巨潮互动易公司回复（免费无 key；默认关，生产显式开启）
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1733,6 +1734,10 @@ class Config:
             os.getenv('THS_NEWS_ENABLED'),
             default=False,
         )
+        cninfo_irm_enabled = parse_env_bool(
+            os.getenv('CNINFO_IRM_ENABLED'),
+            default=False,
+        )
         sina_news_prefer_for_cn = parse_env_bool(
             os.getenv('SINA_NEWS_PREFER_FOR_CN'),
             default=True,
@@ -1899,6 +1904,7 @@ class Config:
             sina_news_enabled=sina_news_enabled,
             em_data_news_enabled=em_data_news_enabled,
             ths_news_enabled=ths_news_enabled,
+            cninfo_irm_enabled=cninfo_irm_enabled,
             sina_news_prefer_for_cn=sina_news_prefer_for_cn,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,
             social_sentiment_api_url=os.getenv('SOCIAL_SENTIMENT_API_URL', 'https://api.adanos.org').rstrip('/'),
@@ -2992,6 +2998,10 @@ class Config:
         """Whether any search provider is configured or SearXNG fallback is enabled."""
         return bool(
             self.cls_wire_enabled
+            or self.sina_news_enabled
+            or self.em_data_news_enabled
+            or self.ths_news_enabled
+            or self.cninfo_irm_enabled
             or self.anspire_api_keys
             or self.bocha_api_keys
             or self.minimax_api_keys

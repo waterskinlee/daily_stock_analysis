@@ -3874,6 +3874,11 @@ class GeminiAnalyzer:
             if isinstance(capital_flow_data, dict)
             else {}
         )
+        popularity = (
+            capital_flow_data.get("popularity", {})
+            if isinstance(capital_flow_data, dict)
+            else {}
+        )
         has_capital_flow = (
             isinstance(stock_flow, dict)
             and any(v is not None for v in stock_flow.values())
@@ -3937,6 +3942,33 @@ class GeminiAnalyzer:
 | 融券净卖出量 | {margin_trading.get('securities_net_sold_volume', 'N/A')} | 正值偏空，负值为净偿还 |
 
 > 大宗交易本身不代表买卖方向。折价大宗交易与融资净偿还不得解释为利好；连续融资净买入也只能作为价格趋势的辅助证据，禁止脱离价格位置单独给出买入结论。
+"""
+        has_popularity = (
+            isinstance(popularity, dict)
+            and popularity.get("status") == "ok"
+            and bool(popularity.get("is_ranked"))
+            and popularity.get("rank") is not None
+        )
+        if has_popularity:
+            popularity_concepts = "、".join(
+                str(item).strip()
+                for item in (popularity.get("concepts") or [])[:5]
+                if str(item).strip()
+            ) or "N/A"
+            prompt += f"""
+### 人气热榜（短线拥挤度过滤器）
+| 指标 | 数值 | 决策含义 |
+|------|------|----------|
+| 数据时点 | {popularity.get('as_of', 'N/A')} | 热榜属于高频快照，过期后不得沿用 |
+| 东财人气排名 | {popularity.get('eastmoney_rank', 'N/A')} | 东财榜原始名次 |
+| 同花顺热榜排名 | {popularity.get('ths_rank', 'N/A')} | 同花顺榜原始名次 |
+| 主排名变化 | {popularity.get('rank_change', 'N/A')} | 保留来源原始变化值，不推断方向 |
+| 同花顺热度 | {popularity.get('heat', 'N/A')} | 只衡量关注度与短线拥挤度 |
+| 热榜概念 | {popularity_concepts} | 核验市场当前交易标签，不等于公司基本面 |
+| 人气标签 | {popularity.get('tag', 'N/A')} | 仅作短线情绪线索 |
+| 是否前20 | {popularity.get('is_top_20', False)} | 高位榜单提示交易拥挤与波动风险 |
+
+> 热榜高位只代表关注度，不代表买入信号。不得仅因热度或排名上升给出买入结论；必须结合价格位置、量价确认、公告与公司回复交叉验证，热门且高位放量滞涨时优先提示拥挤风险。
 """
 
         # 添加三大法人动向（台股筹码过滤器）— tw-only；仅当 institution 区块 status='ok'

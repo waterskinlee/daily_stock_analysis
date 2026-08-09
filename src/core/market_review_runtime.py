@@ -108,6 +108,11 @@ def build_market_review_runtime(
             news_max_age_days=getattr(config, "news_max_age_days", 3),
             news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
             cls_wire_enabled=getattr(config, "cls_wire_enabled", False),
+            sina_news_enabled=getattr(config, "sina_news_enabled", False),
+            em_data_news_enabled=getattr(config, "em_data_news_enabled", False),
+            ths_news_enabled=getattr(config, "ths_news_enabled", False),
+            cninfo_irm_enabled=getattr(config, "cninfo_irm_enabled", False),
+            sina_news_prefer_for_cn=getattr(config, "sina_news_prefer_for_cn", True),
         )
 
     analyzer = None

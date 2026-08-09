@@ -3612,6 +3612,7 @@ class DataFetcherManager:
             for field_name, provider_name, fetch in (
                 ("block_trades", "eastmoney_block_trades", self._fundamental_adapter.get_block_trades),
                 ("margin_trading", "eastmoney_margin_trading", self._fundamental_adapter.get_margin_trading),
+                ("popularity", "stock_popularity", self._fundamental_adapter.get_stock_popularity),
             ):
                 try:
                     activity = fetch(stock_code)
@@ -3657,6 +3658,7 @@ class DataFetcherManager:
         sector_rankings = payload.get("sector_rankings") or {}
         block_trades = payload.get("block_trades") or {}
         margin_trading = payload.get("margin_trading") or {}
+        popularity = payload.get("popularity") or {}
         has_stock_flow = isinstance(stock_flow, dict) and any(v is not None for v in stock_flow.values())
         has_sector_rankings = isinstance(sector_rankings, dict) and (
             bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
@@ -3667,13 +3669,18 @@ class DataFetcherManager:
         has_margin_trading = isinstance(margin_trading, dict) and (
             margin_trading.get("status") == "ok" and bool(margin_trading.get("trade_date"))
         )
+        has_popularity = isinstance(popularity, dict) and (
+            popularity.get("status") == "ok"
+            and bool(popularity.get("is_ranked"))
+            and popularity.get("rank") is not None
+        )
         adapter_status = str(payload.get("status", "not_supported"))
         activity_statuses = {
             str(item.get("status"))
-            for item in (block_trades, margin_trading)
+            for item in (block_trades, margin_trading, popularity)
             if isinstance(item, dict) and item.get("status")
         }
-        if has_stock_flow or has_sector_rankings or has_block_trades or has_margin_trading:
+        if has_stock_flow or has_sector_rankings or has_block_trades or has_margin_trading or has_popularity:
             capital_flow_status = "ok"
         elif adapter_status == "not_supported" and not (activity_statuses & {"failed", "partial"}):
             capital_flow_status = "not_supported"
@@ -3687,6 +3694,7 @@ class DataFetcherManager:
                 "sector_rankings": payload.get("sector_rankings", {}),
                 "block_trades": block_trades,
                 "margin_trading": margin_trading,
+                "popularity": popularity,
             },
             self._normalize_source_chain(
                 payload.get("source_chain", []),
