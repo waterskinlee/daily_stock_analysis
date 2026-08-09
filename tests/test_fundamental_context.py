@@ -614,7 +614,7 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(ctx["data"], {})
 
     def test_capital_flow_not_supported_status(self) -> None:
-        manager = DataFetcherManager(fetchers=[])
+        manager = DataFetcherManager(fetchers=[_DummyFetcher("DummyFetcher", priority=0)])
         cfg = SimpleNamespace(
             enable_fundamental_pipeline=True,
             fundamental_cache_ttl_seconds=120,
