@@ -532,7 +532,7 @@ class MarketStructureService:
         if not has_primary_market_evidence or not has_stock_role_evidence:
             return "edge" if related_boards else "unknown"
         for board in related_boards:
-            if board.name == primary_theme.name:
+            if cls._normalize_theme_name(board.name) == cls._normalize_theme_name(primary_theme.name):
                 if cls._is_stock_leader_for_theme(
                     stock_code,
                     primary_theme.name,
