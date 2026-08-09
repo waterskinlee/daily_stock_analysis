@@ -249,6 +249,42 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
                         },
                     },
                 }
+                ,
+                "shareholder_actions": {
+                    "status": "ok",
+                    "data": {
+                        "pledge": {
+                            "status": "ok",
+                            "as_of": "2026-03-27",
+                            "pledge_count": 16,
+                            "pledge_ratio": 34.07,
+                            "risk_level": "medium",
+                        },
+                        "repurchase": {
+                            "status": "ok",
+                            "has_active_plan": True,
+                            "latest": {
+                                "announcement_date": "2026-03-20",
+                                "status": "实施",
+                                "amount": 999915944.13,
+                            },
+                        },
+                        "holder_trades": {
+                            "status": "ok",
+                            "increase_count": 1,
+                            "decrease_count": 2,
+                            "net_change_volume": -2200000,
+                            "recent_trades": [
+                                {
+                                    "announcement_date": "2026-03-25",
+                                    "holder_name": "大股东甲",
+                                    "direction": "decrease",
+                                    "change_volume": 3000000,
+                                }
+                            ],
+                        },
+                    },
+                }
             },
         }
 
@@ -272,6 +308,14 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         self.assertIn("锂电池、隔膜", prompt)
         self.assertIn("热榜高位只代表关注度，不代表买入信号", prompt)
         self.assertIn("不得仅因热度或排名上升给出买入结论", prompt)
+        self.assertIn("股东行为（治理与供给风险过滤器）", prompt)
+        self.assertIn("质押比例", prompt)
+        self.assertIn("34.07", prompt)
+        self.assertIn("净增减持股数", prompt)
+        self.assertIn("-2200000", prompt)
+        self.assertIn("回购预案或实施不等于必然完成", prompt)
+        self.assertIn("增持不得单独解释为买入信号", prompt)
+        self.assertIn("减持与高质押应提高风险权重", prompt)
 
     def test_prompt_prefers_context_news_window_days(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.agent.tools.data_tools import _handle_get_capital_flow
+from src.agent.tools.data_tools import _handle_get_capital_flow, _handle_get_shareholder_actions
 
 
 class _DummyManagerOk:
@@ -81,6 +81,47 @@ class _DummyManagerRaises:
         raise RuntimeError("network timeout")
 
 
+class _DummyShareholderManagerOk:
+    def get_shareholder_actions_context(self, _stock_code: str):
+        return {
+            "status": "ok",
+            "data": {
+                "pledge": {
+                    "status": "ok",
+                    "as_of": "2026-08-07",
+                    "pledge_count": 16,
+                    "pledge_ratio": 34.07,
+                    "risk_level": "medium",
+                },
+                "repurchase": {
+                    "status": "ok",
+                    "has_active_plan": True,
+                    "latest": {
+                        "announcement_date": "2026-06-30",
+                        "status": "实施",
+                        "amount": 999915944.13,
+                    },
+                    "recent_records": [{"announcement_date": "2026-06-30", "status": "实施"}],
+                },
+                "holder_trades": {
+                    "status": "ok",
+                    "increase_count": 1,
+                    "decrease_count": 2,
+                    "increase_volume": 800000.0,
+                    "decrease_volume": 3000000.0,
+                    "net_change_volume": -2200000.0,
+                    "recent_trades": [{"holder_name": "大股东甲", "direction": "decrease"}],
+                },
+            },
+            "errors": [],
+        }
+
+
+class _DummyShareholderManagerNotSupported:
+    def get_shareholder_actions_context(self, _stock_code: str):
+        return {"status": "not_supported"}
+
+
 class TestGetCapitalFlowContract(unittest.TestCase):
 
     def test_ok_response_shape(self) -> None:
@@ -137,6 +178,35 @@ class TestGetCapitalFlowContract(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("capital flow fetch failed", result["error"])
         self.assertIn("network timeout", result["error"])
+
+
+
+class TestGetShareholderActionsContract(unittest.TestCase):
+    def test_ok_response_exposes_only_decision_fields(self) -> None:
+        with patch(
+            "src.agent.tools.data_tools._get_fetcher_manager",
+            return_value=_DummyShareholderManagerOk(),
+        ):
+            result = _handle_get_shareholder_actions("600519")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pledge"]["pledge_ratio"], 34.07)
+        self.assertEqual(result["pledge"]["risk_level"], "medium")
+        self.assertTrue(result["repurchase"]["has_active_plan"])
+        self.assertEqual(result["holder_trades"]["decrease_count"], 2)
+        self.assertEqual(result["holder_trades"]["net_change_volume"], -2200000.0)
+        self.assertLessEqual(len(result["repurchase"]["recent_records"]), 5)
+        self.assertLessEqual(len(result["holder_trades"]["recent_trades"]), 5)
+
+    def test_not_supported_response_is_explicit(self) -> None:
+        with patch(
+            "src.agent.tools.data_tools._get_fetcher_manager",
+            return_value=_DummyShareholderManagerNotSupported(),
+        ):
+            result = _handle_get_shareholder_actions("510300")
+
+        self.assertEqual(result["status"], "not_supported")
+        self.assertIn("note", result)
 
 
 if __name__ == "__main__":

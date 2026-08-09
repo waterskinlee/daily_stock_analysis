@@ -4,7 +4,7 @@
 import importlib.util
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -233,6 +233,89 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         # sector source still attempted
         self.assertEqual(result["sector_rankings"]["top"], [])
         self.assertEqual(result["sector_rankings"]["bottom"], [])
+
+    # ---- get_shareholder_actions (pledge / repurchase / holder trades) --------
+
+    def test_get_shareholder_actions_normalizes_risk_signals(self) -> None:
+        fetcher = self._make_fetcher()
+        today = datetime.now()
+        recent = (today - timedelta(days=10)).strftime("%Y%m%d")
+        older = (today - timedelta(days=500)).strftime("%Y%m%d")
+        fetcher._api.pledge_stat.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "600519.SH"],
+                "end_date": [recent, older],
+                "pledge_count": [16, 8],
+                "unrest_pledge": [103329.2, 50000.0],
+                "rest_pledge": [0.0, 0.0],
+                "total_share": [734180.51, 734180.51],
+                "pledge_ratio": [34.07, 10.0],
+            }
+        )
+        fetcher._api.repurchase.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "600519.SH"],
+                "ann_date": [recent, older],
+                "end_date": [None, older],
+                "proc": ["实施", "完成"],
+                "exp_date": [None, None],
+                "vol": [17665380.0, 1000000.0],
+                "amount": [999915944.13, 50000000.0],
+                "high_limit": [65.0, 20.0],
+                "low_limit": [50.14, 10.0],
+            }
+        )
+        fetcher._api.stk_holdertrade.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "600519.SH", "600519.SH"],
+                "ann_date": [recent, recent, older],
+                "holder_name": ["大股东甲", "董事乙", "旧股东"],
+                "holder_type": ["G", "G", "G"],
+                "in_de": ["DE", "IN", "DE"],
+                "change_vol": [3000000.0, 800000.0, 9999999.0],
+                "change_ratio": [0.3, 0.08, 1.0],
+                "after_share": [100000000.0, 2000000.0, 1.0],
+                "after_ratio": [10.0, 0.2, 0.1],
+                "avg_price": [40.0, 38.0, 10.0],
+                "total_share": [100000000.0, 2000000.0, 1.0],
+                "begin_date": [recent, recent, older],
+                "close_date": [recent, recent, older],
+            }
+        )
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_shareholder_actions("600519", lookback_days=365)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pledge"]["pledge_ratio"], 34.07)
+        self.assertEqual(result["pledge"]["risk_level"], "medium")
+        self.assertTrue(result["repurchase"]["has_active_plan"])
+        self.assertEqual(result["repurchase"]["latest"]["status"], "实施")
+        self.assertEqual(result["holder_trades"]["decrease_count"], 1)
+        self.assertEqual(result["holder_trades"]["increase_count"], 1)
+        self.assertEqual(result["holder_trades"]["net_change_volume"], -2200000.0)
+        providers = [item["provider"] for item in result["source_chain"]]
+        self.assertEqual(
+            providers,
+            ["tushare_pledge_stat", "tushare_repurchase", "tushare_stk_holdertrade"],
+        )
+        self.assertEqual(result["errors"], [])
+
+    def test_get_shareholder_actions_fails_open_when_all_sources_error(self) -> None:
+        fetcher = self._make_fetcher()
+        fetcher._api.pledge_stat.side_effect = RuntimeError("quota")
+        fetcher._api.repurchase.side_effect = RuntimeError("quota")
+        fetcher._api.stk_holdertrade.side_effect = RuntimeError("quota")
+
+        with patch.object(fetcher, "_check_rate_limit"):
+            result = fetcher.get_shareholder_actions("600519")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["pledge"]["status"], "failed")
+        self.assertEqual(result["repurchase"]["status"], "failed")
+        self.assertEqual(result["holder_trades"]["status"], "failed")
+        self.assertEqual(len(result["errors"]), 3)
+
 
     @patch.dict(sys.modules, {"tushare": MagicMock()})
     def test_legacy_realtime_quote_keeps_sz_hint_as_stock_symbol(self) -> None:

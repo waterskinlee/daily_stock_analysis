@@ -645,6 +645,62 @@ class TestFundamentalContext(unittest.TestCase):
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.5)
         self.assertEqual(ctx["status"], "not_supported")
 
+    def test_shareholder_actions_context_surfaces_tushare_risk_signals(self) -> None:
+        payload = {
+            "status": "ok",
+            "pledge": {
+                "status": "ok",
+                "as_of": "20260807",
+                "pledge_ratio": 34.07,
+                "risk_level": "medium",
+            },
+            "repurchase": {
+                "status": "ok",
+                "has_active_plan": True,
+                "latest": {"announcement_date": "20260630", "status": "实施"},
+                "recent_records": [],
+            },
+            "holder_trades": {
+                "status": "ok",
+                "increase_count": 1,
+                "decrease_count": 2,
+                "net_change_volume": -2200000.0,
+                "recent_trades": [],
+            },
+            "source_chain": [
+                {"provider": "tushare_pledge_stat", "result": "ok", "duration_ms": 10},
+                {"provider": "tushare_repurchase", "result": "ok", "duration_ms": 10},
+                {"provider": "tushare_stk_holdertrade", "result": "ok", "duration_ms": 10},
+            ],
+            "errors": [],
+        }
+        tushare = SimpleNamespace(
+            name="TushareFetcher",
+            priority=0,
+            is_available=lambda: True,
+            get_shareholder_actions=lambda _stock_code: payload,
+        )
+        manager = DataFetcherManager(fetchers=[tushare])
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=120,
+            fundamental_stage_timeout_seconds=1.5,
+            fundamental_fetch_timeout_seconds=0.8,
+            fundamental_retry_max=1,
+        )
+
+        with patch("src.config.get_config", return_value=cfg):
+            ctx = manager.get_shareholder_actions_context("600519", budget_seconds=0.8)
+
+        self.assertEqual(ctx["status"], "ok")
+        self.assertEqual(ctx["data"]["pledge"]["risk_level"], "medium")
+        self.assertEqual(ctx["data"]["holder_trades"]["net_change_volume"], -2200000.0)
+        providers = [item.get("provider") for item in ctx["source_chain"]]
+        self.assertIn("tushare_pledge_stat", providers)
+        self.assertIn("tushare_repurchase", providers)
+        self.assertIn("tushare_stk_holdertrade", providers)
+
+
     def test_capital_flow_merges_tushare_with_eastmoney_market_activity(self) -> None:
         tushare = SimpleNamespace(
             name="TushareFetcher",
