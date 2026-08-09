@@ -700,7 +700,8 @@ class AkshareFundamentalAdapter:
                 rank_value = _safe_float(item.get("order"))
                 if not code or rank_value is None:
                     continue
-                tag = item.get("tag") if isinstance(item.get("tag"), dict) else {}
+                raw_tag = item.get("tag")
+                tag: Dict[str, Any] = raw_tag if isinstance(raw_tag, dict) else {}
                 ths_rows.append(
                     {
                         "rank": int(rank_value),
