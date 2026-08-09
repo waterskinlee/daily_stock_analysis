@@ -667,10 +667,18 @@ class TestFundamentalContext(unittest.TestCase):
                 "net_change_volume": -2200000.0,
                 "recent_trades": [],
             },
+            "holder_concentration": {
+                "status": "ok",
+                "as_of": "20260630",
+                "holder_count": 100000.0,
+                "change_count": -20000.0,
+                "trend": "concentrating",
+            },
             "source_chain": [
                 {"provider": "tushare_pledge_stat", "result": "ok", "duration_ms": 10},
                 {"provider": "tushare_repurchase", "result": "ok", "duration_ms": 10},
                 {"provider": "tushare_stk_holdertrade", "result": "ok", "duration_ms": 10},
+                {"provider": "tushare_stk_holdernumber", "result": "ok", "duration_ms": 10},
             ],
             "errors": [],
         }
@@ -695,7 +703,9 @@ class TestFundamentalContext(unittest.TestCase):
         self.assertEqual(ctx["status"], "ok")
         self.assertEqual(ctx["data"]["pledge"]["risk_level"], "medium")
         self.assertEqual(ctx["data"]["holder_trades"]["net_change_volume"], -2200000.0)
+        self.assertEqual(ctx["data"]["holder_concentration"]["trend"], "concentrating")
         providers = [item.get("provider") for item in ctx["source_chain"]]
+        self.assertIn("tushare_stk_holdernumber", providers)
         self.assertIn("tushare_pledge_stat", providers)
         self.assertIn("tushare_repurchase", providers)
         self.assertIn("tushare_stk_holdertrade", providers)

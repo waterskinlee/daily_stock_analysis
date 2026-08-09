@@ -112,6 +112,14 @@ class _DummyShareholderManagerOk:
                     "net_change_volume": -2200000.0,
                     "recent_trades": [{"holder_name": "大股东甲", "direction": "decrease"}],
                 },
+                "holder_concentration": {
+                    "status": "ok",
+                    "as_of": "2026-06-30",
+                    "holder_count": 100000.0,
+                    "change_count": -20000.0,
+                    "change_pct": -16.67,
+                    "trend": "concentrating",
+                },
             },
             "errors": [],
         }
@@ -195,6 +203,9 @@ class TestGetShareholderActionsContract(unittest.TestCase):
         self.assertTrue(result["repurchase"]["has_active_plan"])
         self.assertEqual(result["holder_trades"]["decrease_count"], 2)
         self.assertEqual(result["holder_trades"]["net_change_volume"], -2200000.0)
+        self.assertEqual(result["holder_concentration"]["holder_count"], 100000.0)
+        self.assertEqual(result["holder_concentration"]["change_count"], -20000.0)
+        self.assertEqual(result["holder_concentration"]["trend"], "concentrating")
         self.assertLessEqual(len(result["repurchase"]["recent_records"]), 5)
         self.assertLessEqual(len(result["holder_trades"]["recent_trades"]), 5)
 

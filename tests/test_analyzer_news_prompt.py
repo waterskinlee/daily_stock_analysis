@@ -282,6 +282,14 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
                                 }
                             ],
                         },
+                        "holder_concentration": {
+                            "status": "ok",
+                            "as_of": "2026-03-31",
+                            "holder_count": 100000,
+                            "change_count": -20000,
+                            "change_pct": -16.67,
+                            "trend": "concentrating",
+                        },
                     },
                 }
             },
@@ -315,6 +323,9 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         self.assertIn("回购预案或实施不等于必然完成", prompt)
         self.assertIn("增持不得单独解释为买入信号", prompt)
         self.assertIn("减持与高质押应提高风险权重", prompt)
+        self.assertIn("股东户数", prompt)
+        self.assertIn("-20000", prompt)
+        self.assertIn("筹码集中", prompt)
 
     def test_prompt_prefers_context_news_window_days(self) -> None:
         with patch.object(GeminiAnalyzer, "_init_litellm", return_value=None):

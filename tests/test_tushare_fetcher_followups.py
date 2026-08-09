@@ -282,11 +282,22 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
                 "close_date": [recent, recent, older],
             }
         )
+        fetcher._api.stk_holdernumber.return_value = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "600519.SH"],
+                "ann_date": [recent, older],
+                "end_date": [recent, older],
+                "holder_num": [100000, 120000],
+            }
+        )
 
         with patch.object(fetcher, "_check_rate_limit"):
             result = fetcher.get_shareholder_actions("600519", lookback_days=365, max_results=1)
 
         self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["holder_concentration"]["holder_count"], 100000.0)
+        self.assertEqual(result["holder_concentration"]["change_count"], -20000.0)
+        self.assertEqual(result["holder_concentration"]["trend"], "concentrating")
         self.assertEqual(result["pledge"]["pledge_ratio"], 34.07)
         self.assertEqual(result["pledge"]["risk_level"], "medium")
         self.assertTrue(result["repurchase"]["has_active_plan"])
@@ -299,7 +310,7 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         providers = [item["provider"] for item in result["source_chain"]]
         self.assertEqual(
             providers,
-            ["tushare_pledge_stat", "tushare_repurchase", "tushare_stk_holdertrade"],
+            ["tushare_pledge_stat", "tushare_repurchase", "tushare_stk_holdertrade", "tushare_stk_holdernumber"],
         )
         self.assertEqual(result["errors"], [])
 
@@ -308,6 +319,7 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         fetcher._api.pledge_stat.side_effect = RuntimeError("quota")
         fetcher._api.repurchase.side_effect = RuntimeError("quota")
         fetcher._api.stk_holdertrade.side_effect = RuntimeError("quota")
+        fetcher._api.stk_holdernumber.side_effect = RuntimeError("quota")
 
         with patch.object(fetcher, "_check_rate_limit"):
             result = fetcher.get_shareholder_actions("600519")
@@ -316,7 +328,8 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
         self.assertEqual(result["pledge"]["status"], "failed")
         self.assertEqual(result["repurchase"]["status"], "failed")
         self.assertEqual(result["holder_trades"]["status"], "failed")
-        self.assertEqual(len(result["errors"]), 3)
+        self.assertEqual(result["holder_concentration"]["status"], "failed")
+        self.assertEqual(len(result["errors"]), 4)
 
 
     @patch.dict(sys.modules, {"tushare": MagicMock()})
