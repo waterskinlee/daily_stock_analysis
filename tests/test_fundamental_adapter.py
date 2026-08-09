@@ -332,9 +332,18 @@ class TestFundamentalAdapter(unittest.TestCase):
                 {"sc": "SH600519", "rk": 11, "hisRc": -3},
             ]
         }
+        concept_payload = {
+            "data": [
+                {"conceptName": "白酒", "conceptId": "BK0477", "hitCount": 88},
+                {"conceptName": "国企改革", "conceptId": "BK0490", "hitCount": 35},
+            ]
+        }
 
         with patch("data_provider.fundamental_adapter.requests.get", return_value=self._http_json(ths_payload)) as get_mock, \
-                patch("data_provider.fundamental_adapter.requests.post", return_value=self._http_json(em_payload)) as post_mock:
+                patch(
+                    "data_provider.fundamental_adapter.requests.post",
+                    side_effect=[self._http_json(em_payload), self._http_json(concept_payload)],
+                ) as post_mock:
             result = adapter.get_stock_popularity("600519", period="hour", top_n=100)
 
         self.assertEqual(result["status"], "ok")
@@ -344,13 +353,26 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertEqual(result["eastmoney_rank"], 11)
         self.assertEqual(result["ths_rank"], 12)
         self.assertEqual(result["heat"], 188800.0)
-        self.assertEqual(result["concepts"], ["白酒"])
+        self.assertEqual(result["concepts"], ["白酒", "国企改革"])
+        self.assertEqual(
+            result["eastmoney_concepts"],
+            [
+                {"concept": "白酒", "bk": "BK0477", "hit": 88.0},
+                {"concept": "国企改革", "bk": "BK0490", "hit": 35.0},
+            ],
+        )
         self.assertEqual(result["tag"], "机构关注")
         self.assertTrue(result["is_top_20"])
         self.assertEqual(result["primary_source"], "eastmoney_hot_rank")
         self.assertEqual(result["top_stocks"][0]["code"], "603259")
         self.assertEqual(get_mock.call_args.kwargs["params"]["type"], "hour")
-        self.assertEqual(post_mock.call_args.kwargs["json"]["pageSize"], 100)
+        self.assertEqual(post_mock.call_args_list[0].kwargs["json"]["pageSize"], 100)
+        self.assertEqual(
+            post_mock.call_args_list[1].kwargs["json"]["srcSecurityCode"],
+            "SH600519",
+        )
+        providers = [item["provider"] for item in result["source_chain"]]
+        self.assertIn("eastmoney_hot_concepts", providers)
 
     def test_stock_popularity_survives_single_source_failure(self) -> None:
         adapter = AkshareFundamentalAdapter()
@@ -377,7 +399,7 @@ class TestFundamentalAdapter(unittest.TestCase):
         self.assertFalse(result["is_ranked"])
         self.assertIsNone(result["rank"])
         self.assertEqual(result["top_stocks"], [])
-        self.assertEqual(len(result["errors"]), 2)
+        self.assertEqual(len(result["errors"]), 3)
 
     # ---- Eastmoney lockup (限售解禁) direct HTTP --------------------------------
 
