@@ -5225,16 +5225,54 @@ class SearchService:
         
         logger.info(f"搜索股票事件: {stock_name}({stock_code}) - {event_types}")
         
-        # 依次尝试各个搜索引擎
+        # Event queries contain broad terms (e.g. "减持公告") that search
+        # providers may satisfy with another company's article. Reuse the
+        # stock-news identity scorer and admit only direct target-company hits.
+        prefer_chinese = self._should_prefer_chinese_news(stock_code, stock_name)
         for provider in self._providers_for_query(stock_code, stock_name):
             if not provider.is_available:
                 continue
-            
+
             response = provider.search(query, max_results=5)
-            
-            if response.success:
-                self._put_cache(cache_key, response)
-                return response
+            if not response.success:
+                continue
+
+            log_scope = f"{stock_code}:{getattr(provider, 'name', 'unknown')}:stock_events"
+            ranked = self._rank_news_response(
+                response,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                prefer_chinese=prefer_chinese,
+                max_results=5,
+                log_scope=log_scope,
+            )
+            filtered = self._filter_ranked_news_for_context(
+                ranked,
+                log_scope=log_scope,
+            )
+            direct_results = [
+                item
+                for item in filtered.results
+                if item.relevance_category == self._DIRECT_NEWS_CATEGORY
+            ]
+            if not direct_results:
+                logger.info(
+                    "[事件准入] %s: provider=%s 未命中目标公司，继续下一数据源",
+                    stock_code,
+                    getattr(provider, "name", "unknown"),
+                )
+                continue
+
+            admitted = SearchResponse(
+                query=filtered.query,
+                results=direct_results,
+                provider=filtered.provider,
+                success=True,
+                error_message=filtered.error_message,
+                search_time=filtered.search_time,
+            )
+            self._put_cache(cache_key, admitted)
+            return admitted
         
         return SearchResponse(
             query=query,
