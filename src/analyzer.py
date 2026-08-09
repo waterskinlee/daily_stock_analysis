@@ -3946,7 +3946,6 @@ class GeminiAnalyzer:
         has_popularity = (
             isinstance(popularity, dict)
             and popularity.get("status") == "ok"
-            and bool(popularity.get("is_ranked"))
             and popularity.get("rank") is not None
         )
         if has_popularity:
