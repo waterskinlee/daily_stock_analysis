@@ -259,7 +259,10 @@ class StockAnalysisPipeline:
         self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
         self.notifier = NotificationService(source_message=source_message)
-        self.market_structure_service = MarketStructureService(fetcher_manager=self.fetcher_manager)
+        self.market_structure_service = MarketStructureService(
+            fetcher_manager=self.fetcher_manager,
+            hotspot_details_enabled=True,
+        )
         self.market_hotspot_service: Optional[MarketHotspotService] = None
         try:
             self.market_hotspot_service = MarketHotspotService(
@@ -1266,7 +1269,10 @@ class StockAnalysisPipeline:
         service = getattr(self, "market_structure_service", None)
         if service is None:
             try:
-                service = MarketStructureService(fetcher_manager=self.fetcher_manager)
+                service = MarketStructureService(
+                    fetcher_manager=self.fetcher_manager,
+                    hotspot_details_enabled=True,
+                )
                 self.market_structure_service = service
             except Exception as exc:
                 logger.debug("market structure service init failed (fail-open): %s", exc)

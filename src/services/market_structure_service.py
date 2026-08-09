@@ -44,10 +44,14 @@ class MarketStructureService:
         self,
         fetcher_manager: Optional[DataFetcherManager] = None,
         hotspot_service: Optional[MarketHotspotService] = None,
+        hotspot_details_enabled: bool = False,
     ) -> None:
         self.fetcher_manager = fetcher_manager or DataFetcherManager()
         self.hotspot_service = hotspot_service or MarketHotspotService(
             fetcher_manager=self.fetcher_manager,
+        )
+        self.hotspot_details_enabled = bool(
+            hotspot_details_enabled or hotspot_service is not None
         )
 
     def build_context(
@@ -120,7 +124,12 @@ class MarketStructureService:
             market_theme_payload,
             related_boards,
         )
-        if primary_theme is not None and primary_theme_has_market_match:
+        if (
+            self.hotspot_details_enabled
+            and primary_theme is not None
+            and primary_theme_has_market_match
+        ):
+
             market_theme_payload = self._enrich_matched_theme_evidence(
                 market_theme_payload,
                 primary_theme=primary_theme,
