@@ -2342,6 +2342,49 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         self.assertIn("Microsoft", q)
         self.assertNotIn("微软", q)
 
+    def test_search_stock_events_rejects_unrelated_provider_results(self) -> None:
+        """An event keyword match must not override a mismatched company identity."""
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+        )
+        unrelated_provider = SimpleNamespace(
+            is_available=True,
+            name="UnrelatedEventProvider",
+            search=MagicMock(
+                return_value=_response([
+                    _result(
+                        "光智科技：公司将披露半年报，控股股东承诺不减持",
+                        datetime.now().date().isoformat(),
+                    )
+                ])
+            ),
+        )
+        target_provider = SimpleNamespace(
+            is_available=True,
+            name="TargetEventProvider",
+            search=MagicMock(
+                return_value=_response([
+                    _result(
+                        "中国建筑发布2026年半年度业绩快报",
+                        datetime.now().date().isoformat(),
+                    )
+                ])
+            ),
+        )
+        service._providers = [unrelated_provider, target_provider]
+
+        response = service.search_stock_events("601668", "中国建筑")
+
+        self.assertTrue(response.success)
+        self.assertEqual(
+            [item.title for item in response.results],
+            ["中国建筑发布2026年半年度业绩快报"],
+        )
+        self.assertEqual(response.results[0].relevance_category, "direct_company_news")
+        unrelated_provider.search.assert_called_once()
+        target_provider.search.assert_called_once()
+
     def test_search_stock_events_reuses_search_cache(self) -> None:
         service = SearchService(
             bocha_keys=["dummy_key"],
