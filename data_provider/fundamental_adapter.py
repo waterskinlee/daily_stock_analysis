@@ -376,6 +376,204 @@ class AkshareFundamentalAdapter:
             }
         return parsed
 
+    def get_block_trades(
+        self,
+        stock_code: str,
+        lookback_days: int = 90,
+        max_results: int = 10,
+    ) -> Dict[str, Any]:
+        """Fetch and summarize recent Eastmoney block trades (大宗交易).
+
+        Amounts are in CNY and ``premium_pct`` follows Eastmoney's signed
+        ``PREMIUM_RATIO`` convention: negative means discount. Fail-open.
+        """
+        start_ts = time.time()
+        today = datetime.now().date()
+        lookback = max(1, int(lookback_days))
+        cutoff = today - timedelta(days=lookback)
+        result: Dict[str, Any] = {
+            "status": "empty",
+            "lookback_days": lookback,
+            "latest_date": None,
+            "trade_count": 0,
+            "total_amount": 0.0,
+            "total_volume": 0.0,
+            "discount_trade_count": 0,
+            "premium_trade_count": 0,
+            "flat_trade_count": 0,
+            "discount_amount": 0.0,
+            "premium_amount": 0.0,
+            "amount_weighted_premium_pct": None,
+            "recent_trades": [],
+            "source_chain": [],
+            "errors": [],
+            "as_of": today.isoformat(),
+        }
+
+        try:
+            rows = self._em_datacenter_get(
+                "RPT_DATA_BLOCKTRADE",
+                filter_str=f'(SECURITY_CODE="{_normalize_code(stock_code)}")',
+                page_size=50,
+                sort_columns="TRADE_DATE",
+                sort_types="-1",
+            )
+            trades: List[Dict[str, Any]] = []
+            weighted_premium = 0.0
+            weighted_amount = 0.0
+            for row in rows:
+                trade_date = _normalize_report_date(row.get("TRADE_DATE"))
+                if trade_date is None:
+                    continue
+                parsed_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+                if parsed_date < cutoff or parsed_date > today:
+                    continue
+
+                amount = _safe_float(row.get("DEAL_AMT"))
+                volume = _safe_float(row.get("DEAL_VOLUME"))
+                premium_pct = _safe_float(row.get("PREMIUM_RATIO"))
+                trade = {
+                    "trade_date": trade_date,
+                    "deal_price": _safe_float(row.get("DEAL_PRICE")),
+                    "close_price": _safe_float(row.get("CLOSE_PRICE")),
+                    "premium_pct": premium_pct,
+                    "deal_volume": volume,
+                    "deal_amount": amount,
+                    "turnover_rate_pct": _safe_float(row.get("TURNOVER_RATE")),
+                    "buyer_name": _safe_str(row.get("BUYER_NAME")),
+                    "seller_name": _safe_str(row.get("SELLER_NAME")),
+                }
+                trades.append(trade)
+
+                if amount is not None:
+                    result["total_amount"] += amount
+                if volume is not None:
+                    result["total_volume"] += volume
+                if premium_pct is None:
+                    continue
+                if premium_pct < 0:
+                    result["discount_trade_count"] += 1
+                    if amount is not None:
+                        result["discount_amount"] += amount
+                elif premium_pct > 0:
+                    result["premium_trade_count"] += 1
+                    if amount is not None:
+                        result["premium_amount"] += amount
+                else:
+                    result["flat_trade_count"] += 1
+                if amount is not None and amount > 0:
+                    weighted_premium += premium_pct * amount
+                    weighted_amount += amount
+
+            trades.sort(key=lambda item: item.get("trade_date") or "", reverse=True)
+            result["trade_count"] = len(trades)
+            result["recent_trades"] = trades[: max(1, int(max_results))]
+            result["latest_date"] = trades[0]["trade_date"] if trades else None
+            if weighted_amount > 0:
+                result["amount_weighted_premium_pct"] = round(weighted_premium / weighted_amount, 6)
+            result["status"] = "ok" if trades else "empty"
+            result["source_chain"].append(
+                {
+                    "provider": "eastmoney_block_trades",
+                    "result": "ok" if trades else "empty",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - external feed, fail-open
+            result["status"] = "failed"
+            result["errors"].append(f"block_trades:{type(exc).__name__}")
+            result["source_chain"].append(
+                {
+                    "provider": "eastmoney_block_trades",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+        return result
+
+    def get_margin_trading(self, stock_code: str) -> Dict[str, Any]:
+        """Fetch latest Eastmoney stock-level margin trading detail (两融)."""
+        start_ts = time.time()
+        result: Dict[str, Any] = {
+            "status": "empty",
+            "trade_date": None,
+            "financing_balance": None,
+            "securities_lending_balance": None,
+            "margin_balance": None,
+            "financing_buy_amount": None,
+            "financing_repayment_amount": None,
+            "financing_net_buy_amount": None,
+            "financing_net_buy_3d": None,
+            "financing_net_buy_5d": None,
+            "financing_net_buy_10d": None,
+            "financing_balance_pct_market_cap": None,
+            "financing_balance_change_pct": None,
+            "securities_lending_volume": None,
+            "securities_sold_volume": None,
+            "securities_repaid_volume": None,
+            "securities_net_sold_volume": None,
+            "securities_net_sold_volume_3d": None,
+            "securities_net_sold_volume_5d": None,
+            "securities_net_sold_volume_10d": None,
+            "source_chain": [],
+            "errors": [],
+        }
+
+        try:
+            rows = self._em_datacenter_get(
+                "RPTA_WEB_RZRQ_GGMX",
+                filter_str=f'(SCODE="{_normalize_code(stock_code)}")',
+                page_size=10,
+                sort_columns="DATE",
+                sort_types="-1",
+            )
+            row = rows[0] if rows else None
+            if row is not None:
+                result.update(
+                    {
+                        "status": "ok",
+                        "trade_date": _normalize_report_date(row.get("DATE")),
+                        "financing_balance": _safe_float(row.get("RZYE")),
+                        "securities_lending_balance": _safe_float(row.get("RQYE")),
+                        "margin_balance": _safe_float(row.get("RZRQYE")),
+                        "financing_buy_amount": _safe_float(row.get("RZMRE")),
+                        "financing_repayment_amount": _safe_float(row.get("RZCHE")),
+                        "financing_net_buy_amount": _safe_float(row.get("RZJME")),
+                        "financing_net_buy_3d": _safe_float(row.get("RZJME3D")),
+                        "financing_net_buy_5d": _safe_float(row.get("RZJME5D")),
+                        "financing_net_buy_10d": _safe_float(row.get("RZJME10D")),
+                        "financing_balance_pct_market_cap": _safe_float(row.get("RZYEZB")),
+                        "financing_balance_change_pct": _safe_float(row.get("FIN_BALANCE_GR")),
+                        "securities_lending_volume": _safe_float(row.get("RQYL")),
+                        "securities_sold_volume": _safe_float(row.get("RQMCL")),
+                        "securities_repaid_volume": _safe_float(row.get("RQCHL")),
+                        "securities_net_sold_volume": _safe_float(row.get("RQJMG")),
+                        "securities_net_sold_volume_3d": _safe_float(row.get("RQJMG3D")),
+                        "securities_net_sold_volume_5d": _safe_float(row.get("RQJMG5D")),
+                        "securities_net_sold_volume_10d": _safe_float(row.get("RQJMG10D")),
+                    }
+                )
+            result["source_chain"].append(
+                {
+                    "provider": "eastmoney_margin_trading",
+                    "result": "ok" if row is not None else "empty",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - external feed, fail-open
+            result["status"] = "failed"
+            result["errors"].append(f"margin_trading:{type(exc).__name__}")
+            result["source_chain"].append(
+                {
+                    "provider": "eastmoney_margin_trading",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - start_ts) * 1000),
+                    "error": type(exc).__name__,
+                }
+            )
+        return result
+
     def get_lockup_schedule(
         self,
         stock_code: str,

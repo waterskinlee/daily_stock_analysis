@@ -3864,6 +3864,16 @@ class GeminiAnalyzer:
             if isinstance(capital_flow_data, dict)
             else {}
         )
+        block_trades = (
+            capital_flow_data.get("block_trades", {})
+            if isinstance(capital_flow_data, dict)
+            else {}
+        )
+        margin_trading = (
+            capital_flow_data.get("margin_trading", {})
+            if isinstance(capital_flow_data, dict)
+            else {}
+        )
         has_capital_flow = (
             isinstance(stock_flow, dict)
             and any(v is not None for v in stock_flow.values())
@@ -3895,6 +3905,38 @@ class GeminiAnalyzer:
 | 资金流出靠前板块 | {bottom_sector_text} | 板块风险参考 |
 
 > 资金流向只能作为价格位置的过滤器：接近压力且主力流出时不得追买；接近支撑且未放量跌破时，优先判断为持有观察、震荡或洗盘观察。
+"""
+
+        has_block_trades = (
+            isinstance(block_trades, dict)
+            and block_trades.get("status") == "ok"
+            and int(block_trades.get("trade_count") or 0) > 0
+        )
+        has_margin_trading = (
+            isinstance(margin_trading, dict)
+            and margin_trading.get("status") == "ok"
+            and bool(margin_trading.get("trade_date"))
+        )
+        if has_block_trades or has_margin_trading:
+            prompt += f"""
+### 大宗交易与两融（资金风险过滤器）
+| 指标 | 数值 | 决策含义 |
+|------|------|----------|
+| 大宗交易统计期 | {block_trades.get('lookback_days', 'N/A')} 日 | 仅统计窗口内成交 |
+| 最新大宗交易日 | {block_trades.get('latest_date', 'N/A')} | 判断信息时效 |
+| 大宗成交笔数 | {block_trades.get('trade_count', 'N/A')} | 单笔成交不代表持续趋势 |
+| 大宗成交总额 | {block_trades.get('total_amount', 'N/A')} | 结合折溢价判断承接质量 |
+| 折价成交笔数 | {block_trades.get('discount_trade_count', 'N/A')} | 折价偏多提示潜在抛压 |
+| 溢价成交笔数 | {block_trades.get('premium_trade_count', 'N/A')} | 溢价仅作承接线索，不等于利好 |
+| 金额加权折溢价 | {block_trades.get('amount_weighted_premium_pct', 'N/A')}% | 负值=整体折价，正值=整体溢价 |
+| 两融数据日 | {margin_trading.get('trade_date', 'N/A')} | 判断信息时效 |
+| 融资余额 | {margin_trading.get('financing_balance', 'N/A')} | 观察杠杆资金存量 |
+| 当日融资净买入 | {margin_trading.get('financing_net_buy_amount', 'N/A')} | 负值=融资净偿还 |
+| 5日融资净买入 | {margin_trading.get('financing_net_buy_5d', 'N/A')} | 判断杠杆资金持续性 |
+| 10日融资净买入 | {margin_trading.get('financing_net_buy_10d', 'N/A')} | 判断中短期杠杆方向 |
+| 融券净卖出量 | {margin_trading.get('securities_net_sold_volume', 'N/A')} | 正值偏空，负值为净偿还 |
+
+> 大宗交易本身不代表买卖方向。折价大宗交易与融资净偿还不得解释为利好；连续融资净买入也只能作为价格趋势的辅助证据，禁止脱离价格位置单独给出买入结论。
 """
 
         # 添加三大法人动向（台股筹码过滤器）— tw-only；仅当 institution 区块 status='ok'

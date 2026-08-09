@@ -632,7 +632,13 @@ class TestFundamentalContext(unittest.TestCase):
                         "source_chain": [],
                         "errors": [],
                     },
-                ):
+                ), \
+                patch.object(manager._fundamental_adapter, "get_block_trades", return_value={
+                    "status": "empty", "source_chain": [], "errors": [],
+                }), \
+                patch.object(manager._fundamental_adapter, "get_margin_trading", return_value={
+                    "status": "empty", "source_chain": [], "errors": [],
+                }):
             ctx = manager.get_capital_flow_context("600519", budget_seconds=0.5)
         self.assertEqual(ctx["status"], "not_supported")
 

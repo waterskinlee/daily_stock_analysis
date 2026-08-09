@@ -3561,10 +3561,11 @@ class DataFetcherManager:
             )
 
         def _capital_flow_task() -> Dict[str, Any]:
-            # Prefer TushareFetcher when available (fast keyless proxy, ~1s) so
-            # the budget reliably covers the block; fall back to the akshare
-            # adapter (slow multi-candidate probing) only when tushare is absent
-            # or returned no content.
+            # Prefer Tushare for the existing stock/sector flow contract, then
+            # enrich the same payload with Eastmoney block-trade and margin
+            # detail. Enrichment must run even when Tushare succeeds; treating
+            # it as a fallback would make the new data unreachable in production.
+            base_payload: Optional[Dict[str, Any]] = None
             tushare = None
             for fetcher in self._fetchers:
                 if (
@@ -3587,8 +3588,57 @@ class DataFetcherManager:
                         or (payload.get("sector_rankings") or {}).get("bottom")
                     )
                     if has_content:
-                        return payload
-            return self._fundamental_adapter.get_capital_flow(stock_code)
+                        base_payload = dict(payload)
+
+            if base_payload is None:
+                fallback = self._fundamental_adapter.get_capital_flow(stock_code)
+                base_payload = dict(fallback) if isinstance(fallback, dict) else {
+                    "status": "not_supported",
+                    "stock_flow": {},
+                    "sector_rankings": {"top": [], "bottom": []},
+                    "source_chain": [],
+                    "errors": [],
+                }
+
+            source_chain = base_payload.get("source_chain")
+            if not isinstance(source_chain, list):
+                source_chain = [source_chain] if source_chain else []
+            base_payload["source_chain"] = source_chain
+            errors = base_payload.get("errors")
+            if not isinstance(errors, list):
+                errors = [str(errors)] if errors else []
+            base_payload["errors"] = errors
+
+            for field_name, provider_name, fetch in (
+                ("block_trades", "eastmoney_block_trades", self._fundamental_adapter.get_block_trades),
+                ("margin_trading", "eastmoney_margin_trading", self._fundamental_adapter.get_margin_trading),
+            ):
+                try:
+                    activity = fetch(stock_code)
+                except Exception as exc:  # noqa: BLE001 - defensive fail-open
+                    logger.warning("%s failed for %s: %s", provider_name, stock_code, exc)
+                    base_payload[field_name] = {"status": "failed"}
+                    source_chain.append({"provider": provider_name, "result": "failed", "duration_ms": 0})
+                    errors.append(f"{field_name}:{type(exc).__name__}")
+                    continue
+                if not isinstance(activity, dict):
+                    base_payload[field_name] = {"status": "failed"}
+                    source_chain.append({"provider": provider_name, "result": "failed", "duration_ms": 0})
+                    errors.append(f"{field_name}:invalid_payload")
+                    continue
+                base_payload[field_name] = {
+                    key: value
+                    for key, value in activity.items()
+                    if key not in {"source_chain", "errors"}
+                }
+                activity_chain = activity.get("source_chain")
+                if isinstance(activity_chain, list):
+                    source_chain.extend(activity_chain)
+                activity_errors = activity.get("errors")
+                if isinstance(activity_errors, list):
+                    errors.extend(str(item) for item in activity_errors if item)
+
+            return base_payload
 
         payload, err, cost_ms = self._run_with_retry(
             _capital_flow_task,
@@ -3605,14 +3655,27 @@ class DataFetcherManager:
 
         stock_flow = payload.get("stock_flow") or {}
         sector_rankings = payload.get("sector_rankings") or {}
-        has_stock_flow = False
-        if isinstance(stock_flow, dict):
-            has_stock_flow = any(v is not None for v in stock_flow.values())
-        has_sector_rankings = bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
+        block_trades = payload.get("block_trades") or {}
+        margin_trading = payload.get("margin_trading") or {}
+        has_stock_flow = isinstance(stock_flow, dict) and any(v is not None for v in stock_flow.values())
+        has_sector_rankings = isinstance(sector_rankings, dict) and (
+            bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
+        )
+        has_block_trades = isinstance(block_trades, dict) and (
+            block_trades.get("status") == "ok" and int(block_trades.get("trade_count") or 0) > 0
+        )
+        has_margin_trading = isinstance(margin_trading, dict) and (
+            margin_trading.get("status") == "ok" and bool(margin_trading.get("trade_date"))
+        )
         adapter_status = str(payload.get("status", "not_supported"))
-        if has_stock_flow or has_sector_rankings:
+        activity_statuses = {
+            str(item.get("status"))
+            for item in (block_trades, margin_trading)
+            if isinstance(item, dict) and item.get("status")
+        }
+        if has_stock_flow or has_sector_rankings or has_block_trades or has_margin_trading:
             capital_flow_status = "ok"
-        elif adapter_status == "not_supported":
+        elif adapter_status == "not_supported" and not (activity_statuses & {"failed", "partial"}):
             capital_flow_status = "not_supported"
         else:
             capital_flow_status = "partial"
@@ -3622,6 +3685,8 @@ class DataFetcherManager:
             {
                 "stock_flow": payload.get("stock_flow", {}),
                 "sector_rankings": payload.get("sector_rankings", {}),
+                "block_trades": block_trades,
+                "margin_trading": margin_trading,
             },
             self._normalize_source_chain(
                 payload.get("source_chain", []),

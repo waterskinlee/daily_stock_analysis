@@ -691,6 +691,8 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
     data = ctx.get("data", {})
     stock_flow = data.get("stock_flow") or {}
     sector_rankings = data.get("sector_rankings") or {}
+    block_trades = data.get("block_trades") or {}
+    margin_trading = data.get("margin_trading") or {}
     errors = ctx.get("errors") or []
 
     return {
@@ -703,6 +705,31 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
             "top_inflow_sectors": sector_rankings.get("top", [])[:3],
             "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
         },
+        "block_trades": {
+            "status": block_trades.get("status"),
+            "latest_date": block_trades.get("latest_date"),
+            "trade_count": block_trades.get("trade_count"),
+            "total_amount": block_trades.get("total_amount"),
+            "discount_trade_count": block_trades.get("discount_trade_count"),
+            "premium_trade_count": block_trades.get("premium_trade_count"),
+            "amount_weighted_premium_pct": block_trades.get("amount_weighted_premium_pct"),
+            "recent_trades": (block_trades.get("recent_trades") or [])[:5],
+        },
+        "margin_trading": {
+            "status": margin_trading.get("status"),
+            "trade_date": margin_trading.get("trade_date"),
+            "financing_balance": margin_trading.get("financing_balance"),
+            "securities_lending_balance": margin_trading.get("securities_lending_balance"),
+            "margin_balance": margin_trading.get("margin_balance"),
+            "financing_net_buy_amount": margin_trading.get("financing_net_buy_amount"),
+            "financing_net_buy_3d": margin_trading.get("financing_net_buy_3d"),
+            "financing_net_buy_5d": margin_trading.get("financing_net_buy_5d"),
+            "financing_net_buy_10d": margin_trading.get("financing_net_buy_10d"),
+            "financing_balance_pct_market_cap": margin_trading.get("financing_balance_pct_market_cap"),
+            "financing_balance_change_pct": margin_trading.get("financing_balance_change_pct"),
+            "securities_net_sold_volume": margin_trading.get("securities_net_sold_volume"),
+            "securities_net_sold_volume_5d": margin_trading.get("securities_net_sold_volume_5d"),
+        },
         "errors": errors,
     }
 
@@ -710,10 +737,10 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
 get_capital_flow_tool = ToolDefinition(
     name="get_capital_flow",
     description=(
-        "Get main-force (主力) capital flow data for an A-share stock. "
-        "Returns today's net inflow, 5-day and 10-day cumulative inflows, "
-        "and top sector-level capital flow rankings. "
-        "Only supported for A-share individual stocks (not ETFs, indices, HK, or US stocks)."
+        "Get structured A-share capital-flow signals: main-force net inflow, "
+        "sector rankings, recent block trades (大宗交易), and stock-level margin "
+        "financing / securities lending detail (融资融券). Use discount trades and "
+        "multi-day financing net buys as risk filters; not for ETFs, indices, HK, or US stocks."
     ),
     parameters=[
         ToolParameter(
