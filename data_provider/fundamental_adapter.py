@@ -288,9 +288,11 @@ class AkshareFundamentalAdapter:
     _HTTP_TIMEOUT_SEC = 15
     _THS_HOT_URL = "https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/stock"
     _EM_HOT_URL = "https://emappdata.eastmoney.com/stockrank/getAllCurrentList"
+    _EM_HOT_CONCEPT_URL = "https://emappdata.eastmoney.com/stockrank/getHotStockRankList"
     _EM_HOT_BODY = {"appId": "appId01", "globalId": "786e4c21-70dc-435a-93bb-38"}
     _POPULARITY_CACHE_TTL_SECONDS = 60
     _popularity_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    _popularity_concept_cache: Dict[str, Dict[str, Any]] = {}
     _popularity_cache_lock = threading.RLock()
 
     def _em_datacenter_get(
@@ -586,6 +588,82 @@ class AkshareFundamentalAdapter:
         """Clear the short-lived market-list cache used by deterministic tests."""
         with cls._popularity_cache_lock:
             cls._popularity_cache.clear()
+            cls._popularity_concept_cache.clear()
+
+    def _get_eastmoney_hot_concepts(self, stock_code: str) -> Dict[str, Any]:
+        """Fetch and cache Eastmoney's current concept hits for one stock."""
+        code = _normalize_code(stock_code)
+        now = time.time()
+        with self._popularity_cache_lock:
+            cached = self._popularity_concept_cache.get(code)
+            if cached and now - float(cached.get("cached_at") or 0) <= self._POPULARITY_CACHE_TTL_SECONDS:
+                return cached
+
+        market_prefix = (
+            "SH"
+            if code.startswith(("5", "6", "9"))
+            else "BJ"
+            if code.startswith(("4", "8"))
+            else "SZ"
+        )
+        started_at = time.time()
+        try:
+            response = requests.post(
+                self._EM_HOT_CONCEPT_URL,
+                json={**self._EM_HOT_BODY, "srcSecurityCode": f"{market_prefix}{code}"},
+                headers=self._EM_HEADERS,
+                timeout=self._HTTP_TIMEOUT_SEC,
+            )
+            response.raise_for_status()
+            raw_rows = (response.json() or {}).get("data") or []
+            if not isinstance(raw_rows, list):
+                raw_rows = []
+            concepts = []
+            for item in raw_rows:
+                if not isinstance(item, dict):
+                    continue
+                concept_name = _safe_str(item.get("conceptName"))
+                if not concept_name:
+                    continue
+                concepts.append(
+                    {
+                        "concept": concept_name,
+                        "bk": _safe_str(item.get("conceptId")),
+                        "hit": _safe_float(item.get("hitCount")),
+                    }
+                )
+            concepts.sort(
+                key=lambda item: item.get("hit") if item.get("hit") is not None else float("-inf"),
+                reverse=True,
+            )
+            status = "ok" if concepts else "empty"
+            result = {
+                "cached_at": now,
+                "status": status,
+                "concepts": concepts,
+                "source_chain": [{
+                    "provider": "eastmoney_hot_concepts",
+                    "result": status,
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                }],
+                "errors": [],
+            }
+            with self._popularity_cache_lock:
+                self._popularity_concept_cache[code] = result
+            return result
+        except Exception as exc:  # noqa: BLE001 - external feed, fail-open
+            return {
+                "cached_at": now,
+                "status": "failed",
+                "concepts": [],
+                "source_chain": [{
+                    "provider": "eastmoney_hot_concepts",
+                    "result": "failed",
+                    "duration_ms": int((time.time() - started_at) * 1000),
+                    "error": type(exc).__name__,
+                }],
+                "errors": [f"eastmoney_hot_concepts:{type(exc).__name__}"],
+            }
 
     def _get_popularity_snapshot(self, period: str, top_n: int) -> Dict[str, Any]:
         """Fetch and cache THS/Eastmoney market-wide popularity lists."""
@@ -742,10 +820,19 @@ class AkshareFundamentalAdapter:
             normalized_period = "hour"
         normalized_top_n = max(1, min(100, int(top_n)))
         snapshot = self._get_popularity_snapshot(normalized_period, normalized_top_n)
+        concept_payload = self._get_eastmoney_hot_concepts(code)
         ths_rows = snapshot.get("ths_rows") or []
         em_rows = snapshot.get("em_rows") or []
         ths_target = next((item for item in ths_rows if item.get("code") == code), None)
         em_target = next((item for item in em_rows if item.get("code") == code), None)
+        eastmoney_concepts = list(concept_payload.get("concepts") or [])
+        merged_concepts: List[str] = []
+        for concept_name in (
+            list(ths_target.get("concepts") or []) if ths_target else []
+        ) + [item.get("concept") for item in eastmoney_concepts]:
+            normalized_name = _safe_str(concept_name)
+            if normalized_name and normalized_name not in merged_concepts:
+                merged_concepts.append(normalized_name)
 
         primary = em_target or ths_target
         primary_source = (
@@ -775,7 +862,9 @@ class AkshareFundamentalAdapter:
             "ths_rank": ths_target.get("rank") if ths_target else None,
             "heat": ths_target.get("heat") if ths_target else None,
             "pct": ths_target.get("pct") if ths_target else None,
-            "concepts": list(ths_target.get("concepts") or []) if ths_target else [],
+            "concepts": merged_concepts,
+            "eastmoney_concepts": eastmoney_concepts,
+            "concept_status": concept_payload.get("status"),
             "tag": ths_target.get("tag") if ths_target else "",
             "is_top_20": isinstance(rank, int) and rank <= 20,
             "is_top_50": isinstance(rank, int) and rank <= 50,
@@ -784,8 +873,8 @@ class AkshareFundamentalAdapter:
             "ths_status": snapshot.get("ths_status"),
             "eastmoney_status": snapshot.get("em_status"),
             "top_stocks": top_stocks,
-            "source_chain": list(snapshot.get("source_chain") or []),
-            "errors": list(snapshot.get("errors") or []),
+            "source_chain": list(snapshot.get("source_chain") or []) + list(concept_payload.get("source_chain") or []),
+            "errors": list(snapshot.get("errors") or []) + list(concept_payload.get("errors") or []),
         }
 
     def get_lockup_schedule(

@@ -743,6 +743,8 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
             "heat": popularity.get("heat"),
             "pct": popularity.get("pct"),
             "concepts": (popularity.get("concepts") or [])[:5],
+            "eastmoney_concepts": (popularity.get("eastmoney_concepts") or [])[:5],
+            "concept_status": popularity.get("concept_status"),
             "tag": popularity.get("tag"),
             "is_top_20": popularity.get("is_top_20"),
             "is_top_50": popularity.get("is_top_50"),
@@ -758,9 +760,9 @@ get_capital_flow_tool = ToolDefinition(
     description=(
         "Get structured A-share capital-flow and crowding signals: main-force net inflow, "
         "sector rankings, recent block trades (大宗交易), stock-level margin financing / "
-        "securities lending detail (融资融券), and THS/Eastmoney popularity ranks. Treat "
-        "popularity as attention/crowding evidence only, never as a standalone buy signal; "
-        "not for ETFs, indices, HK, or US stocks."
+        "securities lending detail (融资融券), THS/Eastmoney popularity ranks, and "
+        "Eastmoney hot-concept hits. Treat popularity as attention/crowding evidence only, "
+        "never as a standalone buy signal; not for ETFs, indices, HK, or US stocks."
     ),
     parameters=[
         ToolParameter(

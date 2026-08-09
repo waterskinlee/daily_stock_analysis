@@ -3565,7 +3565,7 @@ class SearchService:
             self._providers.append(ClsWireSearchProvider(enabled=True))
             logger.info("已启用财联社 7x24 快讯直连（兜底数据源）")
             
-        if not self._providers:
+        if not self._providers and not self._interaction_provider.is_available:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 
         # In-memory search result cache: {cache_key: (timestamp, SearchResponse)}
