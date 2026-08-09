@@ -423,6 +423,7 @@ class TestEastmoneyDataApiSearchProvider(unittest.TestCase):
         params = mock_get.call_args.kwargs["params"]
         self.assertEqual(params["keyword"], "立讯精密")
         self.assertEqual(params["pagesize"], "100")
+
     def test_falls_back_to_code_query_when_name_has_no_recent_results(self) -> None:
         provider = EastmoneyDataApiSearchProvider(enabled=True)
         now = datetime.now()

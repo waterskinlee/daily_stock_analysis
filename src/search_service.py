@@ -2902,87 +2902,87 @@ class EastmoneyDataApiSearchProvider(BaseSearchProvider):
         days: int = 7,
     ) -> SearchResponse:
         cutoff = time.time() - max(1, int(days)) * 86400
-        results: List[SearchResult] = []
         dataapi_query = self._clean_query(query)
-        try:
-            resp = requests.get(
-                self.DATAAPI_SEARCH_URL,
-                params={
-                    "keyword": dataapi_query,
-                    "page": "1",
-                    "pagesize": str(self.DATAAPI_PAGE_SIZE),
-                },
-                headers=self.DATAAPI_HEADERS,
-                timeout=self.DATAAPI_TIMEOUT_SECONDS,
-            )
-            if resp.status_code != 200:
+        query_candidates = [dataapi_query]
+        code_match = re.search(r"\b(\d{6})\b", str(query or ""))
+        if code_match and code_match.group(1) != dataapi_query:
+            query_candidates.append(code_match.group(1))
+
+        for candidate in query_candidates:
+            try:
+                resp = requests.get(
+                    self.DATAAPI_SEARCH_URL,
+                    params={
+                        "keyword": candidate,
+                        "page": "1",
+                        "pagesize": str(self.DATAAPI_PAGE_SIZE),
+                    },
+                    headers=self.DATAAPI_HEADERS,
+                    timeout=self.DATAAPI_TIMEOUT_SECONDS,
+                )
+                if resp.status_code != 200:
+                    return SearchResponse(
+                        query=query,
+                        results=[],
+                        provider=self.name,
+                        success=False,
+                        error_message=f"EastmoneyData HTTP {resp.status_code}",
+                    )
+                payload = resp.json()
+                items = (payload.get("result") or {}).get("cmsArticleWeb") or []
+                if not isinstance(items, list):
+                    items = []
+                items = [item for item in items if isinstance(item, dict)]
+                items.sort(
+                    key=lambda item: self._timestamp(item.get("date")),
+                    reverse=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail-open
                 return SearchResponse(
                     query=query,
                     results=[],
                     provider=self.name,
                     success=False,
-                    error_message=f"EastmoneyData HTTP {resp.status_code}",
+                    error_message=f"EastmoneyData 请求失败: {type(exc).__name__}",
                 )
-            payload = resp.json()
-            items = (payload.get("result") or {}).get("cmsArticleWeb") or []
-            if not isinstance(items, list):
-                items = []
-            items = [item for item in items if isinstance(item, dict)]
-            items.sort(
-                key=lambda item: self._timestamp(item.get("date")),
-                reverse=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - fail-open
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=f"EastmoneyData 请求失败: {type(exc).__name__}",
-            )
 
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            title = self._clean_title(item.get("title"))
-            content = str(item.get("content") or "").strip()
-            if not title and not content:
-                continue
-            try:
-                ctime_ts = datetime.strptime(
-                    str(item.get("date") or "").strip(), "%Y-%m-%d %H:%M:%S"
-                ).timestamp()
-            except (ValueError, TypeError):
-                ctime_ts = 0
-            if ctime_ts and ctime_ts < cutoff:
-                continue
-            media = str(item.get("mediaName") or "").strip() or "东方财富"
-            url = str(item.get("url") or "").strip()
-            results.append(
-                SearchResult(
-                    title=title or (content[:80] or "东方财富"),
-                    snippet=(content or title)[:200],
-                    url=url or "https://finance.eastmoney.com/",
-                    source=media,
-                    published_date=self._format_time(item.get("date")),
+            results: List[SearchResult] = []
+            for item in items:
+                title = self._clean_title(item.get("title"))
+                content = str(item.get("content") or "").strip()
+                if not title and not content:
+                    continue
+                ctime_ts = self._timestamp(item.get("date"))
+                if ctime_ts and ctime_ts < cutoff:
+                    continue
+                media = str(item.get("mediaName") or "").strip() or "东方财富"
+                url = str(item.get("url") or "").strip()
+                results.append(
+                    SearchResult(
+                        title=title or (content[:80] or "东方财富"),
+                        snippet=(content or title)[:200],
+                        url=url or "https://finance.eastmoney.com/",
+                        source=media,
+                        published_date=self._format_time(item.get("date")),
+                    )
                 )
-            )
-            if len(results) >= int(max_results):
-                break
+                if len(results) >= int(max_results):
+                    break
 
-        if not results:
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message="EastmoneyData 无匹配结果",
-            )
+            if results:
+                return SearchResponse(
+                    query=query,
+                    results=results,
+                    provider=self.name,
+                    success=True,
+                )
+
         return SearchResponse(
             query=query,
-            results=results,
+            results=[],
             provider=self.name,
-            success=True,
+            success=False,
+            error_message="EastmoneyData 无匹配结果",
         )
 
     def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
