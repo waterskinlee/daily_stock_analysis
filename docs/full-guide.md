@@ -444,7 +444,7 @@ daily_stock_analysis/
 | `FUNDAMENTAL_CACHE_MAX_ENTRIES` | 基本面缓存最大条目数（TTL 内按时间淘汰） | `256` | 可选 |
 
 > 行为说明：
-> - A 股：按 `valuation/growth/earnings/institution/shareholder_actions/capital_flow/dragon_tiger/lockup/boards` 聚合能力返回；`shareholder_actions` 通过 Tushare/xiaodefa 输出股权质押、回购进度和重要股东/董监高增减持，`lockup`（限售解禁，东财 datacenter 直连）与 `earnings.consensus_eps`（同花顺一致预期）为免费无 key 直连数据源，任一子源失败时 fail-open；
+> - A 股：按 `valuation/growth/earnings/institution/shareholder_actions/capital_flow/dragon_tiger/lockup/boards` 聚合能力返回；`shareholder_actions` 通过 Tushare/xiaodefa 输出股权质押、股东户数集中度、回购进度和重要股东/董监高增减持，`lockup`（限售解禁，东财 datacenter 直连）与 `earnings.consensus_eps`（同花顺一致预期）为免费无 key 直连数据源，任一子源失败时 fail-open；
 > - ETF：返回可得项，`shareholder_actions` 等公司主体专属能力标记为 `not_supported`，整体不影响原流程；
 > - 美股/港股：通过 yfinance 适配器返回 `valuation/growth/earnings/belong_boards`（来源 `info.sector`/`industry`），`institution/shareholder_actions/capital_flow/dragon_tiger/lockup/boards` 暂无对应数据源仍标记 `not_supported`；yfinance 不可用或字段缺失时整体降级回 `not_supported`，仍走 fail-open；
 > - 日股/韩股：当前仅走 Yfinance 基础路径获取日线与实时行情；`institution`、`shareholder_actions`、`capital_flow`、`dragon_tiger`、`lockup`、`boards` 等依赖 A 股专属源/离岸完整版的能力会降级为 `not_supported`（详见 [市场支持与边界](market-support.md)）；

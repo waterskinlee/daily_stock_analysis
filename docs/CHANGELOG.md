@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [新功能] A 股基本面新增 `shareholder_actions` 股东行为风险块：通过 Tushare/xiaodefa 结构化获取最新股权质押比例、近一年公司回购进度及重要股东/董监高增减持，独立子源异常 fail-open；同步提供 Agent `get_shareholder_actions` 工具、RiskAgent 强制核验与分析提示词，并明确回购预案不等于完成、增持不构成独立买入信号、减持和高质押提高风险权重。
+- [改进] `shareholder_actions` 新增 Tushare `stk_holdernumber` 股东户数快照：输出披露日期、当前/上一期户数、变化数量与变化比例，并将户数减少标记为“筹码集中线索”；分析与 Agent 明确禁止将户数减少直接等同于主力吸筹或买入。
 - [新功能] A 股新闻上下文新增巨潮互动易公司回复（`CNINFO_IRM_ENABLED=true`，免费无 key）：先按股票代码解析 `orgId`，只准入时效窗口内已有公司回复的问答，未回复提问不作为事实依据；常规新闻存在时保留新闻并预留公司回复位置，无常规搜索源时可独立提供公司互动上下文。分析管线与大盘复盘现会完整透传同花顺、东财、新浪及互动易免费源开关。
 - [新功能] 资金上下文新增同花顺热榜、东财人气榜与个股热门概念命中：按代码输出双榜名次/变化、人气值、概念标签、TOP5 热股与来源链，60 秒缓存市场榜和个股概念，单源异常 fail-open；同步暴露给 Agent `get_capital_flow` 与分析提示词，并明确热度仅用于短线拥挤度过滤，不得作为独立买入信号。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
