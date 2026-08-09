@@ -54,6 +54,9 @@ class _DummyManagerOk:
                     "ths_rank": None,
                     "heat": None,
                     "concepts": ["白酒"],
+                    "eastmoney_concepts": [
+                        {"concept": "白酒", "bk": "BK0477", "hit": 88.0},
+                    ],
                     "tag": "机构关注",
                     "is_top_20": True,
                     "primary_source": "eastmoney_hot_rank",
@@ -103,6 +106,7 @@ class TestGetCapitalFlowContract(unittest.TestCase):
         self.assertEqual(result["popularity"]["rank"], 11)
         self.assertEqual(result["popularity"]["rank_change"], -3)
         self.assertEqual(result["popularity"]["concepts"], ["白酒"])
+        self.assertEqual(result["popularity"]["eastmoney_concepts"][0]["bk"], "BK0477")
         self.assertTrue(result["popularity"]["is_top_20"])
         self.assertEqual(result["popularity"]["top_stocks"][0]["name"], "药明康德")
         # At most 3 items are returned per ranking list
