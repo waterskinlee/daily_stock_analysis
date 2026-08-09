@@ -558,6 +558,84 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
             str(save_kwargs["context_snapshot"]["analysis_context_pack_overview"]),
         )
 
+
+    def test_agent_news_search_updates_context_pack_and_history_snapshot(self):
+        pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)
+        pipeline._ensure_agent_history = MagicMock()
+        pipeline.search_service.is_available = True
+        pipeline.db.save_analysis_history.return_value = 2048
+
+        from src.agent.executor import AgentResult
+        from src.search_service import SearchResponse, SearchResult
+
+        news_response = SearchResponse(
+            query="贵州茅台 600519 股票 最新消息",
+            provider="ThsStockNews",
+            success=True,
+            results=[
+                SearchResult(
+                    title="贵州茅台发布经营情况公告",
+                    snippet="公司披露最新经营数据。",
+                    url="https://example.com/600519-news",
+                    source="测试资讯",
+                    published_date="2026-08-09",
+                )
+            ],
+        )
+        pipeline.search_service.search_stock_news.return_value = news_response
+
+        executor = MagicMock()
+        executor.run.return_value = AgentResult(
+            success=True,
+            content="{}",
+            dashboard={
+                "stock_name": "贵州茅台",
+                "sentiment_score": 66,
+                "trend_prediction": "震荡",
+                "operation_advice": "持有",
+                "decision_type": "hold",
+            },
+            provider="test",
+        )
+
+        with patch("src.agent.factory.build_agent_executor", return_value=executor):
+            result = pipeline._analyze_with_agent(
+                code="600519",
+                report_type=ReportType.SIMPLE,
+                query_id="q-agent-news-writeback",
+                stock_name="贵州茅台",
+                realtime_quote=None,
+                chip_data=None,
+                fundamental_context={"market": "cn"},
+                trend_result=None,
+                market_phase_context=_phase_payload(),
+            )
+
+        self.assertIsNotNone(result)
+        expected_news_context = news_response.to_context(max_results=5)
+        run_context = executor.run.call_args.kwargs["context"]
+        self.assertEqual(run_context["news_context"], expected_news_context)
+        self.assertEqual(run_context["news_result_count"], 1)
+        self.assertIn("新闻: available", run_context["analysis_context_pack_summary"])
+
+        overview = result.analysis_context_pack_overview
+        news_block = next(block for block in overview["blocks"] if block["key"] == "news")
+        self.assertEqual(news_block["status"], "available")
+        self.assertEqual(overview["metadata"]["news_result_count"], 1)
+
+        save_kwargs = pipeline.db.save_analysis_history.call_args.kwargs
+        self.assertEqual(save_kwargs["news_content"], expected_news_context)
+        self.assertEqual(save_kwargs["context_snapshot"]["news_content"], expected_news_context)
+        saved_overview = save_kwargs["context_snapshot"]["analysis_context_pack_overview"]
+        saved_news_block = next(
+            block for block in saved_overview["blocks"] if block["key"] == "news"
+        )
+        self.assertEqual(saved_news_block["status"], "available")
+        pipeline.search_service.search_stock_news.assert_called_once_with(
+            stock_code="600519",
+            stock_name="贵州茅台",
+            max_results=5,
+        )
     def test_agent_pack_summary_uses_db_daily_context_after_history_prefetch(self):
         pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)
         pipeline._ensure_agent_history = MagicMock()
