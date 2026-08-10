@@ -984,6 +984,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响 Agent 置信度校准和长期分析质量。'],
     notes: ['需要配合回测功能使用效果更佳。'],
   },
+  'settings.agent.ANALYSIS_PREVIOUS_WATCH_ENABLED': {
+    title: '复用上次观察点',
+    summary: '将上次分析的观察条件、狙击点位注入本次分析，避免关键信号丢失。',
+    usage: '开启后，每次个股分析会读取最近一次历史分析中的观察条件（如止损位、突破位），在提示词中要求逐条核对兑现情况，再给出本次结论。',
+    valueNotes: ['软约束：要求核对但不强制，观察点过期（超过 10 天）自动降权。'],
+    impact: ['提升跨日分析的信号连续性，历史观察点不再被遗漏。'],
+    notes: ['默认开启；关闭后回到每次分析独立、不带历史观察点的行为。'],
+  },
   'settings.agent.AGENT_SKILL_AUTOWEIGHT': {
     title: '策略自动权重',
     summary: '基于真实、可归因且样本充足的 Skill Outcome 保守调整策略权重。',
@@ -2186,6 +2194,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Calibration takes effect after sufficient prediction data accumulates.'],
     impact: ['Affects Agent confidence calibration and long-term analysis quality.'],
     notes: ['Works best when combined with the backtest feature.'],
+  },
+  'settings.agent.ANALYSIS_PREVIOUS_WATCH_ENABLED': {
+    title: 'Previous Watch-Point Reuse',
+    summary: 'Injects the last analysis\'s watch conditions and sniper points into the next run so key signals are not lost.',
+    usage: 'When enabled, each stock analysis reads the watch conditions (e.g. stop-loss, breakout level) from the most recent prior analysis and asks the LLM to verify each against current data before concluding.',
+    valueNotes: ['Soft constraint: verification is requested but not enforced; stale watch points (older than 10 days) are automatically de-weighted.'],
+    impact: ['Improves cross-day signal continuity; prior watch points are no longer silently dropped.'],
+    notes: ['Enabled by default; disable to return to independent per-run analysis without historical watch points.'],
   },
   'settings.agent.AGENT_SKILL_AUTOWEIGHT': {
     title: 'Auto-Weight Strategies',

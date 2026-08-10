@@ -4222,6 +4222,32 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": [],
     },
+    "ANALYSIS_PREVIOUS_WATCH_ENABLED": {
+        "title": "Previous Watch-Point Reuse",
+        "description": "Reuse the last analysis's watch_conditions / sniper points in the next run's prompt so yesterday's observation points are verified instead of silently dropped. Soft constraint: verification is requested in the prompt but not enforced by report integrity validation.",
+        "category": "agent",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 67,
+        "help_key": "settings.agent.ANALYSIS_PREVIOUS_WATCH_ENABLED",
+        "examples": [
+            "ANALYSIS_PREVIOUS_WATCH_ENABLED=true",
+            "ANALYSIS_PREVIOUS_WATCH_ENABLED=false",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：Agent 配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+            },
+        ],
+        "warning_codes": [],
+    },
     "AGENT_SKILL_AUTOWEIGHT": {
         "title": "Auto-Weight Strategies",
         "description": "Conservatively weight strategy-skill opinions from sufficient attributable Outcome samples.",

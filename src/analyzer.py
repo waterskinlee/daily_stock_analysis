@@ -4189,6 +4189,11 @@ class GeminiAnalyzer:
 - ⚠️ 量能异常提示：成交量较昨日放大超过10倍，可能受异常数据或一次性冲量影响，必须降权解读，不能机械视为强确认信号
 """
         
+        # 上次分析观察点（软约束，供核对兑现情况）
+        previous_section = context.get("previous_analysis_context")
+        if previous_section:
+            prompt += f"\n{previous_section}\n"
+
         # 添加新闻搜索结果（重点区域）
         news_window_days: Optional[int] = None
         context_window = context.get("news_window_days")

@@ -184,6 +184,44 @@
 
 {% endif %}
 
+{# ========== 决策上下文（策略层 → 风控/降级 → 最终决策）========== #}
+{% set decision_explanation = dashboard.get('agent_disagreement_explanation') or {} %}
+{% set decision_risk = decision_explanation.get('risk_control') or {} %}
+{% set decision_risk_applied = decision_risk.get('applied') %}
+{% set decision_adjustments = decision_explanation.get('final_adjustments') or [] %}
+{% set decision_degraded = decision_explanation.get('degraded_events') or [] %}
+{% if strategy_synthesis or decision_risk_applied or decision_adjustments|length > 0 or decision_degraded|length > 0 %}
+### 🧩 {{ labels.decision_context_heading }}
+
+> {{ labels.strategy_layer_note }}
+
+{% if strategy_synthesis %}
+{% set ss_confidence = strategy_synthesis.get('confidence') %}
+- **{{ labels.strategy_synthesis_heading }}**: {{ labels.strategy_final_signal_label }} {{ localize_strategy_signal(strategy_synthesis.get('final_signal', 'N/A'), report_language) }} | {{ labels.strategy_consensus_level_label }} {{ localize_consensus_level(strategy_synthesis.get('consensus_level', 'N/A'), report_language) }} | {{ labels.strategy_conflict_label }} {{ localize_conflict_severity(strategy_synthesis.get('conflict_severity', 'none'), report_language) }}({{ strategy_synthesis.get('conflict_count', 0) }}) | {{ labels.strategy_confidence_label }} {{ '%.0f%%' | format(ss_confidence * 100) if ss_confidence is number else 'N/A' }}
+{% set ss_supporting = strategy_synthesis.get('supporting_skills') or [] %}
+{% set ss_opposing = strategy_synthesis.get('opposing_skills') or [] %}
+{% if ss_supporting %}- {{ labels.strategy_supporting_skills_label }}: {% for item in ss_supporting %}{{ localize_strategy_skill(item.get('skill_id'), report_language) }}{{ '、' if not loop.last else '' }}{% endfor %}{% endif %}
+{% if ss_opposing %}- {{ labels.strategy_opposing_skills_label }}: {% for item in ss_opposing %}{{ localize_strategy_skill(item.get('skill_id'), report_language) }}{{ '、' if not loop.last else '' }}{% endfor %}{% endif %}
+{% endif %}
+
+{% if decision_risk_applied %}
+{% set risk_from = decision_risk.get('from_signal') or '?' %}
+{% set risk_to = decision_risk.get('to_signal') or '?' %}
+- **{{ labels.risk_downgrade_label }}**: {{ labels.risk_downgrade_transition.replace('{from}', localize_strategy_signal(risk_from, report_language)).replace('{to}', localize_strategy_signal(risk_to, report_language)) }}
+{% endif %}
+
+{% if decision_degraded|length > 0 %}
+- **{{ labels.degraded_synthesis_label }}**: 本次分析存在数据降级或阶段异常，结论稳健性下降。
+{% endif %}
+
+{% set decision_path = decision_explanation.get('decision_path') %}
+{% if decision_path %}
+{% set decision_path_label = labels.get(decision_path ~ '_label', decision_path) %}
+- **{{ labels.decision_path_label }}**: {{ decision_path_label }}
+{% endif %}
+
+{% endif %}
+
 {% if battle %}
 ### 🎯 {{ labels.battle_plan_heading }}
 

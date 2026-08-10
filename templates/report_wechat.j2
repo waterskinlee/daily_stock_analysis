@@ -79,6 +79,22 @@
 {% endif %}
 {% endif %}
 
+{% set decision_explanation = dashboard.get('agent_disagreement_explanation') or {} %}
+{% set decision_risk = decision_explanation.get('risk_control') or {} %}
+{% set decision_risk_applied = decision_risk.get('applied') %}
+{% set decision_degraded = decision_explanation.get('degraded_events') or [] %}
+{% if decision_risk_applied or decision_degraded|length > 0 %}
+🧩 **{{ labels.decision_context_heading }}**:
+{% if decision_risk_applied %}
+{% set risk_from = decision_risk.get('from_signal') or '?' %}
+{% set risk_to = decision_risk.get('to_signal') or '?' %}
+   • {{ labels.risk_downgrade_label }}: {{ labels.risk_downgrade_transition.replace('{from}', localize_strategy_signal(risk_from, report_language)).replace('{to}', localize_strategy_signal(risk_to, report_language)) }}
+{% endif %}
+{% if decision_degraded|length > 0 %}
+   • {{ labels.degraded_synthesis_label }}: 本次分析存在数据降级或阶段异常。
+{% endif %}
+{% endif %}
+
 {% set checklist = battle.get('action_checklist', []) if battle else [] %}
 {% set fc = failed_checks(checklist) %}
 {% if fc %}

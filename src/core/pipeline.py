@@ -715,7 +715,25 @@ class StockAnalysisPipeline:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
             if isinstance(market_structure_context, dict):
                 enhanced_context["market_structure_context"] = market_structure_context
-            
+
+            # Step 6.5: 回读上次分析观察点（软约束，供核对兑现；默认开启）
+            if getattr(self.config, "analysis_previous_watch_enabled", True):
+                try:
+                    from src.analysis_previous_context import (
+                        format_previous_analysis_section,
+                        load_previous_analysis_context,
+                    )
+
+                    prev = load_previous_analysis_context(
+                        self.db, code, exclude_query_id=query_id
+                    )
+                    if prev:
+                        enhanced_context["previous_analysis_context"] = (
+                            format_previous_analysis_section(prev, report_language)
+                        )
+                except Exception as exc:
+                    logger.warning(f"{stock_name}({code}) 上次分析观察点回读失败: {exc}")
+
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
                 analysis_context_pack_summary,
@@ -1373,6 +1391,24 @@ class StockAnalysisPipeline:
                 daily_market_context,
                 report_language=report_language,
             )
+
+            # Reuse the previous analysis's watch points (soft constraint).
+            if getattr(self.config, "analysis_previous_watch_enabled", True):
+                try:
+                    from src.analysis_previous_context import (
+                        format_previous_analysis_section,
+                        load_previous_analysis_context,
+                    )
+
+                    prev = load_previous_analysis_context(
+                        self.db, code, exclude_query_id=query_id
+                    )
+                    if prev:
+                        initial_context["previous_analysis_context"] = (
+                            format_previous_analysis_section(prev, report_language)
+                        )
+                except Exception as exc:
+                    logger.warning(f"{code} Agent 模式上次分析观察点回读失败: {exc}")
             
             if realtime_quote:
                 initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)

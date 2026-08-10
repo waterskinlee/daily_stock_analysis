@@ -1045,6 +1045,10 @@ class Config:
     agent_deep_research_budget: int = 30000  # Max token budget for deep research
     agent_deep_research_timeout: int = 180  # Max seconds for /research command before returning timeout
     agent_memory_enabled: bool = False  # Enable memory & calibration system
+    # Reuse the last analysis's watch_conditions / sniper points in the next
+    # run's prompt (soft constraint) so yesterday's observation points are
+    # verified instead of silently dropped.
+    analysis_previous_watch_enabled: bool = True
     agent_skill_autoweight: bool = True  # Weight skills by attributable Outcome performance
     agent_skill_routing: str = "auto"  # Skill routing: 'auto' (regime-based) or 'manual'
     agent_context_compression_enabled: bool = False  # Compress visible chat history before Agent calls
@@ -2043,6 +2047,10 @@ class Config:
                 minimum=30,
             ),
             agent_memory_enabled=os.getenv('AGENT_MEMORY_ENABLED', 'false').lower() == 'true',
+            analysis_previous_watch_enabled=parse_env_bool(
+                os.getenv('ANALYSIS_PREVIOUS_WATCH_ENABLED'),
+                True,
+            ),
             agent_skill_autoweight=(
                 os.getenv('AGENT_SKILL_AUTOWEIGHT')
                 or os.getenv('AGENT_STRATEGY_AUTOWEIGHT', 'true')

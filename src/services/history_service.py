@@ -1184,6 +1184,13 @@ class HistoryService:
                 report_lines.append(f"**🐻 {labels.get('strongest_bearish_signal_label', '最强看空信号')}**: {bearish}")
             report_lines.append("")
 
+        # ========== 决策上下文（策略层 → 风控/降级 → 最终决策）==========
+        from src.decision_context import render_decision_context_section
+
+        decision_lines = render_decision_context_section(dashboard, report_language)
+        if decision_lines:
+            report_lines.extend(decision_lines)
+
         # ========== 多策略综合 ==========
         strategy_synthesis = normalize_strategy_synthesis_payload(
             dashboard.get('strategy_synthesis') if dashboard else None
