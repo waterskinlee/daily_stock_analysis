@@ -1025,6 +1025,27 @@ class TestDecisionAgentPostProcess(unittest.TestCase):
         self.assertIsNotNone(normalized)
         self.assertEqual(normalized["dashboard"]["strategy_synthesis"], synthesis)
 
+    def test_finalize_dashboard_keeps_full_one_sentence(self):
+        """A long core decision must survive finalization untruncated (full report shows the whole line)."""
+        from src.agent.orchestrator import AgentOrchestrator
+
+        orch = AgentOrchestrator(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        ctx = AgentContext(query="test", stock_code="600519", stock_name="贵州茅台")
+        long_sentence = (
+            "当前股价已站上全部均线且量能温和放大，主力资金连续三日净流入，"
+            "基本面盈利增速与估值匹配度良好，建议回调至20日均线附近分批建仓，"
+            "同时密切跟踪大盘系统性风险与板块轮动节奏，做好止损纪律。"
+        )
+        payload = {"dashboard": {"core_conclusion": {"one_sentence": long_sentence}}}
+
+        normalized = orch._finalize_dashboard_payload(payload, ctx)
+
+        self.assertEqual(
+            normalized["dashboard"]["core_conclusion"]["one_sentence"],
+            long_sentence,
+        )
+        self.assertNotIn("…", normalized["dashboard"]["core_conclusion"]["one_sentence"])
+
 
 class TestIntelAgentPostProcess(unittest.TestCase):
     """Test IntelAgent JSON parsing and context caching behaviour."""

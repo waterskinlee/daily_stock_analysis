@@ -1496,7 +1496,10 @@ class AgentOrchestrator:
         )
         if risk_applied and not one_sentence.startswith(transition_prefix):
             one_sentence = f"{transition_prefix} {one_sentence}"
-        core["one_sentence"] = _truncate_text(one_sentence, 60)
+        # Keep the full decision text: consumers that need a compact line
+        # (brief reports, share posters) slice it themselves. Truncating here
+        # corrupts every full report with a dangling "…".
+        core["one_sentence"] = one_sentence.strip()
         if not core.get("time_sensitivity"):
             core["time_sensitivity"] = "本周内"
         if risk_applied or not core.get("signal_type"):
