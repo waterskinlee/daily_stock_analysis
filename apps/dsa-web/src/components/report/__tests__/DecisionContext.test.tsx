@@ -1,37 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import type { AnalysisReport } from '../../../types/analysis';
 import { DecisionContext } from '../DecisionContext';
-
-const buildReport = (overrides: {
-  strategySynthesis?: Record<string, unknown>;
-  disagreementExplanation?: Record<string, unknown>;
-}): AnalysisReport => {
-  const rawResult: Record<string, unknown> = {
-    dashboard: {
-      strategy_synthesis: overrides.strategySynthesis,
-      agent_disagreement_explanation: overrides.disagreementExplanation,
-    },
-  };
-  return {
-    meta: {
-      queryId: 'q-1',
-      stockCode: '600519',
-      stockName: '贵州茅台',
-      reportType: 'detailed',
-      createdAt: '2026-08-10T08:00:00Z',
-    },
-    summary: {
-      analysisSummary: '趋势维持强势',
-      operationAdvice: '买入',
-      trendPrediction: '短线震荡偏强',
-      sentimentScore: 78,
-    },
-    details: {
-      rawResult,
-    },
-  } as unknown as AnalysisReport;
-};
 
 describe('DecisionContext', () => {
   it('does not render without strategy synthesis or risk control', () => {
