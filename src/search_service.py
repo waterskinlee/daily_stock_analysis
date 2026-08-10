@@ -4920,6 +4920,91 @@ class SearchService:
         )
 
     @staticmethod
+    def _canonical_news_url(url: Optional[str]) -> str:
+        """Normalize a news URL enough to collapse provider tracking variants."""
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+        except (TypeError, ValueError):
+            return raw.casefold().rstrip("/")
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return raw.casefold().rstrip("/")
+
+        tracking_keys = {
+            "from",
+            "ref",
+            "source",
+            "spm",
+            "utm_campaign",
+            "utm_content",
+            "utm_medium",
+            "utm_source",
+            "utm_term",
+        }
+        query_parts = sorted(
+            (key.casefold(), value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() not in tracking_keys and not key.casefold().startswith("utm_")
+        )
+        query = "&".join(f"{key}={value}" for key, value in query_parts)
+        path = parsed.path.rstrip("/") or "/"
+        canonical = f"{parsed.hostname.casefold().rstrip('.')}{path}"
+        return f"{canonical}?{query}" if query else canonical
+
+    @staticmethod
+    def _news_title_key(title: Optional[str]) -> str:
+        """Return a punctuation-insensitive title key for URL-less results."""
+        text = re.sub(r"<[^>]+>", "", str(title or "")).casefold()
+        normalized = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+        return normalized if len(normalized) >= 6 else ""
+
+    @classmethod
+    def _news_dedupe_key(cls, item: SearchResult) -> str:
+        canonical_url = cls._canonical_news_url(item.url)
+        if canonical_url:
+            return f"url:{canonical_url}"
+        title_key = cls._news_title_key(item.title)
+        if not title_key:
+            return ""
+        published = cls._normalize_news_publish_date(item.published_date)
+        return f"title:{title_key}:{published.isoformat() if published else ''}"
+
+    @classmethod
+    def _news_result_quality_key(cls, item: SearchResult) -> Tuple[int, int, int, int]:
+        """Prefer direct, scored, newer, and more informative duplicate items."""
+        category_rank = cls._NEWS_CATEGORY_PRIORITY.get(item.relevance_category or "", 9)
+        published = cls._normalize_news_publish_date(item.published_date)
+        return (
+            -category_rank,
+            item.relevance_score or 0,
+            published.toordinal() if published else 0,
+            len(item.snippet or ""),
+        )
+
+    @classmethod
+    def _deduplicate_news_results(cls, results: List[SearchResult]) -> List[SearchResult]:
+        """Collapse duplicate URLs/titles while keeping the strongest item."""
+        deduplicated: List[SearchResult] = []
+        best_by_key: Dict[str, Tuple[int, SearchResult]] = {}
+        for item in results:
+            key = cls._news_dedupe_key(item)
+            if not key:
+                deduplicated.append(item)
+                continue
+            existing = best_by_key.get(key)
+            if existing is None:
+                best_by_key[key] = (len(deduplicated), item)
+                deduplicated.append(item)
+                continue
+            index, current = existing
+            if cls._news_result_quality_key(item) > cls._news_result_quality_key(current):
+                deduplicated[index] = item
+                best_by_key[key] = (index, item)
+        return deduplicated
+
+    @staticmethod
     def _elapsed_ms(started_at: float) -> int:
         return max(0, int((time.monotonic() - started_at) * 1000))
 
@@ -4953,7 +5038,7 @@ class SearchService:
         max_results: int = 5,
         focus_keywords: Optional[List[str]] = None,
     ) -> SearchResponse:
-        """Search recent topic/sector news without applying single-stock identity filters."""
+        """Search recent topic/sector news across every active provider."""
         topic_text = (topic or "").strip()
         if not topic_text or not self.is_available:
             return SearchResponse(
@@ -4975,6 +5060,8 @@ class SearchService:
             return cached
 
         had_provider_success = False
+        candidate_responses: List[SearchResponse] = []
+        provider_names: List[str] = []
         try:
             for provider in self._providers_for_query("", topic_text or "", prefer_chinese=prefer_chinese):
                 if not provider.is_available:
@@ -5002,7 +5089,7 @@ class SearchService:
                         error_type=type(exc).__name__,
                         error_message=exc,
                     )
-                    logger.warning("%s 题材搜索失败: %s，尝试下一个引擎", provider.name, exc)
+                    logger.warning("%s 题材搜索失败: %s，继续尝试其他引擎", provider.name, exc)
                     continue
 
                 had_provider_success = had_provider_success or bool(response.success)
@@ -5012,21 +5099,19 @@ class SearchService:
                     max_results=provider_max_results,
                     log_scope=f"{topic_text}:{provider.name}:topic_news",
                 )
-                if filtered.success and filtered.results:
-                    prioritized, _preferred_count = self._prioritize_news_language(
-                        filtered,
-                        prefer_chinese=prefer_chinese,
-                    )
-                    limited = self._limit_search_response(prioritized, max_results=max_results)
+                filtered_count = len(filtered.results or []) if filtered.success else 0
+                if filtered_count:
+                    candidate_responses.append(filtered)
+                    if provider.name not in provider_names:
+                        provider_names.append(provider.name)
                     self._record_news_search_run(
                         provider=provider.name,
                         operation="search_topic_news",
                         success=True,
                         latency_ms=self._elapsed_ms(started_at),
-                        record_count=len(limited.results or []),
+                        record_count=filtered_count,
                     )
-                    self._put_cache(cache_key, limited)
-                    return limited
+                    continue
 
                 self._record_news_search_run(
                     provider=provider.name,
@@ -5037,6 +5122,25 @@ class SearchService:
                     error_type="NoUsableNews",
                     error_message=response.error_message or "过滤后无有效题材新闻",
                 )
+
+            if candidate_responses:
+                combined_results = self._deduplicate_news_results(
+                    [item for response in candidate_responses for item in response.results or []]
+                )
+                combined = SearchResponse(
+                    query=query,
+                    results=combined_results,
+                    provider="+".join(provider_names),
+                    success=True,
+                    search_time=sum(response.search_time or 0.0 for response in candidate_responses),
+                )
+                prioritized, _preferred_count = self._prioritize_news_language(
+                    combined,
+                    prefer_chinese=prefer_chinese,
+                )
+                limited = self._limit_search_response(prioritized, max_results=max_results)
+                self._put_cache(cache_key, limited)
+                return limited
 
             return SearchResponse(
                 query=query,
@@ -5186,22 +5290,9 @@ class SearchService:
         stock_code: str,
         stock_name: str,
         max_results: int = 5,
-        focus_keywords: Optional[List[str]] = None
+        focus_keywords: Optional[List[str]] = None,
     ) -> SearchResponse:
-        """
-        搜索股票相关新闻
-        
-        Args:
-            stock_code: 股票代码
-            stock_name: 股票名称
-            max_results: 最大返回结果数
-            focus_keywords: 重点关注的关键词列表
-            
-        Returns:
-            SearchResponse 对象
-        """
-        # 策略窗口优先：ultra_short/short/medium/long = 1/3/7/30 天，
-        # 并统一受 NEWS_MAX_AGE_DAYS 上限约束。
+        """Search stock news across every active provider and merge the results."""
         search_days = self._effective_news_window_days()
         provider_max_results = self._provider_request_size(max_results)
         prefer_chinese = self._should_prefer_chinese_news(
@@ -5210,36 +5301,21 @@ class SearchService:
             focus_keywords=focus_keywords,
         )
 
-        # 构建搜索查询（优化搜索效果）
         is_foreign = self._is_foreign_stock(stock_code)
-        # Issue #2026: When STOCK_NAME_MAP maps a foreign ticker to a Chinese
-        # display name (e.g. AAPL -> 苹果), the English news search query would
-        # otherwise contain the Chinese name and miss English headlines.
-        # Resolve the canonical English alias (single source of truth:
-        # STOCK_ENGLISH_NAME_MAP in src/data/stock_mapping.py) so the foreign
-        # query path uses a real English company name.
         english_aliases = self._foreign_english_query_terms(stock_code, stock_name)
         effective_name = english_aliases[0] if english_aliases else stock_name
         short_name = english_aliases[-1] if english_aliases else None
-        # Issue #2026: Foreign tickers must bypass prefer_chinese even when the
-        # display name is Chinese (e.g. AAPL -> 苹果), otherwise the foreign
-        # branch below is unreachable and English headlines are missed.
         prefer_chinese = prefer_chinese and not (is_foreign and english_aliases)
         if focus_keywords:
-            # 如果提供了关键词，直接使用关键词作为查询
             query = " ".join(focus_keywords)
         elif prefer_chinese:
             query = f"{stock_name} {stock_code} 股票 最新消息"
         elif is_foreign:
-            # 港股/美股使用英文搜索关键词；优先使用英文公司名（issue #2026）
             if english_aliases and short_name and short_name != effective_name:
-                query = (
-                    f"{effective_name} {short_name} {stock_code} stock latest news"
-                )
+                query = f"{effective_name} {short_name} {stock_code} stock latest news"
             else:
                 query = f"{effective_name} {stock_code} stock latest news"
         else:
-            # 默认主查询：股票名称 + 核心关键词
             query = f"{stock_name} {stock_code} 股票 最新消息"
 
         logger.info(
@@ -5284,6 +5360,7 @@ class SearchService:
                 error_message=cached.error_message,
             )
             return cached
+
         interaction_response = self._search_company_interactions(
             stock_code,
             stock_name,
@@ -5292,10 +5369,9 @@ class SearchService:
         )
 
         try:
-            # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
             had_provider_success = False
-            best_ranked_response: Optional[SearchResponse] = None
-            best_ranked_stats: Optional[Dict[str, int]] = None
+            candidate_responses: List[SearchResponse] = []
+            provider_names: List[str] = []
             for provider in self._providers_for_query(stock_code, stock_name, prefer_chinese=prefer_chinese):
                 if not provider.is_available:
                     continue
@@ -5328,14 +5404,16 @@ class SearchService:
                         error_type=type(exc).__name__,
                         error_message=exc,
                     )
-                    raise
+                    logger.warning("%s 股票新闻搜索失败: %s，继续尝试其他引擎", provider.name, exc)
+                    continue
+
+                had_provider_success = had_provider_success or bool(response.success)
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
                     max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
                 )
-                had_provider_success = had_provider_success or bool(response.success)
 
                 if filtered_response.success and filtered_response.results:
                     language_response, _preferred_count = self._prioritize_news_language(
@@ -5354,15 +5432,11 @@ class SearchService:
                         ranked_response,
                         log_scope=f"{stock_code}:{provider.name}:stock_news",
                     )
-                    limited_response = self._limit_search_response(
-                        admitted_response,
-                        max_results=max_results,
-                    )
-                    admitted_count = len(limited_response.results or [])
+                    admitted_count = len(admitted_response.results or [])
                     self._record_news_search_run(
                         provider=provider.name,
                         operation="search_stock_news",
-                        success=bool(limited_response.success and limited_response.results),
+                        success=bool(admitted_count),
                         latency_ms=self._elapsed_ms(started_at),
                         record_count=admitted_count,
                         error_type=None if admitted_count else "NoUsableNews",
@@ -5370,120 +5444,84 @@ class SearchService:
                             response.error_message or "过滤后无有效新闻"
                         ),
                     )
-                    if not admitted_count:
-                        logger.info(
-                            "%s 搜索成功但准入过滤后无有效新闻，继续尝试下一引擎",
-                            provider.name,
-                        )
-                        continue
-
-                    stats = self._news_relevance_stats(
-                        limited_response,
-                        prefer_chinese=prefer_chinese,
-                    )
-                    if self._is_better_ranked_news_response(
-                        limited_response,
-                        candidate_stats=stats,
-                        best_response=best_ranked_response,
-                        best_stats=best_ranked_stats,
-                        prefer_chinese=prefer_chinese,
-                    ):
-                        best_ranked_response = limited_response
-                        best_ranked_stats = stats
-
-                    if stats["direct_count"] > 0 and (
-                        not prefer_chinese or stats["preferred_direct_count"] > 0
-                    ):
-                        logger.info(
-                            "%s 搜索成功，识别到 %s 条直接个股新闻，优先返回",
-                            provider.name,
-                            stats["direct_count"],
-                        )
-                        merged_response = self._merge_stock_news_with_interactions(
-                            limited_response,
-                            interaction_response,
-                            max_results=max_results,
-                        )
-                        self._put_cache(cache_key, merged_response)
-                        return merged_response
-
-                    if prefer_chinese and stats["direct_count"] > 0:
-                        logger.info(
-                            "%s 搜索成功，识别到 %s 条直接个股新闻但缺少中文直接命中，继续尝试下一引擎",
-                            provider.name,
-                            stats["direct_count"],
-                        )
-                        continue
-
-                    if prefer_chinese and stats["preferred_count"] >= max_results:
-                        logger.info(
-                            "%s 搜索成功，中文结果已满足目标条数但缺少直接个股命中，继续尝试下一引擎",
-                            provider.name,
-                        )
-                        continue
-
-                    if prefer_chinese and stats["preferred_count"] > 0:
-                        logger.info(
-                            "%s 搜索成功，识别到 %s/%s 条中文新闻但缺少直接个股命中，继续尝试下一引擎",
-                            provider.name,
-                            stats["preferred_count"],
-                            len(limited_response.results),
-                        )
+                    if admitted_count:
+                        candidate_responses.append(admitted_response)
+                        if provider.name not in provider_names:
+                            provider_names.append(provider.name)
                     else:
                         logger.info(
-                            "%s 搜索成功但未识别直接个股新闻，继续尝试下一引擎",
+                            "%s 搜索成功但准入过滤后无有效新闻，继续尝试其他引擎",
                             provider.name,
                         )
+                    continue
+
+                filtered_count = len(filtered_response.results or []) if filtered_response.success else 0
+                self._record_news_search_run(
+                    provider=provider.name,
+                    operation="search_stock_news",
+                    success=bool(filtered_count),
+                    latency_ms=self._elapsed_ms(started_at),
+                    record_count=filtered_count,
+                    error_type=None if filtered_count else "NoUsableNews",
+                    error_message=None if filtered_count else (
+                        response.error_message or "过滤后无有效新闻"
+                    ),
+                )
+                if response.success and not filtered_response.results:
+                    logger.info(
+                        "%s 搜索成功但过滤后无有效新闻，继续尝试其他引擎",
+                        provider.name,
+                    )
                 else:
-                    filtered_count = len(filtered_response.results or []) if filtered_response.success else 0
-                    self._record_news_search_run(
-                        provider=provider.name,
-                        operation="search_stock_news",
-                        success=bool(filtered_response.success and filtered_response.results),
-                        latency_ms=self._elapsed_ms(started_at),
-                        record_count=filtered_count,
-                        error_type=None if filtered_count else "NoUsableNews",
-                        error_message=None if filtered_count else (
-                            response.error_message or "过滤后无有效新闻"
-                        ),
+                    logger.warning(
+                        "%s 搜索失败: %s，继续尝试其他引擎",
+                        provider.name,
+                        response.error_message,
                     )
-                    if response.success and not filtered_response.results:
-                        logger.info(
-                            "%s 搜索成功但过滤后无有效新闻，继续尝试下一引擎",
-                            provider.name,
-                        )
-                    else:
-                        logger.warning(
-                            "%s 搜索失败: %s，尝试下一个引擎",
-                            provider.name,
-                            response.error_message,
-                        )
 
-            if best_ranked_response is not None:
-                merged_response = self._merge_stock_news_with_interactions(
-                    best_ranked_response,
-                    interaction_response,
+            if candidate_responses:
+                combined_results = self._deduplicate_news_results(
+                    [item for response in candidate_responses for item in response.results or []]
+                )
+                combined = SearchResponse(
+                    query=query,
+                    results=combined_results,
+                    provider="+".join(provider_names),
+                    success=True,
+                    search_time=sum(response.search_time or 0.0 for response in candidate_responses),
+                )
+                ranked_combined = self._rank_news_response(
+                    combined,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    prefer_chinese=prefer_chinese,
+                    max_results=max(provider_max_results, len(combined_results)),
+                    log_scope=f"{stock_code}:aggregate:stock_news",
+                )
+                admitted_combined = self._filter_ranked_news_for_context(
+                    ranked_combined,
+                    log_scope=f"{stock_code}:aggregate:stock_news",
+                )
+                limited_response = self._limit_search_response(
+                    admitted_combined,
                     max_results=max_results,
                 )
-                self._put_cache(cache_key, merged_response)
-                return merged_response
+                if limited_response.results:
+                    merged_response = self._merge_stock_news_with_interactions(
+                        limited_response,
+                        interaction_response,
+                        max_results=max_results,
+                    )
+                    self._put_cache(cache_key, merged_response)
+                    return merged_response
 
-            if had_provider_success:
-                empty_response = SearchResponse(
-                    query=query,
-                    results=[],
-                    provider="Filtered",
-                    success=True,
-                    error_message=None,
-                )
-            else:
-                empty_response = SearchResponse(
-                    query=query,
-                    results=[],
-                    provider="None",
-                    success=False,
-                    error_message="所有搜索引擎都不可用或搜索失败",
-                )
+            empty_response = SearchResponse(
+                query=query,
+                results=[],
+                provider="Filtered" if had_provider_success else "None",
+                success=had_provider_success,
+                error_message=None if had_provider_success else "所有搜索引擎都不可用或搜索失败",
+            )
             merged_response = self._merge_stock_news_with_interactions(
                 empty_response,
                 interaction_response,

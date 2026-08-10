@@ -35,7 +35,7 @@ def _result(
     return SearchResult(
         title=title,
         snippet=snippet,
-        url=url or f"https://example.com/{title}",
+        url=url if url is not None else f"https://example.com/{title}",
         source=source,
         published_date=published_date,
     )
@@ -183,6 +183,188 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p1.search.assert_called_once()
         p2.search.assert_called_once()
 
+    def test_search_stock_news_aggregates_all_active_providers_and_deduplicates(self) -> None:
+        """Every active provider contributes once; duplicate URLs collapse globally."""
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        p1 = SimpleNamespace(
+            is_available=True,
+            name="P1",
+            search=MagicMock(
+                return_value=_response(
+                    [
+                        _result(
+                            "贵州茅台 600519 发布回购公告",
+                            fresh,
+                            url="https://news.example.invalid/repurchase?utm_source=p1",
+                        )
+                    ]
+                )
+            ),
+        )
+        p2 = SimpleNamespace(
+            is_available=True,
+            name="P2",
+            search=MagicMock(
+                return_value=_response(
+                    [
+                        _result(
+                            "贵州茅台 600519 发布回购公告",
+                            fresh,
+                            url="https://news.example.invalid/repurchase?utm_source=p2",
+                        ),
+                        _result(
+                            "贵州茅台 600519 获得新订单",
+                            fresh,
+                            url="https://news.example.invalid/order?utm_source=p2",
+                        ),
+                    ]
+                )
+            ),
+        )
+        p3 = SimpleNamespace(
+            is_available=True,
+            name="P3",
+            search=MagicMock(
+                return_value=_response(
+                    [
+                        _result(
+                            "贵州茅台 600519 董事会审议分红",
+                            fresh,
+                            url="https://news.example.invalid/dividend?utm_source=p3",
+                        )
+                    ]
+                )
+            ),
+        )
+        service._providers = [p1, p2, p3]
+
+        response = service.search_stock_news("600519", "贵州茅台", max_results=5)
+
+        self.assertTrue(response.success)
+        self.assertEqual(len(response.results), 3)
+        self.assertEqual(
+            {item.title for item in response.results},
+            {
+                "贵州茅台 600519 发布回购公告",
+                "贵州茅台 600519 获得新订单",
+                "贵州茅台 600519 董事会审议分红",
+            },
+        )
+        self.assertEqual(response.provider, "P1+P2+P3")
+        p1.search.assert_called_once()
+        p2.search.assert_called_once()
+        p3.search.assert_called_once()
+
+    def test_search_stock_news_deduplicates_url_less_titles_on_same_day(self) -> None:
+        """URL-less provider results use normalized title plus publication date."""
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        p1 = SimpleNamespace(
+            is_available=True,
+            name="P1",
+            search=MagicMock(
+                return_value=_response([_result("贵州茅台：发布回购公告", fresh, url="")])
+            ),
+        )
+        p2 = SimpleNamespace(
+            is_available=True,
+            name="P2",
+            search=MagicMock(
+                return_value=_response([_result("贵州茅台 发布回购公告", fresh, url="")])
+            ),
+        )
+        service._providers = [p1, p2]
+
+        response = service.search_stock_news("600519", "贵州茅台", max_results=3)
+
+        self.assertEqual(len(response.results), 1)
+        self.assertEqual(response.results[0].title, "贵州茅台：发布回购公告")
+        p1.search.assert_called_once()
+        p2.search.assert_called_once()
+
+    def test_search_stock_news_continues_after_provider_exception(self) -> None:
+        """One provider failure must not discard results from later providers."""
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        failed = SimpleNamespace(
+            is_available=True,
+            name="Failed",
+            search=MagicMock(side_effect=RuntimeError("provider down")),
+        )
+        healthy = SimpleNamespace(
+            is_available=True,
+            name="Healthy",
+            search=MagicMock(return_value=_response([_result("贵州茅台最新公告", fresh)])),
+        )
+        service._providers = [failed, healthy]
+
+        response = service.search_stock_news("600519", "贵州茅台", max_results=3)
+
+        self.assertTrue(response.success)
+        self.assertEqual([item.title for item in response.results], ["贵州茅台最新公告"])
+        failed.search.assert_called_once()
+        healthy.search.assert_called_once()
+
+    def test_search_topic_news_aggregates_all_active_providers_and_deduplicates(self) -> None:
+        """Topic news uses the same all-provider coverage rule as stock news."""
+        fresh = datetime.now().date().isoformat()
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        p1 = SimpleNamespace(
+            is_available=True,
+            name="TopicP1",
+            search=MagicMock(
+                return_value=_response(
+                    [_result("影视传媒政策催化", fresh, url="https://topic.example.invalid/a?utm_source=p1")]
+                )
+            ),
+        )
+        p2 = SimpleNamespace(
+            is_available=True,
+            name="TopicP2",
+            search=MagicMock(
+                return_value=_response(
+                    [
+                        _result("影视传媒政策催化", fresh, url="https://topic.example.invalid/a?utm_source=p2"),
+                        _result("影视传媒订单增长", fresh, url="https://topic.example.invalid/b?utm_source=p2"),
+                    ]
+                )
+            ),
+        )
+        service._providers = [p1, p2]
+
+        response = service.search_topic_news("影视传媒", max_results=5)
+
+        self.assertTrue(response.success)
+        self.assertEqual(len(response.results), 2)
+        self.assertEqual(
+            {item.title for item in response.results},
+            {"影视传媒政策催化", "影视传媒订单增长"},
+        )
+        self.assertEqual(response.provider, "TopicP1+TopicP2")
+        p1.search.assert_called_once()
+        p2.search.assert_called_once()
+
     def test_search_stock_news_records_provider_diagnostics_for_fallback(self) -> None:
         """News search provider attempts should appear in run-flow diagnostics."""
         today = datetime.now().date()
@@ -257,7 +439,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         service._providers = [p1, p2]
 
         resp = service.search_stock_news("600519", "贵州茅台", max_results=3)
-        self.assertEqual([r.title for r in resp.results], ["中文资讯"])
+        self.assertEqual(resp.results[0].title, "中文资讯")
+        self.assertIn("English headline", [item.title for item in resp.results])
         p1.search.assert_called_once()
         p2.search.assert_called_once()
 
@@ -439,7 +622,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         resp = service.search_stock_news("AAPL", "Apple", max_results=3)
         self.assertEqual([r.title for r in resp.results], ["Apple earnings beat"])
         p1.search.assert_called_once()
-        p2.search.assert_not_called()
+        p2.search.assert_called_once()
 
     def test_a_share_direct_company_news_beats_sector_provider_fallback(self) -> None:
         """A-share direct company hits should beat generic sector news from earlier providers."""
