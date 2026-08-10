@@ -81,6 +81,70 @@ def test_unsupported_temperature_error_retries_once_and_caches_recovery() -> Non
     assert "temperature" not in future_kwargs
 
 
+def test_unsupported_reasoning_effort_retries_once_and_caches_recovery() -> None:
+    clear_litellm_generation_param_recovery_cache()
+    calls = []
+
+    def _call(kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise RuntimeError("Unsupported parameter: reasoning_effort is not supported")
+        return "ok"
+
+    call_kwargs = {
+        "model": "openai/reasoning-route",
+        "messages": [],
+        "api_base": "https://strict.example/v1",
+        "reasoning_effort": "high",
+    }
+    result = call_litellm_with_param_recovery(
+        _call,
+        model="openai/reasoning-route",
+        call_kwargs=call_kwargs,
+    )
+    future_kwargs = apply_litellm_generation_params(
+        {"model": "openai/reasoning-route", "messages": [], "api_base": "https://strict.example/v1"},
+        "openai/reasoning-route",
+        0.7,
+        request_overrides={"reasoning_effort": "high"},
+    )
+
+    assert result == "ok"
+    assert calls[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in calls[1]
+    assert "reasoning_effort" not in future_kwargs
+
+
+def test_reasoning_effort_recovery_cache_is_scoped_to_effort() -> None:
+    clear_litellm_generation_param_recovery_cache()
+    calls = []
+
+    def _call(kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise RuntimeError("Unsupported parameter: reasoning_effort is not supported")
+        return "ok"
+
+    call_litellm_with_param_recovery(
+        _call,
+        model="openai/reasoning-route",
+        call_kwargs={
+            "model": "openai/reasoning-route",
+            "messages": [],
+            "api_base": "https://strict.example/v1",
+            "reasoning_effort": "high",
+        },
+    )
+    low_kwargs = apply_litellm_generation_params(
+        {"model": "openai/reasoning-route", "messages": [], "api_base": "https://strict.example/v1"},
+        "openai/reasoning-route",
+        0.7,
+        request_overrides={"reasoning_effort": "low"},
+    )
+
+    assert low_kwargs["reasoning_effort"] == "low"
+
+
 def test_recovery_cache_is_scoped_to_api_base() -> None:
     clear_litellm_generation_param_recovery_cache()
     calls = []

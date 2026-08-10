@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+logger = logging.getLogger(__name__)
 
 # Kimi K2.6 is consumed through Moonshot's OpenAI-compatible API in this
 # repository. Official references:
@@ -21,6 +24,61 @@ _FIXED_TEMPERATURE_LITELLM_MODELS: Dict[str, Dict[str, float]] = {
         "non_thinking": 0.6,
     },
 }
+
+# OpenAI reasoning models currently expose these effort labels. ``max`` is
+# retained for compatible gateways that advertise it as a provider extension.
+LITELLM_REASONING_EFFORT_VALUES = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+
+def normalize_litellm_reasoning_effort(value: Any) -> Optional[str]:
+    """Return a supported reasoning effort label or ``None``."""
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized or normalized not in LITELLM_REASONING_EFFORT_VALUES:
+        return None
+    return normalized
+
+
+def parse_litellm_reasoning_efforts(value: Any) -> Dict[str, str]:
+    """Parse exact provider-prefixed route aliases to effort labels."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            logger.warning("LLM_REASONING_EFFORTS_JSON is invalid JSON; ignored")
+            return {}
+    if not isinstance(value, Mapping):
+        logger.warning("LLM_REASONING_EFFORTS_JSON must be a JSON object; ignored")
+        return {}
+
+    parsed: Dict[str, str] = {}
+    for raw_model, raw_effort in value.items():
+        model = str(raw_model).strip()
+        if not model or "/" not in model:
+            logger.warning(
+                "LLM_REASONING_EFFORTS_JSON key %r must be an exact provider-prefixed route alias; ignored",
+                raw_model,
+            )
+            continue
+        effort = normalize_litellm_reasoning_effort(raw_effort)
+        if effort is None:
+            logger.warning(
+                "LLM_REASONING_EFFORTS_JSON value for %s is unsupported; allowed values: %s",
+                model,
+                ", ".join(sorted(LITELLM_REASONING_EFFORT_VALUES)),
+            )
+            continue
+        parsed[model] = effort
+    return parsed
+
 
 
 @dataclass(frozen=True)
@@ -121,6 +179,97 @@ def resolve_litellm_wire_model(
     if wire_model:
         return wire_model
     return normalized_model
+
+
+def _extract_reasoning_effort_value(payload: Any) -> Any:
+    if isinstance(payload, Mapping) and "reasoning_effort" in payload:
+        return payload.get("reasoning_effort")
+    return None
+
+
+def _model_list_reasoning_effort(entry: Mapping[str, Any]) -> Optional[str]:
+    """Read DSA metadata first, then tolerate an unsanitized YAML parameter."""
+    model_info = entry.get("model_info")
+    if isinstance(model_info, Mapping):
+        for key in ("dsa_reasoning_effort", "reasoning_effort"):
+            if key not in model_info:
+                continue
+            normalized = normalize_litellm_reasoning_effort(model_info.get(key))
+            if normalized is not None:
+                return normalized
+
+    params = entry.get("litellm_params")
+    if isinstance(params, Mapping):
+        normalized = normalize_litellm_reasoning_effort(params.get("reasoning_effort"))
+        if normalized is not None:
+            return normalized
+
+    normalized = normalize_litellm_reasoning_effort(entry.get("reasoning_effort"))
+    return normalized
+
+
+def resolve_litellm_reasoning_effort(
+    model: str,
+    model_list: Optional[List[Dict[str, Any]]] = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve one model's reasoning effort without coupling it to a channel."""
+    request_value = _extract_reasoning_effort_value(request_overrides)
+    normalized_request_value = normalize_litellm_reasoning_effort(request_value)
+    if normalized_request_value is not None:
+        return normalized_request_value
+
+    for entry in _resolve_litellm_model_list_entries(model, model_list):
+        effort = _model_list_reasoning_effort(entry)
+        if effort is not None:
+            return effort
+
+    normalized_model = (model or "").strip()
+    mapped_effort = parse_litellm_reasoning_efforts(os.getenv("LLM_REASONING_EFFORTS_JSON")).get(normalized_model)
+    if mapped_effort is not None:
+        return mapped_effort
+    return normalize_litellm_reasoning_effort(os.getenv("LLM_REASONING_EFFORT"))
+
+
+def _provider_from_wire_model(model: str) -> str:
+    normalized = (model or "").strip().lower()
+    if not normalized or "/" not in normalized:
+        return "openai"
+    return normalized.split("/", 1)[0]
+
+
+def _resolve_litellm_protocol(
+    model: str,
+    model_list: Optional[List[Dict[str, Any]]] = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve the DSA channel protocol for request-parameter gating."""
+    entries = _resolve_litellm_model_list_entries(model, model_list)
+    if entries:
+        entry = entries[0]
+        model_info = entry.get("model_info")
+        if isinstance(model_info, Mapping):
+            explicit_protocol = str(model_info.get("dsa_protocol") or "").strip().lower()
+            if explicit_protocol:
+                return explicit_protocol
+        params = entry.get("litellm_params")
+        if isinstance(params, Mapping):
+            custom_provider = str(params.get("custom_llm_provider") or "").strip().lower()
+            if custom_provider:
+                return custom_provider
+            wire_model = str(params.get("model") or "").strip()
+            if wire_model:
+                return _provider_from_wire_model(wire_model)
+
+    if isinstance(request_overrides, Mapping):
+        custom_provider = str(request_overrides.get("custom_llm_provider") or "").strip().lower()
+        if custom_provider:
+            return custom_provider
+        override_model = str(request_overrides.get("model") or "").strip()
+        if override_model:
+            return _provider_from_wire_model(override_model)
+    return _provider_from_wire_model(model)
+
 
 
 def _extract_thinking_config(payload: Optional[Dict[str, Any]]) -> Any:
@@ -341,6 +490,11 @@ def _recovery_cache_key(
         model_list=model_list,
         request_overrides=request_overrides,
     )
+    reasoning_effort = resolve_litellm_reasoning_effort(
+        model,
+        model_list=model_list,
+        request_overrides=request_overrides,
+    )
     endpoint_scope = _request_endpoint_cache_scope(request_overrides)
     if endpoint_scope is None:
         endpoint_scope = _model_list_endpoint_cache_scope(model, model_list)
@@ -349,6 +503,7 @@ def _recovery_cache_key(
     return (
         f"{wire_model or (model or '').strip().lower()}"
         f"|thinking={thinking_enabled}"
+        f"|reasoning={reasoning_effort}"
         f"|endpoint={endpoint_scope}"
     )
 
@@ -429,6 +584,19 @@ def apply_litellm_generation_params(
         updated["temperature"] = directive.temperature
     else:
         updated["temperature"] = default_temperature if temperature is None else float(temperature)
+    reasoning_effort = resolve_litellm_reasoning_effort(
+        model,
+        model_list=model_list,
+        request_overrides=effective_overrides,
+    )
+    if reasoning_effort is not None and _resolve_litellm_protocol(
+        model,
+        model_list=model_list,
+        request_overrides=effective_overrides,
+    ) == "openai":
+        updated["reasoning_effort"] = reasoning_effort
+    else:
+        updated.pop("reasoning_effort", None)
     cached_recovery = get_cached_litellm_generation_param_recovery(
         model,
         model_list=model_list,

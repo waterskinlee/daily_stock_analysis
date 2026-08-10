@@ -316,6 +316,31 @@ AGENT_CONTEXT_PROTECTED_TURNS=
 
 问股 single-agent 路径会额外维护一条 provider-aware trace 分轨，用于 DeepSeek V4 thinking + tool-call 的跨轮协议回放：只有同一轮同时出现 `tool_calls` 与 `reasoning_content` 时才会按当前 `session_id + provider + model` 保存最近 3 条最小协议材料，并在下一轮按原始时序插回对应可见 assistant 回复之前。该 trace 只能原样保留或整段丢弃，不参与摘要、不写入 Web 会话消息、不新增 `.env` 配置；model/provider 不匹配、锚点已被 summary 覆盖或预算不足时会整段跳过。Claude extended thinking 本轮只覆盖 adapter/storage 级 opaque `thinking` / `redacted_thinking` / `signature` blocks plumbing 与离线 fixture，不声明生产端到端支持；multi-agent trace 注入仍是 follow-up。外部协议依据包括 DeepSeek thinking mode 文档（<https://api-docs.deepseek.com/guides/thinking_mode>）和 Anthropic Claude extended thinking 文档（<https://platform.claude.com/docs/en/docs/build-with-claude/extended-thinking>），LiteLLM 兼容窗口仍以 `requirements.txt` 的 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0` 为准。
 
+### Reasoning Effort 按模型配置
+
+`reasoning_effort` 不是渠道级固定开关，而是请求参数：全局值只做默认兜底，每个模型 route alias 可以单独覆盖。
+
+```env
+# 留空：不显式发送，使用模型或网关默认值
+LLM_REASONING_EFFORT=
+# 全局兜底
+LLM_REASONING_EFFORT=medium
+# 精确 provider/model route alias；键必须带 provider 前缀
+LLM_REASONING_EFFORTS_JSON={"openai/gpt-5.6-sol":"xhigh","openai/gpt-5.6-terra":"medium"}
+```
+
+解析优先级（高到低）：请求显式覆盖 → `model_list[].model_info.dsa_reasoning_effort` → `LLM_REASONING_EFFORTS_JSON` 精确 route alias → `LLM_REASONING_EFFORT` → 不发送。支持值为 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；非法值会被忽略并回退，不会透传成未知 LiteLLM 参数。只有 `protocol=openai` 的请求发送顶层 `reasoning_effort`，Responses API 由 LiteLLM 映射到 `reasoning.effort`；DeepSeek、Anthropic、Gemini、Ollama 等协议继续走各自的 thinking 配置。
+
+LiteLLM YAML 可以在单个部署中写入 `litellm_params.reasoning_effort`。DSA 解析时会把它移到 `model_info.dsa_reasoning_effort`，避免 Router 把它当作渠道固定默认；请求层仍按上述优先级生成最终参数：
+
+```yaml
+model_list:
+  - model_name: openai/gpt-5.6-sol
+    litellm_params:
+      model: openai/responses/gpt-5.6-sol
+      reasoning_effort: xhigh
+```
+
 ### 严格 temperature 模型兼容说明
 
 - Moonshot 官方说明 Kimi API 兼容 OpenAI 接口，Base URL 使用 `https://api.moonshot.ai/v1`：<https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart>
@@ -465,7 +490,7 @@ model_list:
 
 渠道模式无需上传 YAML 文件。仓库自带 `00-daily-analysis.yml` 已显式透传以下常用字段：
 
-- 运行时选择：`GENERATION_BACKEND`、`GENERATION_FALLBACK_BACKEND`、`GENERATION_BACKEND_TIMEOUT_SECONDS`、`GENERATION_BACKEND_MAX_OUTPUT_BYTES`、`GENERATION_BACKEND_MAX_CONCURRENCY`、`LOCAL_CLI_BACKEND_MAX_CONCURRENCY`、`AGENT_GENERATION_BACKEND`、`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`、`LLM_PROMPT_CACHE_TELEMETRY_ENABLED`、`LLM_PROMPT_CACHE_HINTS_ENABLED`、`LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
+- 运行时选择：`GENERATION_BACKEND`、`GENERATION_FALLBACK_BACKEND`、`GENERATION_BACKEND_TIMEOUT_SECONDS`、`GENERATION_BACKEND_MAX_OUTPUT_BYTES`、`GENERATION_BACKEND_MAX_CONCURRENCY`、`LOCAL_CLI_BACKEND_MAX_CONCURRENCY`、`AGENT_GENERATION_BACKEND`、`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_REASONING_EFFORT`、`LLM_REASONING_EFFORTS_JSON`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`、`LLM_PROMPT_CACHE_TELEMETRY_ENABLED`、`LLM_PROMPT_CACHE_HINTS_ENABLED`、`LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - 多 Key：`GEMINI_API_KEYS`、`ANTHROPIC_API_KEYS`、`OPENAI_API_KEYS`、`DEEPSEEK_API_KEYS`（当前 workflow 仅从 repository secrets 导入，不会读取同名 Variables）
 - 常用渠道名：`primary`、`secondary`、`aihubmix`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`gemini`、`anthropic`、`openai`、`ollama`
 

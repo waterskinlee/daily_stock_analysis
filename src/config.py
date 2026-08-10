@@ -672,6 +672,19 @@ def resolve_litellm_thinking_enabled(
     )
 
 
+def resolve_litellm_reasoning_effort(
+    model: str,
+    model_list: Optional[List[Dict[str, Any]]] = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve the request-scoped reasoning effort for one model route."""
+    return llm_generation_params.resolve_litellm_reasoning_effort(
+        model,
+        model_list=model_list,
+        request_overrides=request_overrides,
+    )
+
+
 def get_fixed_litellm_temperature(
     model: str,
     model_list: Optional[List[Dict[str, Any]]] = None,
@@ -906,6 +919,10 @@ class Config:
     # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-3.1-pro-preview)
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
     litellm_fallback_models: List[str] = field(default_factory=list)  # Cross-model fallback list
+
+    # Global reasoning effort default; per-model overrides live in LLM_REASONING_EFFORTS_JSON.
+    llm_reasoning_effort: str = ""
+    llm_reasoning_efforts: Dict[str, str] = field(default_factory=dict)
 
     # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
     llm_temperature: float = 0.7
@@ -1523,6 +1540,21 @@ class Config:
         else:
             litellm_fallback_models = []
 
+        llm_reasoning_effort_raw = os.getenv("LLM_REASONING_EFFORT", "")
+        llm_reasoning_effort = llm_generation_params.normalize_litellm_reasoning_effort(
+            llm_reasoning_effort_raw
+        ) or ""
+        if llm_reasoning_effort_raw.strip() and not llm_reasoning_effort:
+            logger.warning(
+                "LLM_REASONING_EFFORT=%r is unsupported; allowed values: %s; falling back to no explicit effort",
+                llm_reasoning_effort_raw,
+                ", ".join(sorted(llm_generation_params.LITELLM_REASONING_EFFORT_VALUES)),
+            )
+        llm_reasoning_efforts = llm_generation_params.parse_litellm_reasoning_efforts(
+            os.getenv("LLM_REASONING_EFFORTS_JSON")
+        )
+
+
         # === LLM Channels + YAML config ===
         litellm_config_path = os.getenv('LITELLM_CONFIG', '').strip() or None
         llm_models_source = "legacy_env"
@@ -1555,7 +1587,10 @@ class Config:
                     llm_blocked_hermes_routes,
                 ) = cls._parse_llm_channels_with_issues(_channels_str)
                 llm_channel_config_issues = [issue.as_dict() for issue in hermes_issues]
-                llm_model_list = cls._channels_to_model_list(llm_channels)
+                llm_model_list = cls._channels_to_model_list(
+                    llm_channels,
+                    reasoning_efforts=llm_reasoning_efforts,
+                )
                 if llm_model_list:
                     llm_models_source = "llm_channels"
 
@@ -1839,6 +1874,8 @@ class Config:
             opencode_cli_model=opencode_cli_model,
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
+            llm_reasoning_effort=llm_reasoning_effort,
+            llm_reasoning_efforts=llm_reasoning_efforts,
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
             litellm_config_path=litellm_config_path,
             llm_models_source=llm_models_source,
@@ -2333,7 +2370,8 @@ class Config:
             _logger.warning("LITELLM_CONFIG: model_list must be a list")
             return []
 
-        # Resolve os.environ/ references in string params
+        # Resolve os.environ/ references, then move reasoning_effort out of
+        # litellm_params so LiteLLM Router cannot inject it a second time.
         for entry in model_list:
             params = entry.get('litellm_params', {})
             for key in list(params.keys()):
@@ -2342,6 +2380,23 @@ class Config:
                     env_name = val.split('/', 1)[1]
                     params[key] = os.getenv(env_name, '')
 
+            raw_reasoning_effort = params.pop("reasoning_effort", None)
+            if raw_reasoning_effort is None or not str(raw_reasoning_effort).strip():
+                continue
+            reasoning_effort = llm_generation_params.normalize_litellm_reasoning_effort(
+                raw_reasoning_effort
+            )
+            if reasoning_effort is None:
+                _logger.warning(
+                    "LITELLM_CONFIG reasoning_effort for %s is unsupported; ignored",
+                    entry.get("model_name") or params.get("model") or "<unknown>",
+                )
+                continue
+            model_info = entry.get("model_info")
+            if not isinstance(model_info, dict):
+                model_info = {}
+            model_info["dsa_reasoning_effort"] = reasoning_effort
+            entry["model_info"] = model_info
         _logger.info(f"LITELLM_CONFIG: loaded {len(model_list)} model deployment(s) from {path}")
         return model_list
 
@@ -2597,7 +2652,11 @@ class Config:
         return channels, issues, blocks_legacy_fallback, blocked_hermes_routes
 
     @classmethod
-    def _channels_to_model_list(cls, channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _channels_to_model_list(
+        cls,
+        channels: List[Dict[str, Any]],
+        reasoning_efforts: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Convert parsed LLM channels to LiteLLM Router model_list format.
 
         Mapping follows:
@@ -2641,12 +2700,26 @@ class Config:
                         'model_name': model_name,
                         'litellm_params': litellm_params,
                     }
+                    model_info: Dict[str, Any] = {}
                     if ch.get("is_hermes") or is_reserved_hermes_name(str(ch.get("name") or "")):
-                        entry["model_info"] = hermes_model_info(
+                        model_info = hermes_model_info(
                             str((model_ref or {}).get("display_model") or "")
                         )
-                    elif api_surface == "responses":
-                        entry["model_info"] = {"dsa_api_surface": "responses"}
+                    else:
+                        model_info = {
+                            "dsa_protocol": str(ch.get("protocol") or "").strip().lower(),
+                        }
+                        if api_surface == "responses":
+                            model_info["dsa_api_surface"] = "responses"
+
+                    if reasoning_efforts:
+                        effort = llm_generation_params.normalize_litellm_reasoning_effort(
+                            reasoning_efforts.get(str(model_name))
+                        )
+                        if effort is not None:
+                            model_info["dsa_reasoning_effort"] = effort
+                    if model_info:
+                        entry["model_info"] = model_info
                     model_list.append(entry)
         return model_list
 

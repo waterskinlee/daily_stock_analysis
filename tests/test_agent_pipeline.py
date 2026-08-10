@@ -2861,6 +2861,57 @@ class TestAgentConstructionChain(unittest.TestCase):
         self.assertNotIn("temperature", mock_completion.call_args.kwargs)
 
     @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_applies_model_reasoning_effort(self, _mock_router):
+        """Agent requests should read per-model effort from Router metadata."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/gpt-5.6-sol",
+            litellm_fallback_models=[],
+            llm_model_list=[
+                {
+                    "model_name": "openai/gpt-5.6-sol",
+                    "litellm_params": {"model": "openai/gpt-5.6-sol"},
+                    "model_info": {
+                        "dsa_protocol": "openai",
+                        "dsa_reasoning_effort": "xhigh",
+                    },
+                }
+            ],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "openai/gpt-5.6-sol",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args.kwargs["reasoning_effort"], "xhigh")
+
+    @patch("src.agent.llm_adapter.Router")
     def test_llm_adapter_recovers_from_unsupported_temperature(self, _mock_router):
         """Agent direct LiteLLM calls should retry once with a request-scoped parameter repair."""
         from src.llm.generation_params import clear_litellm_generation_param_recovery_cache

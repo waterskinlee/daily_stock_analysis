@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] EastmoneyData 资讯搜索不再只读取接口排名靠前的 10 条混序结果：扩大到 100 条后按时间倒序执行时效过滤；名称查询无近期命中时再用 6 位股票代码精确回退，修复热门 A 股（如 002475）被误报“无匹配结果”。
 - [改进] 个股与题材新闻搜索由“首个来源有结果即停止”改为遍历全部已启用来源后统一聚合：跨源结果按规范化 URL（忽略常见跟踪参数）或无链接标题与发布日期去重，复用现有时效、语言和个股相关度规则全局排序后再按 `max_results` 截断；单源异常继续 fail-open，不再因东财等渠道仅返回 1 条而跳过后续免费资讯源。
 - [新功能] A 股新闻上下文新增巨潮互动易公司回复（`CNINFO_IRM_ENABLED=true`，免费无 key）：先按股票代码解析 `orgId`，只准入时效窗口内已有公司回复的问答，未回复提问不作为事实依据；常规新闻存在时保留新闻并预留公司回复位置，无常规搜索源时可独立提供公司互动上下文。分析管线与大盘复盘现会完整透传同花顺、东财、新浪及互动易免费源开关。
+- [新功能] LiteLLM reasoning effort 支持全局默认与按模型 route alias 覆盖：新增 `LLM_REASONING_EFFORT` / `LLM_REASONING_EFFORTS_JSON`，YAML 单部署值移入 `model_info`，仅 OpenAI protocol 请求发送规范化参数，非法值静默回退。
 - [新功能] 资金上下文新增同花顺热榜、东财人气榜与个股热门概念命中：按代码输出双榜名次/变化、人气值、概念标签、TOP5 热股与来源链，60 秒缓存市场榜和个股概念，单源异常 fail-open；同步暴露给 Agent `get_capital_flow` 与分析提示词，并明确热度仅用于短线拥挤度过滤，不得作为独立买入信号。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
 - [新功能] 基本面管线新增「限售解禁」块（东财 datacenter 直连，免费无 key）：按代码返回近 180 天历史解禁与未来 90 天待解禁（类型/数量/占比），聚合进 `fundamental_context.lockup` 与 coverage，A 股适用、ETF/离岸标记 `not_supported`、全程 fail-open（移植自 tradingagents-astock，Apache-2.0，保留归因）。

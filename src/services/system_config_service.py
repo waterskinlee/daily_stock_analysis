@@ -141,6 +141,8 @@ class SystemConfigService:
         "LITELLM_CONFIG",
         "LITELLM_MODEL",
         "LITELLM_FALLBACK_MODELS",
+        "LLM_REASONING_EFFORT",
+        "LLM_REASONING_EFFORTS_JSON",
         "GEMINI_API_KEY",
         "GEMINI_API_KEYS",
         "GEMINI_MODEL",
@@ -1316,6 +1318,13 @@ class SystemConfigService:
         if is_reserved_hermes_name(channel_name):
             resolved_model = canonicalize_hermes_model_ref(raw_models[0]).wire_model
         wire_model = apply_litellm_api_surface(resolved_model, resolved_api_surface)
+        request_model_list = [
+            {
+                "model_name": resolved_model,
+                "litellm_params": {"model": wire_model},
+                "model_info": {"dsa_protocol": resolved_protocol},
+            }
+        ]
         api_keys = [segment.strip() for segment in api_key.split(",") if segment.strip()]
         selected_api_key = api_keys[0] if api_keys else ""
         redaction_values.update(self._build_redaction_values(selected_api_key))
@@ -1332,8 +1341,9 @@ class SystemConfigService:
             call_kwargs["api_base"] = base_url.strip()
         call_kwargs = apply_litellm_generation_params(
             call_kwargs,
-            wire_model,
+            resolved_model,
             self._get_runtime_llm_temperature(),
+            model_list=request_model_list,
         )
 
         try:
@@ -1368,16 +1378,18 @@ class SystemConfigService:
                     hermes_call_kwargs.pop("api_base", None)
                     response = call_litellm_with_param_recovery(
                         lambda kwargs: litellm.completion(**kwargs),
-                        model=wire_model,
+                        model=resolved_model,
                         call_kwargs=hermes_call_kwargs,
+                        model_list=request_model_list,
                         logger=logger,
                         log_label="[Hermes channel test]",
                     )
             else:
                 response = call_litellm_with_param_recovery(
                     lambda kwargs: litellm.completion(**kwargs),
-                    model=wire_model,
+                    model=resolved_model,
                     call_kwargs=call_kwargs,
+                    model_list=request_model_list,
                     logger=logger,
                     log_label="[LLM channel test]",
                 )

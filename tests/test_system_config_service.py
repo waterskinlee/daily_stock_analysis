@@ -3399,6 +3399,35 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["resolved_model"], "openai/kimi-k2.6")
         self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
 
+    @patch.dict(
+        os.environ,
+        {
+            "LLM_REASONING_EFFORT": "medium",
+            "LLM_REASONING_EFFORTS_JSON": '{"openai/gpt-5.6-sol":"xhigh"}',
+        },
+        clear=False,
+    )
+    @patch("litellm.completion")
+    def test_test_llm_channel_applies_per_model_reasoning_effort(self, mock_completion) -> None:
+        mock_completion.return_value = type(
+            "MockResponse",
+            (),
+            {
+                "choices": [type("Choice", (), {"message": type("Message", (), {"content": "OK"})()})()],
+            },
+        )()
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-5.6-sol"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_completion.call_args.kwargs["reasoning_effort"], "xhigh")
+
     def test_update_switching_to_kimi_does_not_rewrite_saved_llm_temperature(self) -> None:
         self._rewrite_env(
             "LITELLM_MODEL=openai/gpt-4o-mini",

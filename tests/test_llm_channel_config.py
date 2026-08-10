@@ -2,6 +2,7 @@
 """Tests for env-based LLM channel parsing."""
 
 import os
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -24,6 +25,9 @@ from src.llm.backend_registry import GENERATION_ONLY_BACKEND_IDS
 from src.llm.hermes import open_hermes_no_proxy_client, parse_hermes_channel, route_has_hermes
 from src.llm.generation_params import (
     apply_litellm_generation_params,
+    normalize_litellm_reasoning_effort,
+    parse_litellm_reasoning_efforts,
+    resolve_litellm_reasoning_effort,
     resolve_litellm_temperature_directive,
 )
 from src.services.system_config_service import SystemConfigService
@@ -1445,6 +1449,180 @@ class LLMChannelConfigTestCase(unittest.TestCase):
 
         self.assertTrue(directive.omit_temperature)
         self.assertNotIn("temperature", call_kwargs)
+
+    def test_reasoning_effort_prefers_request_override_then_model_metadata(self) -> None:
+        model_list = [
+            {
+                "model_name": "openai/gpt-5.6-sol",
+                "litellm_params": {"model": "openai/responses/gpt-5.6-sol"},
+                "model_info": {"dsa_reasoning_effort": "high"},
+            }
+        ]
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_REASONING_EFFORT": "medium",
+                "LLM_REASONING_EFFORTS_JSON": '{"openai/gpt-5.6-sol":"low"}',
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_litellm_reasoning_effort("openai/gpt-5.6-sol", model_list=model_list),
+                "high",
+            )
+            self.assertEqual(
+                resolve_litellm_reasoning_effort(
+                    "openai/gpt-5.6-sol",
+                    model_list=model_list,
+                    request_overrides={"reasoning_effort": "low"},
+                ),
+                "low",
+            )
+
+    def test_reasoning_effort_reads_yaml_litellm_param_without_leaving_router_default(self) -> None:
+        model_list = [
+            {
+                "model_name": "openai/gpt-5.6-sol",
+                "litellm_params": {
+                    "model": "openai/responses/gpt-5.6-sol",
+                    "reasoning_effort": "xhigh",
+                },
+            }
+        ]
+
+        with patch.dict(os.environ, {"LLM_REASONING_EFFORT": "medium"}, clear=True):
+            self.assertEqual(
+                resolve_litellm_reasoning_effort("openai/gpt-5.6-sol", model_list=model_list),
+                "xhigh",
+            )
+            call_kwargs = apply_litellm_generation_params(
+                {"model": "openai/gpt-5.6-sol", "messages": []},
+                "openai/gpt-5.6-sol",
+                0.7,
+                model_list=model_list,
+            )
+
+        self.assertEqual(call_kwargs["reasoning_effort"], "xhigh")
+
+    def test_reasoning_effort_env_map_requires_exact_provider_prefixed_route_alias(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_REASONING_EFFORT": "medium",
+                "LLM_REASONING_EFFORTS_JSON": (
+                    '{"openai/gpt-5.6-sol":"xhigh",'
+                    '"gpt-5.6-sol":"low",'
+                    '"openai/invalid":"unsupported"}'
+                ),
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_litellm_reasoning_effort("openai/gpt-5.6-sol"),
+                "xhigh",
+            )
+            self.assertEqual(
+                resolve_litellm_reasoning_effort("gpt-5.6-sol"),
+                "medium",
+            )
+            self.assertEqual(
+                parse_litellm_reasoning_efforts(os.environ["LLM_REASONING_EFFORTS_JSON"]),
+                {"openai/gpt-5.6-sol": "xhigh"},
+            )
+
+    def test_reasoning_effort_is_sent_only_for_openai_protocol(self) -> None:
+        with patch.dict(os.environ, {"LLM_REASONING_EFFORT": "high"}, clear=True):
+            openai_kwargs = apply_litellm_generation_params(
+                {"model": "openai/gpt-5.6-sol", "messages": []},
+                "openai/gpt-5.6-sol",
+                0.7,
+            )
+            deepseek_kwargs = apply_litellm_generation_params(
+                {"model": "deepseek/deepseek-v4-flash", "messages": []},
+                "deepseek/deepseek-v4-flash",
+                0.7,
+            )
+
+        self.assertEqual(openai_kwargs["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", deepseek_kwargs)
+
+    def test_reasoning_effort_normalization_rejects_invalid_values(self) -> None:
+        self.assertEqual(normalize_litellm_reasoning_effort(" HIGH "), "high")
+        self.assertIsNone(normalize_litellm_reasoning_effort("standard"))
+        self.assertIsNone(normalize_litellm_reasoning_effort(""))
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_channel_reasoning_effort_is_model_info_not_litellm_param(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        env = {
+            "LLM_CHANNELS": "newapi",
+            "LLM_NEWAPI_PROTOCOL": "openai",
+            "LLM_NEWAPI_API_SURFACE": "responses",
+            "LLM_NEWAPI_BASE_URL": "https://gateway.example.com/v1",
+            "LLM_NEWAPI_API_KEY": "sk-test-value",
+            "LLM_NEWAPI_MODELS": "gpt-5.6-sol",
+            "LLM_REASONING_EFFORT": "medium",
+            "LLM_REASONING_EFFORTS_JSON": (
+                '{"openai/gpt-5.6-sol":"xhigh"}'
+            ),
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            config = Config._load_from_env()
+
+        deployments = {entry["model_name"]: entry for entry in config.llm_model_list}
+        self.assertEqual(config.llm_reasoning_effort, "medium")
+        self.assertEqual(
+            config.llm_reasoning_efforts,
+            {"openai/gpt-5.6-sol": "xhigh"},
+        )
+        self.assertEqual(
+            deployments["openai/gpt-5.6-sol"]["model_info"]["dsa_reasoning_effort"],
+            "xhigh",
+        )
+        self.assertNotIn("reasoning_effort", deployments["openai/gpt-5.6-sol"]["litellm_params"])
+
+    def test_yaml_reasoning_effort_is_moved_out_of_litellm_params(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "litellm.yaml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "model_list:\n"
+                    "  - model_name: openai/gpt-5.6-sol\n"
+                    "    litellm_params:\n"
+                    "      model: openai/responses/gpt-5.6-sol\n"
+                    "      reasoning_effort: xhigh\n"
+                )
+
+            model_list = Config._parse_litellm_yaml(path)
+
+        self.assertEqual(model_list[0]["model_info"]["dsa_reasoning_effort"], "xhigh")
+        self.assertNotIn("reasoning_effort", model_list[0]["litellm_params"])
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_litellm_fallback_models_are_preserved_in_config(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        env = {
+            "LITELLM_MODEL": "openai/primary",
+            "LITELLM_FALLBACK_MODELS": "openai/fallback,openai/backup",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(
+            config.litellm_fallback_models,
+            ["openai/fallback", "openai/backup"],
+        )
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

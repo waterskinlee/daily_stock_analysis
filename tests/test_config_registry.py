@@ -252,7 +252,7 @@ class TestGenerationBackendFieldsRegistered(unittest.TestCase):
     def test_schema_response_groups_generation_backend_fields(self):
         schema = build_schema_response()
         self.assertEqual(schema["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "2026-06-29-claude-code-cli-backend")
+        self.assertEqual(SCHEMA_VERSION, "2026-08-10-reasoning-effort-per-model")
 
         categories = {
             category["category"]: {field["key"] for field in category["fields"]}
@@ -312,6 +312,42 @@ class TestLLMPromptCacheFieldsRegistered(unittest.TestCase):
         self.assertEqual(field["validation"], {"enum": ["off", "basic", "debug"]})
         self.assertEqual(field["help_key"], "settings.ai_model.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL")
 
+
+class TestLLMReasoningEffortFieldsRegistered(unittest.TestCase):
+    def test_global_effort_is_optional_openai_select(self):
+        field = get_field_definition("LLM_REASONING_EFFORT")
+
+        self.assertEqual(field["category"], "ai_model")
+        self.assertEqual(field["data_type"], "string")
+        self.assertEqual(field["ui_control"], "select")
+        self.assertEqual(field["default_value"], "")
+        self.assertEqual(
+            [option["value"] for option in field["options"]],
+            ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(field["help_key"], "settings.ai_model.LLM_REASONING_EFFORT")
+        self.assertEqual(field["display_order"], 6)
+
+    def test_per_model_effort_is_json_map(self):
+        field = get_field_definition("LLM_REASONING_EFFORTS_JSON")
+
+        self.assertEqual(field["category"], "ai_model")
+        self.assertEqual(field["data_type"], "json")
+        self.assertEqual(field["ui_control"], "textarea")
+        self.assertEqual(field["default_value"], "")
+        self.assertEqual(field["help_key"], "settings.ai_model.LLM_REASONING_EFFORTS_JSON")
+        self.assertEqual(field["display_order"], 7)
+        self.assertTrue(field["examples"])
+
+        schema = build_schema_response()
+        ai_model_keys = {
+            field["key"]
+            for category in schema["categories"]
+            if category["category"] == "ai_model"
+            for field in category["fields"]
+        }
+        self.assertIn("LLM_REASONING_EFFORT", ai_model_keys)
+        self.assertIn("LLM_REASONING_EFFORTS_JSON", ai_model_keys)
 
 class TestSettingsHelpMetadata(unittest.TestCase):
     """Field help metadata should be available for covered settings help slices."""

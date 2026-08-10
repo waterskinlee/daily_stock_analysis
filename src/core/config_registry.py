@@ -17,7 +17,7 @@ from src.config import (
 from src.notification_noise import NOTIFICATION_SEVERITIES
 from src.notification_routing import ROUTABLE_NOTIFICATION_CHANNELS
 
-SCHEMA_VERSION = "2026-06-29-claude-code-cli-backend"
+SCHEMA_VERSION = "2026-08-10-reasoning-effort-per-model"
 
 _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
@@ -500,6 +500,73 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": [],
     },
+    "LLM_REASONING_EFFORT": {
+        "title": "Reasoning Effort Default",
+        "description": (
+            "Optional global reasoning effort fallback for OpenAI-protocol models. "
+            "Leave empty to use the provider default."
+        ),
+        "category": "ai_model",
+        "data_type": "string",
+        "ui_control": "select",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [
+            {"value": "", "label": "Provider default"},
+            {"value": "none", "label": "none"},
+            {"value": "minimal", "label": "minimal"},
+            {"value": "low", "label": "low"},
+            {"value": "medium", "label": "medium"},
+            {"value": "high", "label": "high"},
+            {"value": "xhigh", "label": "xhigh"},
+            {"value": "max", "label": "max"},
+        ],
+        "validation": {"enum": ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+        "display_order": 6,
+        "help_key": "settings.ai_model.LLM_REASONING_EFFORT",
+        "examples": [
+            "LLM_REASONING_EFFORT=medium",
+            "LLM_REASONING_EFFORT=",
+        ],
+        "docs": [
+            {
+                "label": "LLM 配置指南：Reasoning Effort",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md#reasoning-effort-按模型配置",
+            },
+        ],
+        "warning_codes": [],
+    },
+    "LLM_REASONING_EFFORTS_JSON": {
+        "title": "Reasoning Effort Per Model",
+        "description": (
+            "JSON map of exact provider-prefixed route aliases to reasoning effort. "
+            "Per-model values override the global default."
+        ),
+        "category": "ai_model",
+        "data_type": "json",
+        "ui_control": "textarea",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 7,
+        "help_key": "settings.ai_model.LLM_REASONING_EFFORTS_JSON",
+        "examples": [
+            'LLM_REASONING_EFFORTS_JSON={"openai/gpt-5.6-sol":"xhigh"}',
+            'LLM_REASONING_EFFORTS_JSON={"openai/gpt-5.6-sol":"high","openai/gpt-5.6-terra":"medium"}',
+        ],
+        "docs": [
+            {
+                "label": "LLM 配置指南：Reasoning Effort",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md#reasoning-effort-按模型配置",
+            },
+        ],
+        "warning_codes": [],
+    },
     "LLM_PROMPT_CACHE_TELEMETRY_ENABLED": {
         "title": "Prompt Cache Telemetry",
         "description": "Records provider prompt-cache usage telemetry and normalized cache diagnostics when providers return cache usage fields. This does not enable or disable provider implicit cache.",
@@ -512,7 +579,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "true",
         "options": [],
         "validation": {},
-        "display_order": 6,
+        "display_order": 8,
         "help_key": "settings.ai_model.LLM_PROMPT_CACHE_TELEMETRY_ENABLED",
         "examples": [
             "LLM_PROMPT_CACHE_TELEMETRY_ENABLED=true",
@@ -538,7 +605,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "false",
         "options": [],
         "validation": {},
-        "display_order": 7,
+        "display_order": 9,
         "help_key": "settings.ai_model.LLM_PROMPT_CACHE_HINTS_ENABLED",
         "examples": [
             "LLM_PROMPT_CACHE_HINTS_ENABLED=false",
@@ -567,7 +634,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             {"value": "debug", "label": "Debug"},
         ],
         "validation": {"enum": ["off", "basic", "debug"]},
-        "display_order": 8,
+        "display_order": 10,
         "help_key": "settings.ai_model.LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL",
         "examples": [
             "LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL=off",
@@ -593,7 +660,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": None,
         "options": [],
         "validation": {},
-        "display_order": 9,
+        "display_order": 11,
         "help_key": "settings.ai_model.LLM_USAGE_HMAC_SECRET",
         "examples": [
             "LLM_USAGE_HMAC_SECRET=<64-char random hex from openssl rand -hex 32>",
@@ -618,7 +685,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "local-v1",
         "options": [],
         "validation": {},
-        "display_order": 10,
+        "display_order": 12,
         "help_key": "settings.ai_model.LLM_USAGE_HMAC_KEY_VERSION",
         "examples": [
             "LLM_USAGE_HMAC_KEY_VERSION=prod-2026-06",

@@ -2117,6 +2117,56 @@ class TestAnalyzerGenerateText:
             ("openai/gpt-4o-mini", 0.2),
         ]
 
+    def test_call_litellm_applies_per_model_effort_across_fallbacks(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="openai/primary-model",
+            litellm_fallback_models=["openai/fallback-model"],
+            llm_model_list=[
+                {
+                    "model_name": "openai/primary-model",
+                    "litellm_params": {"model": "openai/primary-model"},
+                    "model_info": {
+                        "dsa_protocol": "openai",
+                        "dsa_reasoning_effort": "xhigh",
+                    },
+                },
+                {
+                    "model_name": "openai/fallback-model",
+                    "litellm_params": {"model": "openai/fallback-model"},
+                    "model_info": {
+                        "dsa_protocol": "openai",
+                        "dsa_reasoning_effort": "low",
+                    },
+                },
+            ],
+        )
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="fallback ok"))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+        efforts = []
+
+        def fake_dispatch(model, call_kwargs, **_kwargs):
+            efforts.append((model, call_kwargs.get("reasoning_effort")))
+            if model == "openai/primary-model":
+                raise RuntimeError("primary failed")
+            return response
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=fake_dispatch):
+            text, model_used, usage = analyzer._call_litellm(
+                "prompt",
+                {"max_tokens": 128, "temperature": 0.2},
+            )
+
+        assert text == "fallback ok"
+        assert model_used == "openai/fallback-model"
+        _assert_usage_contains(usage, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+        assert efforts == [
+            ("openai/primary-model", "xhigh"),
+            ("openai/fallback-model", "low"),
+        ]
+
     def test_call_litellm_stream_falls_back_to_non_stream_after_partial_and_falls_back_model(self):
         analyzer = self._make_analyzer()
         analyzer._config_override = SimpleNamespace(
