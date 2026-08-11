@@ -738,6 +738,7 @@ class StockAnalysisPipeline:
                         enhanced_context["previous_analysis_context"] = (
                             format_previous_analysis_section(prev, report_language)
                         )
+                        enhanced_context["previous_analysis_data"] = prev
                         enhanced_context["previous_watch_injected"] = True
                 except Exception as exc:
                     logger.warning(f"{stock_name}({code}) 上次分析观察点回读失败: {exc}")
@@ -1418,6 +1419,7 @@ class StockAnalysisPipeline:
                         initial_context["previous_analysis_context"] = (
                             format_previous_analysis_section(prev, report_language)
                         )
+                        initial_context["previous_analysis_data"] = prev
                         initial_context["previous_watch_injected"] = True
                 except Exception as exc:
                     logger.warning(f"{code} Agent 模式上次分析观察点回读失败: {exc}")
@@ -1682,7 +1684,13 @@ class StockAnalysisPipeline:
                         )
                     fallback_missing = evidence_missing + remaining_repairable
                     if fallback_missing:
-                        apply_placeholder_fill(result, fallback_missing)
+                        apply_placeholder_fill(
+                            result,
+                            fallback_missing,
+                            previous_watch_context=initial_context.get(
+                                "previous_analysis_data"
+                            ),
+                        )
                         logger.info(
                             "[LLM完整性] integrity_mode=agent_weak 必填字段缺失 %s，已占位补全",
                             fallback_missing,
@@ -2271,10 +2279,18 @@ class StockAnalysisPipeline:
                 result.analysis_summary = str(raw_summary)
             else:
                 result.analysis_summary = self._summary_fallback_from_result(result, report_language)
-            top_level_phase_decision = dash.get("phase_decision") if isinstance(dash, dict) else None
-            if isinstance(nested_dashboard, dict) and isinstance(top_level_phase_decision, dict):
-                nested_dashboard = dict(nested_dashboard)
-                nested_dashboard.setdefault("phase_decision", top_level_phase_decision)
+            if isinstance(nested_dashboard, dict):
+                dashboard_copied = False
+                for section_name in (
+                    "phase_decision",
+                    "previous_watch_verification",
+                ):
+                    top_level_section = dash.get(section_name)
+                    if isinstance(top_level_section, dict):
+                        if not dashboard_copied:
+                            nested_dashboard = dict(nested_dashboard)
+                            dashboard_copied = True
+                        nested_dashboard.setdefault(section_name, top_level_section)
 
             # The AI returns a top-level dict that contains a nested 'dashboard' sub-key
             # with core_conclusion / battle_plan / intelligence.  AnalysisResult's helper
@@ -3127,6 +3143,7 @@ class StockAnalysisPipeline:
         sanitized.pop("market_phase_context", None)
         sanitized.pop("portfolio_context", None)
         sanitized.pop("analysis_context_pack", None)
+        sanitized.pop("previous_analysis_data", None)
         sanitized.pop("analysis_context_pack_summary", None)
         sanitized.pop("daily_market_context_summary", None)
         enhanced_context = sanitized.get("enhanced_context")

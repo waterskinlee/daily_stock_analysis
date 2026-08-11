@@ -682,18 +682,45 @@ class TestPreviousWatchVerificationIntegrity(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("dashboard.previous_watch_verification.summary", missing)
 
-    def test_placeholder_fill_top_level_creates_valid_shell(self) -> None:
-        """Placeholder fill for missing top-level pwv produces a valid empty-state shell."""
-        result = self._base_result()
-        apply_placeholder_fill(result, ["dashboard.previous_watch_verification"])
+    def test_placeholder_fill_top_level_uses_previous_watch_context(self) -> None:
+        """Fallback preserves real prior conditions and current market evidence."""
+        result = self._base_result(
+            phase_decision={
+                "phase_context": {
+                    "phase": "premarket",
+                    "effective_daily_bar_date": "2026-08-11",
+                },
+                "data_limitations": ["盘前暂无当日分时行情。"],
+            },
+            data_perspective={"price_position": {"current_price": 1346.5}},
+        )
+        previous_context = {
+            "analysis_time": "2026-08-11 09:30",
+            "watch_conditions": ["放量站上 1363.35", "跌破 1312.14 止损"],
+        }
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context=previous_context,
+        )
+
         pwv = result.dashboard["previous_watch_verification"]
         self.assertTrue(pwv["has_previous"])
-        self.assertEqual(pwv["items"], [])
-        self.assertIn("summary", pwv)
-        # Re-check should now pass (has_previous=True with items=[] still fails,
-        # but has_previous=True + items=[] is the placeholder; re-check returns
-        # items as missing — that's acceptable for agent_weak which doesn't re-check).
-        self.assertIsInstance(pwv["has_previous"], bool)
+        self.assertEqual(pwv["previous_analysis_time"], "2026-08-11 09:30")
+        self.assertEqual(
+            [item["condition"] for item in pwv["items"]],
+            previous_context["watch_conditions"],
+        )
+        self.assertTrue(all(item["status"] == "partially_fulfilled" for item in pwv["items"]))
+        self.assertTrue(all("1346.5" in item["evidence"] for item in pwv["items"]))
+        self.assertTrue(all(item["impact"] for item in pwv["items"]))
+        self.assertEqual(pwv["verification_source"], "deterministic_fallback")
+        ok, missing = check_content_integrity(
+            result, require_previous_watch_verification=True
+        )
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
 
     def test_placeholder_fill_has_previous_false_state_passes_recheck(self) -> None:
         """The no-previous empty-state placeholder should pass re-check."""

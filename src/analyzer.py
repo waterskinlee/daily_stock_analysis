@@ -15,6 +15,7 @@ import logging
 import math
 import re
 import time
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
@@ -502,8 +503,186 @@ def check_content_integrity(
     return len(missing) == 0, missing
 
 
-def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) -> None:
-    """Fill missing mandatory fields with placeholders (in-place). Module-level for pipeline."""
+def _build_previous_watch_context_fallback(
+    result: "AnalysisResult",
+    previous_watch_context: Optional[Dict[str, Any]],
+    report_language: str,
+) -> Optional[Dict[str, Any]]:
+    """Build an honest, non-empty fallback from persisted watch points.
+
+    The fallback never claims that a condition was fully verified. It preserves
+    the real previous conditions and records the current report's observable
+    market snapshot so a missing model field does not degrade into an empty
+    shell.
+    """
+    if not isinstance(previous_watch_context, dict):
+        return None
+
+    conditions = [
+        str(value).strip()
+        for value in previous_watch_context.get("watch_conditions") or []
+        if str(value or "").strip()
+    ][:5]
+    if not conditions:
+        point_labels = {
+            "en": {
+                "ideal_buy": "Previous ideal entry",
+                "secondary_buy": "Previous secondary entry",
+                "stop_loss": "Previous stop loss",
+                "take_profit": "Previous take profit",
+            },
+            "ko": {
+                "ideal_buy": "이전 1차 매수 기준",
+                "secondary_buy": "이전 2차 매수 기준",
+                "stop_loss": "이전 손절 기준",
+                "take_profit": "이전 익절 기준",
+            },
+            "zh": {
+                "ideal_buy": "上次理想买点",
+                "secondary_buy": "上次次优买点",
+                "stop_loss": "上次止损位",
+                "take_profit": "上次止盈位",
+            },
+        }
+        labels = point_labels.get(report_language, point_labels["zh"])
+        for key, label in labels.items():
+            value = previous_watch_context.get(key)
+            if value is not None and not isinstance(value, bool):
+                text = str(value).strip()
+                if text:
+                    conditions.append(f"{label}: {text}")
+    if not conditions:
+        prior_advice = str(previous_watch_context.get("operation_advice") or "").strip()
+        prior_summary = str(previous_watch_context.get("analysis_summary") or "").strip()
+        prior_text = prior_advice or prior_summary
+        if prior_text:
+            prefix = _localized_text(
+                report_language,
+                en="Previous analysis",
+                zh="上次分析",
+                ko="이전 분석",
+            )
+            conditions.append(f"{prefix}: {prior_text}")
+    if not conditions:
+        return None
+
+    if isinstance(analysis_time, (date, datetime)):
+        previous_analysis_time: Optional[str] = analysis_time.strftime("%Y-%m-%d %H:%M")
+    elif analysis_time is None:
+        previous_analysis_time = None
+    else:
+        previous_analysis_time = str(analysis_time).strip() or None
+
+    dashboard = getattr(result, "dashboard", None)
+    dashboard = dashboard if isinstance(dashboard, dict) else {}
+    phase_decision = dashboard.get("phase_decision")
+    phase_decision = phase_decision if isinstance(phase_decision, dict) else {}
+    phase_context = phase_decision.get("phase_context")
+    phase_context = phase_context if isinstance(phase_context, dict) else {}
+    data_perspective = dashboard.get("data_perspective")
+    data_perspective = data_perspective if isinstance(data_perspective, dict) else {}
+    price_position = data_perspective.get("price_position")
+    price_position = price_position if isinstance(price_position, dict) else {}
+
+    observed_at = (
+        phase_context.get("effective_daily_bar_date")
+        or phase_context.get("session_date")
+        or phase_context.get("market_local_time")
+    )
+    phase = phase_context.get("phase")
+    current_price = price_position.get("current_price")
+    limitations = phase_decision.get("data_limitations")
+    limitation = ""
+    if isinstance(limitations, list):
+        limitation = next(
+            (str(value).strip() for value in limitations if str(value or "").strip()),
+            "",
+        )
+
+    evidence_parts: List[str] = []
+    if observed_at:
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en=f"data as of {observed_at}",
+                zh=f"数据截至 {observed_at}",
+                ko=f"데이터 기준 {observed_at}",
+            )
+        )
+    if phase:
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en=f"market phase {phase}",
+                zh=f"市场阶段 {phase}",
+                ko=f"시장 단계 {phase}",
+            )
+        )
+    if current_price is not None and not isinstance(current_price, bool):
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en=f"reference price {current_price}",
+                zh=f"参考价 {current_price}",
+                ko=f"기준가 {current_price}",
+            )
+        )
+    if limitation:
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en=f"limitation: {limitation}",
+                zh=f"数据限制：{limitation}",
+                ko=f"데이터 제한: {limitation}",
+            )
+        )
+    evidence_parts.append(
+        _localized_text(
+            report_language,
+            en="the main model did not return a complete condition-level conclusion",
+            zh="主模型未返回该条件的完整逐条结论",
+            ko="주 모델이 이 조건의 완전한 항목별 결론을 반환하지 않았습니다",
+        )
+    )
+    separator = "; " if report_language == "en" else "；"
+    evidence = separator.join(evidence_parts)[:200]
+    impact = _localized_text(
+        report_language,
+        en="Keep as a partially verified risk item; do not treat it as a confirmed signal.",
+        zh="作为部分核验的风险项保留，不将其视为已兑现交易信号。",
+        ko="부분 검증된 위험 항목으로 유지하며 확인된 거래 신호로 간주하지 않습니다.",
+    )[:120]
+    summary = _localized_text(
+        report_language,
+        en=f"Preserved {len(conditions)} previous watch point(s); current data only supports partial verification, so none is treated as confirmed.",
+        zh=f"已保留并逐条列出上次 {len(conditions)} 个观察点；当前数据仅支持部分核验，均未作为已兑现信号。",
+        ko=f"이전 관찰 포인트 {len(conditions)}개를 보존해 나열했습니다. 현재 데이터로는 부분 검증만 가능하며 확인된 신호로 간주하지 않습니다.",
+    )[:120]
+
+    return {
+        "has_previous": True,
+        "previous_analysis_time": previous_analysis_time,
+        "items": [
+            {
+                "condition": condition[:120],
+                "status": "partially_fulfilled",
+                "evidence": evidence,
+                "impact": impact,
+            }
+            for condition in conditions
+        ],
+        "summary": summary,
+        "verification_source": "deterministic_fallback",
+    }
+
+
+def apply_placeholder_fill(
+    result: "AnalysisResult",
+    missing_fields: List[str],
+    *,
+    previous_watch_context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Fill mandatory gaps in-place, retaining real prior watch-point context."""
 
     def _is_blank_text(value: Any) -> bool:
         if value is None:
@@ -621,12 +800,29 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
         elif field.startswith("dashboard.previous_watch_verification"):
             if not result.dashboard:
                 result.dashboard = {}
+            contextual_fallback = _build_previous_watch_context_fallback(
+                result,
+                previous_watch_context,
+                report_language,
+            )
+            if contextual_fallback is not None and (
+                field == "dashboard.previous_watch_verification"
+                or field == "dashboard.previous_watch_verification.items"
+                or field.startswith("dashboard.previous_watch_verification.items[")
+            ):
+                result.dashboard["previous_watch_verification"] = contextual_fallback
+                continue
             pwv = result.dashboard.get("previous_watch_verification")
             if not isinstance(pwv, dict):
                 pwv = {}
                 result.dashboard["previous_watch_verification"] = pwv
+            if contextual_fallback is not None:
+                pwv.setdefault(
+                    "previous_analysis_time",
+                    contextual_fallback["previous_analysis_time"],
+                )
             if field == "dashboard.previous_watch_verification":
-                # Top-level missing: fill a minimal valid empty-state shell.
+                # No prior context is available; retain an explicit empty shell.
                 pwv.setdefault("has_previous", True)
                 pwv.setdefault("previous_analysis_time", None)
                 pwv.setdefault("items", [])
@@ -647,12 +843,15 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
                     pwv["items"] = []
             elif field == "dashboard.previous_watch_verification.summary":
                 if _is_blank_text(pwv.get("summary")):
-                    pwv["summary"] = _localized_text(
-                        report_language,
-                        en="Model did not provide a previous-watch verification summary.",
-                        zh="模型未提供上次观察点核对结论。",
-                        ko="모델이 이전 관찰 포인트 검증 결론을 제공하지 않았습니다.",
-                    )
+                    if contextual_fallback is not None:
+                        pwv["summary"] = contextual_fallback["summary"]
+                    else:
+                        pwv["summary"] = _localized_text(
+                            report_language,
+                            en="Model did not provide a previous-watch verification summary.",
+                            zh="模型未提供上次观察点核对结论。",
+                            ko="모델이 이전 관찰 포인트 검증 결론을 제공하지 않았습니다.",
+                        )
 
 
 # ---------- chip_structure fallback (Issue #589) ----------
@@ -3833,7 +4032,11 @@ class GeminiAnalyzer:
                         f"{name}：报告字段不完整，正在补全重试（{retry_count}/{max_retries}）",
                     )
                 else:
-                    self._apply_placeholder_fill(result, missing_fields)
+                    self._apply_placeholder_fill(
+                        result,
+                        missing_fields,
+                        previous_watch_context=context.get("previous_analysis_data"),
+                    )
                     logger.warning(
                         "[LLM完整性] 必填字段缺失 %s，已占位补全，不阻塞流程",
                         missing_fields,
@@ -4658,9 +4861,19 @@ class GeminiAnalyzer:
             complement,
         ])
 
-    def _apply_placeholder_fill(self, result: AnalysisResult, missing_fields: List[str]) -> None:
+    def _apply_placeholder_fill(
+        self,
+        result: AnalysisResult,
+        missing_fields: List[str],
+        *,
+        previous_watch_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Delegate to module-level apply_placeholder_fill."""
-        apply_placeholder_fill(result, missing_fields)
+        apply_placeholder_fill(
+            result,
+            missing_fields,
+            previous_watch_context=previous_watch_context,
+        )
 
     def _extract_analysis_json_object(self, response_text: str) -> Tuple[str, Dict[str, Any]]:
         """Extract the single allowed JSON object from an LLM response."""

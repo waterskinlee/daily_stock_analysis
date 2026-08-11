@@ -699,6 +699,49 @@ class TestAgentResultConversion(unittest.TestCase):
         self.assertEqual(result.dashboard["phase_decision"]["phase_context"]["phase"], "intraday")
         self.assertEqual(result.dashboard["phase_decision"]["watch_conditions"], ["放量突破"])
 
+    def test_convert_preserves_top_level_previous_watch_with_nested_dashboard(self):
+        """Agent previous-watch evidence must survive nested dashboard unwrapping."""
+        pipeline = self._make_pipeline()
+
+        from src.agent.executor import AgentResult
+        from src.enums import ReportType
+
+        verification = {
+            "has_previous": True,
+            "previous_analysis_time": "2026-08-11 09:30",
+            "items": [
+                {
+                    "condition": "跌破 100 止损",
+                    "status": "not_fulfilled",
+                    "evidence": "最低价 102，未跌破 100",
+                    "impact": "止损条件未触发",
+                }
+            ],
+            "summary": "上次止损观察点未兑现",
+        }
+        dashboard = {
+            "stock_name": "贵州茅台",
+            "sentiment_score": 70,
+            "trend_prediction": "震荡",
+            "operation_advice": "持有",
+            "decision_type": "hold",
+            "analysis_summary": "Testing",
+            "previous_watch_verification": verification,
+            "dashboard": {"core_conclusion": {"one_sentence": "持有"}},
+        }
+        agent_result = AgentResult(
+            success=True,
+            content=json.dumps(dashboard),
+            dashboard=dashboard,
+            provider="gemini",
+        )
+
+        result = pipeline._agent_result_to_analysis_result(
+            agent_result, "600519", "贵州茅台", ReportType.SIMPLE, "q-prev-watch"
+        )
+
+        self.assertEqual(result.dashboard["previous_watch_verification"], verification)
+
     def test_convert_failed_dashboard(self):
         """Failed AgentResult should produce a minimal AnalysisResult."""
         pipeline = self._make_pipeline()
