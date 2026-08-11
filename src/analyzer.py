@@ -478,7 +478,8 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
     }
     for field in missing_fields:
         if field == "sentiment_score":
-            result.sentiment_score = 50
+            if result.sentiment_score is None:
+                result.sentiment_score = 50
         elif field == "operation_advice":
             if _is_blank_text(result.operation_advice):
                 result.operation_advice = placeholder

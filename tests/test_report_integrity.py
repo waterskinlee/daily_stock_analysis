@@ -8,6 +8,8 @@ Tests for check_content_integrity, apply_placeholder_fill, and retry/placeholder
 """
 
 import json
+import threading
+import time
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -785,17 +787,17 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         pipe._resolve_repair_llm_adapter = lambda: None
         result = self._base_result(sentiment_score=None)
         ok, missing = check_content_integrity(result)
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=1,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertFalse(ret)
+        self.assertFalse(repaired)
+        self.assertEqual(remaining, ["sentiment_score"])
 
     def test_empty_response_returns_false(self) -> None:
         """Empty/error LLM response → False."""
@@ -808,40 +810,43 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
         result = self._base_result(sentiment_score=None)
         ok, missing = check_content_integrity(result)
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=1,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertFalse(ret)
+        self.assertFalse(repaired)
+        self.assertEqual(remaining, ["sentiment_score"])
 
     def test_timeout_returns_false_no_retry(self) -> None:
-        """Timeout is fatal (no retry) → False."""
+        """Timeout is fatal and does not start another repair call."""
         pipe = self._make_pipeline()
+        calls = [0]
 
         class _Adapter:
             def call_text(self, messages, **kw):
+                calls[0] += 1
                 raise TimeoutError("60s")
 
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
         result = self._base_result(sentiment_score=None)
-        ok, missing = check_content_integrity(result)
-        ret = pipe._attempt_integrity_repair(
+        _, missing = check_content_integrity(result)
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=2,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertFalse(ret)
+        self.assertFalse(repaired)
+        self.assertEqual(remaining, ["sentiment_score"])
+        self.assertEqual(calls[0], 1)
 
     def test_parse_error_retries_then_fails(self) -> None:
         """Parse error is retried (non-deterministic JSON drift)."""
@@ -856,17 +861,17 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
         result = self._base_result(sentiment_score=None)
         ok, missing = check_content_integrity(result)
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=2,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertFalse(ret)
+        self.assertFalse(repaired)
+        self.assertEqual(remaining, ["sentiment_score"])
         self.assertEqual(calls[0], 2)
 
     def test_successful_repair_merges_and_passes_recheck(self) -> None:
@@ -907,17 +912,17 @@ class TestAgentIntegrityRepair(unittest.TestCase):
             },
         )
         ok, missing = check_content_integrity(result)
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=1,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertTrue(ret)
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
         self.assertEqual(result.sentiment_score, 82)
         self.assertEqual(result.operation_advice, "加仓")
         self.assertEqual(result.dashboard["battle_plan"]["sniper_points"]["stop_loss"], 95.5)
@@ -945,17 +950,17 @@ class TestAgentIntegrityRepair(unittest.TestCase):
                 return type("R", (), {"content": json.dumps(repair, ensure_ascii=False), "provider": "ok"})()
 
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=1,
-            require_previous_watch_verification=False,
             require_phase_decision=False,
         )
-        self.assertTrue(ret)
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
         # Existing fields preserved.
         self.assertEqual(result.sentiment_score, 75)
         self.assertEqual(result.operation_advice, "持有")
@@ -966,7 +971,7 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertEqual(result.analysis_summary, "新摘要")
 
     def test_bare_shape_repair_root_normalization(self) -> None:
-        """Bare dashboard shape (no nested dashboard key) is handled."""
+        """Bare dashboard fragments repair structure but not evidence fields."""
         pipe = self._make_pipeline()
         result = AnalysisResult(
             code="600519",
@@ -984,13 +989,6 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         bare = {
             "intelligence": {"risk_alerts": ["新风险"]},
             "battle_plan": {"sniper_points": {"stop_loss": 95.5}},
-            "previous_watch_verification": {
-                "has_previous": True,
-                "items": [
-                    {"condition": "c", "status": "fulfilled", "evidence": "e", "impact": "i"}
-                ],
-                "summary": "s",
-            },
         }
 
         class _Adapter:
@@ -998,34 +996,32 @@ class TestAgentIntegrityRepair(unittest.TestCase):
                 return type("R", (), {"content": json.dumps(bare, ensure_ascii=False), "provider": "ok"})()
 
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
-        ok, missing = check_content_integrity(
+        _, missing = check_content_integrity(
             result, require_previous_watch_verification=True
         )
-        ret = pipe._attempt_integrity_repair(
+        repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
             initial_context=self._make_context(),
             trend_result=None,
             report_language="zh",
             max_retries=1,
-            require_previous_watch_verification=True,
             require_phase_decision=False,
         )
-        self.assertTrue(ret)
-        pwv = result.dashboard["previous_watch_verification"]
-        self.assertTrue(pwv["has_previous"])
-        self.assertEqual(len(pwv["items"]), 1)
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+        self.assertEqual(result.dashboard["intelligence"]["risk_alerts"], ["新风险"])
+        self.assertEqual(result.dashboard["battle_plan"]["sniper_points"]["stop_loss"], 95.5)
+        self.assertIsNone(result.dashboard["previous_watch_verification"])
 
     def test_prompt_includes_previous_section_and_digest(self) -> None:
         """Repair prompt carries the previous watch section + data digest."""
         pipe = self._make_pipeline()
-        result = self._base_result()
         messages = pipe._build_agent_integrity_repair_prompt(
-            result,
             initial_context=self._make_context(),
             trend_result=None,
             realtime_quote=None,
-            missing_fields=["dashboard.previous_watch_verification"],
+            missing_fields=["dashboard.phase_decision.data_limitations"],
             report_language="zh",
         )
         self.assertEqual(len(messages), 2)
@@ -1040,26 +1036,22 @@ class TestAgentIntegrityRepair(unittest.TestCase):
     def test_prompt_en_locale(self) -> None:
         """English repair prompt uses English labels."""
         pipe = self._make_pipeline()
-        result = self._base_result()
         messages = pipe._build_agent_integrity_repair_prompt(
-            result,
             initial_context=self._make_context(),
             trend_result=None,
             realtime_quote=None,
-            missing_fields=["dashboard.previous_watch_verification"],
+            missing_fields=["dashboard.phase_decision.data_limitations"],
             report_language="en",
         )
         usr = messages[1]["content"]
-        self.assertIn("Previous watch-point section", usr)
+        self.assertIn("Previous watch-point context", usr)
         self.assertIn("Current price", usr)
 
     def test_prompt_empty_previous_section_shows_placeholder(self) -> None:
         """Empty previous section renders '(无)' / '(none)'."""
         pipe = self._make_pipeline()
-        result = self._base_result()
         ctx = self._make_context(previous_analysis_context="")
         messages = pipe._build_agent_integrity_repair_prompt(
-            result,
             initial_context=ctx,
             trend_result=None,
             realtime_quote=None,
@@ -1140,3 +1132,107 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertEqual(item["evidence"], "ev")
         self.assertEqual(item["impact"], "im")
         self.assertEqual(item["condition"], "c1")  # untouched
+
+
+    def test_repair_uses_delta_contract_and_disables_reasoning(self) -> None:
+        """Repair sends only the missing fragment with bounded generation."""
+        pipe = self._make_pipeline()
+        calls = []
+        repair = {"analysis_summary": "补全摘要"}
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                calls.append((messages, kwargs))
+                return type("R", (), {"content": json.dumps(repair), "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(analysis_summary="")
+        ok, missing = check_content_integrity(result)
+        self.assertIn("analysis_summary", missing)
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_phase_decision=False,
+        )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+        self.assertEqual(result.analysis_summary, "补全摘要")
+        self.assertEqual(len(calls), 1)
+        messages, kwargs = calls[0]
+        self.assertEqual(kwargs["temperature"], 0)
+        self.assertEqual(kwargs["reasoning_effort"], "none")
+        self.assertLessEqual(kwargs["timeout"], pipe._REPAIR_CALL_TIMEOUT_S)
+        self.assertNotIn("当前仪表盘", messages[1]["content"])
+        self.assertNotIn("Current dashboard", messages[1]["content"])
+
+    def test_previous_watch_fields_are_excluded_from_repair(self) -> None:
+        """Evidence-bearing previous-watch fields bypass the LLM repair."""
+        from src.core.pipeline import StockAnalysisPipeline
+
+        repairable, evidence = StockAnalysisPipeline._partition_integrity_missing_fields(
+            [
+                "dashboard.phase_decision.data_limitations",
+                "dashboard.previous_watch_verification",
+                "dashboard.previous_watch_verification.items[0].evidence",
+            ]
+        )
+        self.assertEqual(repairable, ["dashboard.phase_decision.data_limitations"])
+        self.assertEqual(
+            evidence,
+            [
+                "dashboard.previous_watch_verification",
+                "dashboard.previous_watch_verification.items[0].evidence",
+            ],
+        )
+
+    def test_partial_repair_returns_remaining_without_losing_filled_score(self) -> None:
+        """A partial repair must not let placeholder fill erase real values."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                return type("R", (), {"content": json.dumps({"sentiment_score": 82}), "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(sentiment_score=None, analysis_summary="")
+        _, missing = check_content_integrity(result)
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_phase_decision=False,
+        )
+        self.assertFalse(repaired)
+        self.assertIn("analysis_summary", remaining)
+        self.assertNotIn("sentiment_score", remaining)
+        apply_placeholder_fill(result, remaining)
+        self.assertEqual(result.sentiment_score, 82)
+
+    def test_repair_deadline_returns_without_waiting_for_adapter(self) -> None:
+        """A blocked adapter cannot hold the analysis past the repair deadline."""
+        pipe = self._make_pipeline()
+        started = threading.Event()
+        release = threading.Event()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                started.set()
+                release.wait(2)
+                return type("R", (), {"content": "{}", "provider": "ok"})()
+
+        began = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            pipe._call_repair_llm_with_deadline(
+                _Adapter(), [], timeout=0.03
+            )
+        elapsed = time.monotonic() - began
+        release.set()
+        self.assertTrue(started.is_set())
+        self.assertLess(elapsed, 0.5)

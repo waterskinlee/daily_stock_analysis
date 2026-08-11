@@ -572,6 +572,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> LLMResponse:
         """Send a text-only completion through the shared routing stack."""
         return self.call_completion(
@@ -581,6 +582,7 @@ class LLMToolAdapter:
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,
+            reasoning_effort=reasoning_effort,
         )
 
     def call_completion(
@@ -592,6 +594,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
         config = self._config
@@ -633,6 +636,7 @@ class LLMToolAdapter:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=remaining_timeout,
+                    reasoning_effort=reasoning_effort,
                 )
             except Exception as e:
                 if isinstance(e, _resolve_litellm_exception("RateLimitError")):
@@ -684,6 +688,7 @@ class LLMToolAdapter:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages, target_model=model)
@@ -700,6 +705,8 @@ class LLMToolAdapter:
             call_kwargs["max_tokens"] = max_tokens
         if timeout is not None:
             call_kwargs["timeout"] = timeout
+        if reasoning_effort is not None:
+            call_kwargs["reasoning_effort"] = reasoning_effort
 
         if extra:
             call_kwargs["extra_body"] = extra

@@ -496,3 +496,31 @@ def test_parse_litellm_response_hmac_covers_tool_call_wire_messages(monkeypatch)
     assert first.usage["messages_hmac"]
     assert second.usage["messages_hmac"]
     assert first.usage["messages_hmac"] != second.usage["messages_hmac"]
+
+
+
+def test_call_text_forwards_repair_generation_controls() -> None:
+    adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+    captured = {}
+
+    def fake_call_completion(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return SimpleNamespace(content="{}", provider="ok")
+
+    adapter.call_completion = fake_call_completion
+    messages = [{"role": "user", "content": "repair"}]
+    response = adapter.call_text(
+        messages,
+        temperature=0,
+        max_tokens=4096,
+        timeout=12.5,
+        reasoning_effort="none",
+    )
+
+    assert response.content == "{}"
+    assert captured["messages"] == messages
+    assert captured["temperature"] == 0
+    assert captured["max_tokens"] == 4096
+    assert captured["timeout"] == 12.5
+    assert captured["reasoning_effort"] == "none"
