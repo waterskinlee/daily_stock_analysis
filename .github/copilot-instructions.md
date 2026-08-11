@@ -21,6 +21,7 @@ If any instruction in this file conflicts with `AGENTS.md`, follow `AGENTS.md`.
 - Use `README.md` only for project positioning, high-level capabilities, quick start, main entrypoints, and sponsorship/cooperation information; avoid updating README unless the change is homepage-level.
 - Put detailed module behavior, page interaction, topic configuration, troubleshooting, field contracts, implementation semantics, and edge cases in the appropriate `docs/*.md` file instead of README.
 - When config semantics change, sync `.env.example` and assess impact on local runs, Docker, GitHub Actions, API, Web, and Desktop.
+- Deployment topology (mirror of AGENTS.md "Deployment & Environment"): local Windows `F:\dsa` is development-only — never run servers here. Real environments live on Ubuntu 192.168.1.197: `~/dsa-test` (test, port 8001, source-mounted dev branch) and `~/daily_stock_analysis` (prod, port 8000, image `daily_stock_analysis:overlay-<commit>`). "Deploy to port 8000" always means the Ubuntu prod env. Sync flow: local commit → push origin dev → `~/dsa-clone` fetch → push to `~/dsa-repo.git` → `~/dsa-test` pull + compose up → validate 8001 → prod build overlay image + update compose + compose up → validate 8000. Back up prod `data/stock_analysis.db` + `data/runtime.env` to `~/backup/` before every prod sync. See `DEV_WORKFLOW.md` (gitignored, untracked) for full details.
 
 ## Validation
 

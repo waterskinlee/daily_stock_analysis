@@ -285,6 +285,47 @@ python scripts/check_ai_assets.py
   merge decision. Blockers: correctness/security issues, blocking CI failure, PR body contradicting the diff,
   missing rollback, or repeated contract drift.
 
+## Deployment & Environment
+
+Environment topology (see `DEV_WORKFLOW.md` — untracked, gitignored, not in git; this section is the tracked mirror):
+
+```
+Local Windows F:\dsa          development only — edit + git, never run servers here
+  ├── origin   → github.com/waterskinlee/daily_stock_analysis   (push code)
+  ├── upstream → github.com/ZhuLinsen/daily_stock_analysis      (sync official)
+  └── dev branch (local dev; main tracks upstream and is fetch-only)
+
+Ubuntu 192.168.1.197 (user waterskin, sudo password adminadmin)
+  ├── ~/dsa-repo.git         bare central repo (main + dev)
+  ├── ~/dsa-test              TEST env — dev branch, source-mounted into /app, port 8001
+  │   ├── docker compose: dsa-test-server (FastAPI) / dsa-test-analyzer (scheduled)
+  │   └── data/ mock data; scheduled tasks OFF, manual triggers
+  └── ~/daily_stock_analysis  PROD env — image mode (daily_stock_analysis:overlay-<commit>), port 8000
+      ├── containers: stock-server (FastAPI) / stock-analyzer (scheduled)
+      └── data/ REAL data, read-only from the app (mounted volume)
+```
+
+**Deployment flow (mandatory order):** local edit → commit → `git push origin dev` → ubuntu `~/dsa-clone`
+(`git fetch origin dev`, then `git push /home/waterskin/dsa-repo.git FETCH_HEAD:dev`) → `~/dsa-test`
+(`git pull origin dev`, `docker compose -f docker/docker-compose.yml up -d`) → validate test (8001) → prod
+`~/daily_stock_analysis` (build `docker build -f docker/Dockerfile -t daily_stock_analysis:overlay-<commit> .`,
+update `image:` in `docker/docker-compose.yml`, `docker compose up -d`) → validate prod (8000).
+
+**Config files:**
+- Prod `.env`: `~/daily_stock_analysis/.env` (`ENV_FILE=/app/data/runtime.env`); WebUI-saved runtime config
+  writes to `~/daily_stock_analysis/data/runtime.env`.
+- Test `.env`: `~/dsa-test/.env` (`API_PORT=8001`, `SCHEDULE_ENABLED=false`); runtime in `~/dsa-test/data/runtime.env`.
+- Before every prod sync: back up `data/stock_analysis.db` and `data/runtime.env` to `~/backup/`.
+- Prod LLM channels: `LLM_CHANNELS=newapio,newapia` → http://192.168.1.33:3008 (NAS New API); proxy
+  http://192.168.1.33:7890 (NO_PROXY includes 192.168.1.33 intranet).
+
+**Rules:**
+- `F:\dsa` never runs servers; "deploy to port 8000" always means the Ubuntu prod env, never localhost.
+- Test data, source, containers, and ports are fully isolated from prod; prod `data/` is never written by sync.
+- Prod sync updates code only (source-mount or new overlay image); never touch prod `data/`.
+- Windows `core.symlinks=false` makes `CLAUDE.md` appear non-symlinked — environmental artifact, not a defect.
+- `DEV_WORKFLOW.md` is gitignored; the environment section of `AGENTS.md` is the tracked source of truth for it.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
