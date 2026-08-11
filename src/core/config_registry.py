@@ -4246,6 +4246,31 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
             },
         ],
+    },
+    "ANALYSIS_PREVIOUS_WATCH_HARD": {
+        "title": "Previous Watch-Point Hard Constraint",
+        "description": "Require a structured dashboard.previous_watch_verification field validated by the report integrity checker. Only effective when ANALYSIS_PREVIOUS_WATCH_ENABLED is true.",
+        "category": "agent",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 68,
+        "help_key": "settings.agent.ANALYSIS_PREVIOUS_WATCH_HARD",
+        "examples": [
+            "ANALYSIS_PREVIOUS_WATCH_HARD=true",
+            "ANALYSIS_PREVIOUS_WATCH_HARD=false",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：Agent 配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+            },
+        ],
         "warning_codes": [],
     },
     "AGENT_SKILL_AUTOWEIGHT": {

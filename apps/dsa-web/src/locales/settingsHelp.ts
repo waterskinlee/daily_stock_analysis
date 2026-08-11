@@ -992,6 +992,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['提升跨日分析的信号连续性，历史观察点不再被遗漏。'],
     notes: ['默认开启；关闭后回到每次分析独立、不带历史观察点的行为。'],
   },
+  'settings.agent.ANALYSIS_PREVIOUS_WATCH_HARD': {
+    title: '上次观察点硬约束',
+    summary: '强制要求 LLM 输出结构化核对字段，缺失则由报告完整性校验重试或占位补全。',
+    usage: '开启后，若提示词注入了上次观察点，LLM 必须在 dashboard.previous_watch_verification 输出结构化核对结果（has_previous/items/summary），完整性校验不通过时触发重试或占位补全。',
+    valueNotes: ['仅当「复用上次观察点」开启时生效；无上次记录或回读失败时不校验。'],
+    impact: ['将核对从提示词软约束升级为结构化硬约束，避免模型忽略核对要求。'],
+    notes: ['默认关闭以保持向后兼容；开启后 Agent 路径走占位补全，不做 LLM 重试。'],
+  },
   'settings.agent.AGENT_SKILL_AUTOWEIGHT': {
     title: '策略自动权重',
     summary: '基于真实、可归因且样本充足的 Skill Outcome 保守调整策略权重。',
@@ -2193,7 +2201,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     usage: 'When enabled, the system records each prediction and compares it with actual outcomes to calibrate future confidence.',
     valueNotes: ['Calibration takes effect after sufficient prediction data accumulates.'],
     impact: ['Affects Agent confidence calibration and long-term analysis quality.'],
-    notes: ['Works best when combined with the backtest feature.'],
+  },
+  'settings.agent.ANALYSIS_PREVIOUS_WATCH_HARD': {
+    title: 'Previous Watch-Point Hard Constraint',
+    summary: 'Require a structured verification field; missing or invalid output triggers integrity retry or placeholder fill.',
+    usage: 'When enabled, if previous watch points were injected, the LLM must emit dashboard.previous_watch_verification (has_previous/items/summary). The report integrity checker retries or placeholder-fills on missing/invalid output.',
+    valueNotes: ['Only effective when Previous Watch-Point Reuse is enabled; not enforced when there is no prior record or read-back fails.'],
+    impact: ['Upgrades verification from a prompt soft-constraint to a structured hard-constraint, preventing the model from silently skipping it.'],
+    notes: ['Off by default for backward compatibility; Agent path uses placeholder fill (no LLM retry).'],
   },
   'settings.agent.ANALYSIS_PREVIOUS_WATCH_ENABLED': {
     title: 'Previous Watch-Point Reuse',

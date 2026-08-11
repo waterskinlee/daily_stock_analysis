@@ -1170,6 +1170,68 @@ class NotificationService(
                 report_lines.append(f"- {limitation}")
             report_lines.append("")
 
+    @staticmethod
+    def _pwv_items(value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def _append_previous_watch_verification_block(
+        self,
+        report_lines: List[str],
+        dashboard: Dict[str, Any],
+        labels: Dict[str, str],
+    ) -> None:
+        pwv = dashboard.get("previous_watch_verification") if dashboard else None
+        if not isinstance(pwv, dict):
+            return
+        has_previous = pwv.get("has_previous")
+        if has_previous is False:
+            report_lines.extend([
+                f"### ⏮️ {labels['previous_watch_heading']}",
+                "",
+                f"**{labels['previous_watch_no_previous']}**",
+                "",
+            ])
+            return
+        items = self._pwv_items(pwv.get("items"))
+        summary = str(pwv.get("summary") or "").strip()
+        if not items and not summary:
+            return
+
+        status_map = {
+            "fulfilled": f"✅ {labels['previous_watch_fulfilled']}",
+            "not_fulfilled": f"❌ {labels['previous_watch_not_fulfilled']}",
+            "partially_fulfilled": f"⚠️ {labels['previous_watch_partially_fulfilled']}",
+            "stale": f"⏳ {labels['previous_watch_stale']}",
+        }
+
+        report_lines.extend([
+            f"### ⏮️ {labels['previous_watch_heading']}",
+            "",
+            f"| {labels['previous_watch_condition_label']} | {labels['previous_watch_status_label']} | {labels['previous_watch_evidence_label']} | {labels['previous_watch_impact_label']} |",
+            "|---------|---------|---------|---------|",
+        ])
+        for item in items:
+            condition = str(item.get("condition") or "").strip() or "N/A"
+            status_raw = str(item.get("status") or "").strip()
+            status = status_map.get(status_raw, status_raw or "N/A")
+            evidence = str(item.get("evidence") or "").strip() or "N/A"
+            impact = str(item.get("impact") or "").strip() or "N/A"
+            condition = condition.replace("|", "\\|")
+            evidence = evidence.replace("|", "\\|")
+            impact = impact.replace("|", "\\|")
+            report_lines.append(
+                f"| {condition} | {status} | {evidence} | {impact} |"
+            )
+        report_lines.append("")
+
+        if summary:
+            report_lines.extend([
+                f"**{labels['previous_watch_summary_label']}**: {summary}",
+                "",
+            ])
+
     def _get_display_operation_advice(
         self,
         result: AnalysisResult,
@@ -1454,6 +1516,7 @@ class NotificationService(
                             ])
 
                 self._append_phase_decision_block(report_lines, dashboard, labels)
+                self._append_previous_watch_verification_block(report_lines, dashboard, labels)
 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}

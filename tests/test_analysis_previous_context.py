@@ -208,6 +208,9 @@ class TestFormatPreviousAnalysisSection:
         assert "止损位 1450" in text
         assert "理想买点 1500" in text
         assert "已兑现" in text
+        assert "previous_watch_verification" in text
+        assert "has_previous" in text
+        assert "fulfilled/not_fulfilled/partially_fulfilled/stale" in text
 
     def test_en_renders_with_english_labels(self):
         prev = {"watch_conditions": ["break below 12.5 stop"], "stop_loss": 12.5}
@@ -216,6 +219,8 @@ class TestFormatPreviousAnalysisSection:
         assert "break below 12.5 stop" in text
         assert "stop-loss 12.5" in text
         assert "fulfilled" in text
+        assert "previous_watch_verification" in text
+        assert "has_previous" in text
 
     def test_empty_prev_returns_empty(self):
         assert format_previous_analysis_section({}, "zh") == ""

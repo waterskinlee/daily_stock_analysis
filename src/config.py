@@ -1049,6 +1049,10 @@ class Config:
     # run's prompt (soft constraint) so yesterday's observation points are
     # verified instead of silently dropped.
     analysis_previous_watch_enabled: bool = True
+    # Hard constraint: require a structured ``previous_watch_verification``
+    # field in the dashboard, validated by the report integrity checker.
+    # Only effective when ``analysis_previous_watch_enabled`` is also true.
+    analysis_previous_watch_hard: bool = False
     agent_skill_autoweight: bool = True  # Weight skills by attributable Outcome performance
     agent_skill_routing: str = "auto"  # Skill routing: 'auto' (regime-based) or 'manual'
     agent_context_compression_enabled: bool = False  # Compress visible chat history before Agent calls
@@ -2050,6 +2054,10 @@ class Config:
             analysis_previous_watch_enabled=parse_env_bool(
                 os.getenv('ANALYSIS_PREVIOUS_WATCH_ENABLED'),
                 True,
+            ),
+            analysis_previous_watch_hard=parse_env_bool(
+                os.getenv('ANALYSIS_PREVIOUS_WATCH_HARD'),
+                False,
             ),
             agent_skill_autoweight=(
                 os.getenv('AGENT_SKILL_AUTOWEIGHT')

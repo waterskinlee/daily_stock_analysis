@@ -126,6 +126,28 @@ class PhaseDecision(BaseModel):
     data_limitations: List[str] = Field(default_factory=list)
 
 
+class VerificationItem(BaseModel):
+    """Single previous-watch-condition verification result."""
+
+    condition: Optional[str] = None
+    status: Optional[str] = None
+    evidence: Optional[str] = None
+    impact: Optional[str] = None
+
+
+class PreviousWatchVerification(BaseModel):
+    """Structured verification of the previous analysis's watch points.
+
+    Hard-constraint companion to the injected ``previous_analysis_context``
+    section. The integrity checker validates shape; the LLM fills content.
+    """
+
+    has_previous: Optional[bool] = None
+    previous_analysis_time: Optional[str] = None
+    items: List[VerificationItem] = Field(default_factory=list)
+    summary: Optional[str] = None
+
+
 class SignalAttribution(BaseModel):
     """Signal attribution analysis - explains what factors contributed most to the recommendation."""
 
@@ -345,6 +367,7 @@ class Dashboard(BaseModel):
     battle_plan: Optional[BattlePlan] = None
     phase_decision: Optional[PhaseDecision] = None
     signal_attribution: Optional[SignalAttribution] = None
+    previous_watch_verification: Optional[PreviousWatchVerification] = None
     agent_disagreement_explanation: Optional[AgentDisagreementExplanation] = None
 
 

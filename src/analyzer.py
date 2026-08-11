@@ -300,6 +300,7 @@ def check_content_integrity(
     result: "AnalysisResult",
     *,
     require_phase_decision: bool = False,
+    require_previous_watch_verification: bool = False,
 ) -> Tuple[bool, List[str]]:
     """
     Check mandatory fields for report content integrity.
@@ -372,6 +373,56 @@ def check_content_integrity(
             missing.append("dashboard.phase_decision.confidence_reason")
         if not isinstance(phase_decision.get("data_limitations"), list):
             missing.append("dashboard.phase_decision.data_limitations")
+    if require_previous_watch_verification:
+        pwv = dash.get("previous_watch_verification")
+        if not isinstance(pwv, dict):
+            missing.append("dashboard.previous_watch_verification")
+        else:
+            has_previous = pwv.get("has_previous")
+            if not isinstance(has_previous, bool):
+                missing.append("dashboard.previous_watch_verification.has_previous")
+            else:
+                items = pwv.get("items")
+                if not isinstance(items, list):
+                    missing.append("dashboard.previous_watch_verification.items")
+                elif has_previous:
+                    if not items:
+                        missing.append("dashboard.previous_watch_verification.items")
+                    else:
+                        valid_statuses = {
+                            "fulfilled",
+                            "not_fulfilled",
+                            "partially_fulfilled",
+                            "stale",
+                        }
+                        for idx, item in enumerate(items):
+                            if not isinstance(item, dict):
+                                missing.append(
+                                    f"dashboard.previous_watch_verification.items[{idx}]"
+                                )
+                                continue
+                            if _is_blank_text(item.get("condition")):
+                                missing.append(
+                                    f"dashboard.previous_watch_verification.items[{idx}].condition"
+                                )
+                            status = item.get("status")
+                            if not isinstance(status, str) or status not in valid_statuses:
+                                missing.append(
+                                    f"dashboard.previous_watch_verification.items[{idx}].status"
+                                )
+                            if _is_blank_text(item.get("evidence")):
+                                missing.append(
+                                    f"dashboard.previous_watch_verification.items[{idx}].evidence"
+                                )
+                            if _is_blank_text(item.get("impact")):
+                                missing.append(
+                                    f"dashboard.previous_watch_verification.items[{idx}].impact"
+                                )
+                else:
+                    if items:
+                        missing.append("dashboard.previous_watch_verification.items")
+            if _is_blank_text(pwv.get("summary")):
+                missing.append("dashboard.previous_watch_verification.summary")
     return len(missing) == 0, missing
 
 
@@ -490,6 +541,41 @@ def apply_placeholder_fill(result: "AnalysisResult", missing_fields: List[str]) 
             elif field in phase_decision_placeholders:
                 if _is_blank_text(phase_decision.get(field.rsplit(".", 1)[-1])):
                     phase_decision[field.rsplit(".", 1)[-1]] = phase_decision_placeholders[field]
+        elif field.startswith("dashboard.previous_watch_verification"):
+            if not result.dashboard:
+                result.dashboard = {}
+            pwv = result.dashboard.get("previous_watch_verification")
+            if not isinstance(pwv, dict):
+                pwv = {}
+                result.dashboard["previous_watch_verification"] = pwv
+            if field == "dashboard.previous_watch_verification":
+                # Top-level missing: fill a minimal valid empty-state shell.
+                pwv.setdefault("has_previous", True)
+                pwv.setdefault("previous_analysis_time", None)
+                pwv.setdefault("items", [])
+                pwv.setdefault(
+                    "summary",
+                    _localized_text(
+                        report_language,
+                        en="Model did not provide a previous-watch verification summary.",
+                        zh="模型未提供上次观察点核对结论。",
+                        ko="모델이 이전 관찰 포인트 검증 결론을 제공하지 않았습니다.",
+                    ),
+                )
+            elif field == "dashboard.previous_watch_verification.has_previous":
+                if not isinstance(pwv.get("has_previous"), bool):
+                    pwv["has_previous"] = True
+            elif field == "dashboard.previous_watch_verification.items":
+                if not isinstance(pwv.get("items"), list):
+                    pwv["items"] = []
+            elif field == "dashboard.previous_watch_verification.summary":
+                if _is_blank_text(pwv.get("summary")):
+                    pwv["summary"] = _localized_text(
+                        report_language,
+                        en="Model did not provide a previous-watch verification summary.",
+                        zh="模型未提供上次观察点核对结论。",
+                        ko="모델이 이전 관찰 포인트 검증 결론을 제공하지 않았습니다.",
+                    )
 
 
 # ---------- chip_structure fallback (Issue #589) ----------
@@ -1987,6 +2073,20 @@ class GeminiAnalyzer:
             "data_limitations": ["阶段或数据质量限制1", "阶段或数据质量限制2"]
         },
 
+        "previous_watch_verification": {
+            "has_previous": true,
+            "previous_analysis_time": "YYYY-MM-DD HH:MM（上次分析时间）",
+            "items": [
+                {
+                    "condition": "上次观察条件原文",
+                    "status": "fulfilled/not_fulfilled/partially_fulfilled/stale",
+                    "evidence": "今日行情/最新数据中的核对依据",
+                    "impact": "对本次决策的影响"
+                }
+            ],
+            "summary": "整体核对结论"
+        },
+
         "signal_attribution": {
             "technical_indicators": 技术指标贡献度(0-100),
             "news_sentiment": 新闻舆情贡献度(0-100),
@@ -2173,6 +2273,20 @@ class GeminiAnalyzer:
             "next_check_time": "下一次检查点或市场本地时间",
             "confidence_reason": "置信度理由，说明阶段和数据质量限制",
             "data_limitations": ["阶段或数据质量限制1", "阶段或数据质量限制2"]
+        },
+
+        "previous_watch_verification": {
+            "has_previous": true,
+            "previous_analysis_time": "YYYY-MM-DD HH:MM（上次分析时间）",
+            "items": [
+                {
+                    "condition": "上次观察条件原文",
+                    "status": "fulfilled/not_fulfilled/partially_fulfilled/stale",
+                    "evidence": "今日行情/最新数据中的核对依据",
+                    "impact": "对本次决策的影响"
+                }
+            ],
+            "summary": "整体核对结论"
         },
 
         "signal_attribution": {
@@ -3611,9 +3725,15 @@ class GeminiAnalyzer:
                 if not config.report_integrity_enabled:
                     break
                 require_phase_decision = isinstance(context.get("market_phase_context"), dict)
+                require_previous_watch = (
+                    getattr(config, "analysis_previous_watch_hard", False)
+                    and getattr(config, "analysis_previous_watch_enabled", True)
+                    and bool(context.get("previous_watch_injected"))
+                )
                 pass_integrity, missing_fields = self._check_content_integrity(
                     result,
                     require_phase_decision=require_phase_decision,
+                    require_previous_watch_verification=require_previous_watch,
                 )
                 if pass_integrity:
                     break
@@ -4427,9 +4547,14 @@ class GeminiAnalyzer:
         result: AnalysisResult,
         *,
         require_phase_decision: bool = False,
+        require_previous_watch_verification: bool = False,
     ) -> Tuple[bool, List[str]]:
         """Delegate to module-level check_content_integrity."""
-        return check_content_integrity(result, require_phase_decision=require_phase_decision)
+        return check_content_integrity(
+            result,
+            require_phase_decision=require_phase_decision,
+            require_previous_watch_verification=require_previous_watch_verification,
+        )
 
     def _build_integrity_complement_prompt(self, missing_fields: List[str], report_language: str = "zh") -> str:
         """Build complement instruction for missing mandatory fields."""
@@ -4457,12 +4582,21 @@ class GeminiAnalyzer:
                     lines.append("- dashboard.phase_decision.immediate_action: act now / wait / watch / no intraday action")
                 elif f == "dashboard.phase_decision.watch_conditions":
                     lines.append("- dashboard.phase_decision.watch_conditions: list of watch conditions")
-                elif f == "dashboard.phase_decision.next_check_time":
-                    lines.append("- dashboard.phase_decision.next_check_time: next check point or market-local time")
                 elif f == "dashboard.phase_decision.confidence_reason":
                     lines.append("- dashboard.phase_decision.confidence_reason: confidence rationale and data limits")
                 elif f == "dashboard.phase_decision.data_limitations":
                     lines.append("- dashboard.phase_decision.data_limitations: list of phase/data quality limitations")
+                elif f == "dashboard.previous_watch_verification":
+                    lines.append("- dashboard.previous_watch_verification: structured verification object with has_previous, previous_analysis_time, items (each: condition/status/evidence/impact), summary")
+                elif f == "dashboard.previous_watch_verification.has_previous":
+                    lines.append("- dashboard.previous_watch_verification.has_previous: boolean (true when previous watch points were injected)")
+                elif f == "dashboard.previous_watch_verification.items":
+                    lines.append("- dashboard.previous_watch_verification.items: non-empty array; each item has condition, status (fulfilled/not_fulfilled/partially_fulfilled/stale), evidence, impact")
+                elif f == "dashboard.previous_watch_verification.summary":
+                    lines.append("- dashboard.previous_watch_verification.summary: overall verification conclusion")
+                elif f.startswith("dashboard.previous_watch_verification.items["):
+                    suffix = f.split("].", 1)[-1] if "]." in f else "entry"
+                    lines.append(f"- {f}: fill {suffix} for this previous-watch verification item")
             return "\n".join(lines)
 
         lines = ["### 补全要求：请在上方分析基础上补充以下必填内容，并输出完整 JSON："]
@@ -4493,6 +4627,17 @@ class GeminiAnalyzer:
                 lines.append("- dashboard.phase_decision.confidence_reason: 置信度理由与数据限制")
             elif f == "dashboard.phase_decision.data_limitations":
                 lines.append("- dashboard.phase_decision.data_limitations: 阶段/数据质量限制数组")
+            elif f == "dashboard.previous_watch_verification":
+                lines.append("- dashboard.previous_watch_verification: 结构化核对对象，含 has_previous、previous_analysis_time、items（每条含 condition/status/evidence/impact）、summary")
+            elif f == "dashboard.previous_watch_verification.has_previous":
+                lines.append("- dashboard.previous_watch_verification.has_previous: 布尔值（本次注入了上次观察点时为 true）")
+            elif f == "dashboard.previous_watch_verification.items":
+                lines.append("- dashboard.previous_watch_verification.items: 非空数组；每条含 condition、status（fulfilled/not_fulfilled/partially_fulfilled/stale）、evidence、impact")
+            elif f == "dashboard.previous_watch_verification.summary":
+                lines.append("- dashboard.previous_watch_verification.summary: 整体核对结论")
+            elif f.startswith("dashboard.previous_watch_verification.items["):
+                suffix = f.split("].", 1)[-1] if "]." in f else "条目"
+                lines.append(f"- {f}: 补全该上次观察点核对{suffix}字段")
         return "\n".join(lines)
 
     def _build_integrity_retry_prompt(

@@ -731,6 +731,7 @@ class StockAnalysisPipeline:
                         enhanced_context["previous_analysis_context"] = (
                             format_previous_analysis_section(prev, report_language)
                         )
+                        enhanced_context["previous_watch_injected"] = True
                 except Exception as exc:
                     logger.warning(f"{stock_name}({code}) 上次分析观察点回读失败: {exc}")
 
@@ -1407,6 +1408,7 @@ class StockAnalysisPipeline:
                         initial_context["previous_analysis_context"] = (
                             format_previous_analysis_section(prev, report_language)
                         )
+                        initial_context["previous_watch_injected"] = True
                 except Exception as exc:
                     logger.warning(f"{code} Agent 模式上次分析观察点回读失败: {exc}")
             
@@ -1628,9 +1630,15 @@ class StockAnalysisPipeline:
             if result and getattr(self.config, "report_integrity_enabled", False):
                 from src.analyzer import check_content_integrity, apply_placeholder_fill
 
+                require_previous_watch = (
+                    getattr(self.config, "analysis_previous_watch_hard", False)
+                    and getattr(self.config, "analysis_previous_watch_enabled", True)
+                    and bool(initial_context.get("previous_watch_injected"))
+                )
                 pass_integrity, missing = check_content_integrity(
                     result,
                     require_phase_decision=isinstance(market_phase_summary, dict),
+                    require_previous_watch_verification=require_previous_watch,
                 )
                 if not pass_integrity:
                     apply_placeholder_fill(result, missing)

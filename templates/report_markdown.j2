@@ -140,6 +140,28 @@
 
 {% endif %}
 
+{% set pwv = dashboard.get('previous_watch_verification') or {} %}
+{% if pwv and pwv.get('has_previous') is not none %}
+### ⏮️ {{ labels.previous_watch_heading }}
+
+{% if pwv.get('has_previous') == false %}
+**{{ labels.previous_watch_no_previous }}**
+{% else %}
+{% set pwv_items = pwv.get('items') or [] %}
+{% if pwv_items %}
+| {{ labels.previous_watch_condition_label }} | {{ labels.previous_watch_status_label }} | {{ labels.previous_watch_evidence_label }} | {{ labels.previous_watch_impact_label }} |
+|---------|---------|---------|---------|
+{% for item in pwv_items %}
+| {{ item.get('condition') or 'N/A' }} | {{ item.get('status') or 'N/A' }} | {{ item.get('evidence') or 'N/A' }} | {{ item.get('impact') or 'N/A' }} |
+{% endfor %}
+{% endif %}
+{% if pwv.get('summary') %}
+**{{ labels.previous_watch_summary_label }}**: {{ pwv.get('summary') }}
+{% endif %}
+{% endif %}
+
+{% endif %}
+
 {% set signal_attr = dashboard.get('signal_attribution') or {} %}
 {% set signal_attr_weights = signal_attribution_weight_items(signal_attr) %}
 {% if signal_attribution_has_content(signal_attr) %}

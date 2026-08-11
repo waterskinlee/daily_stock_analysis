@@ -13,12 +13,17 @@ the Agent path:
 
 - ``load_previous_analysis_context`` selects the most recent eligible record.
 - ``format_previous_analysis_section`` renders a compact prompt section that
-  asks the LLM to verify each condition. This is a *soft* constraint today: the
-  instruction is in the prompt but missing verification does not fail the
-  report integrity check. The strong-constraint upgrade (a structured
-  ``previous_watch_verification`` field validated by the report integrity
-  checker) is deliberately not implemented yet; see the evaluation in
-  docs/CHANGELOG.md.
+  asks the LLM to verify each condition and (when the hard constraint is on)
+  emit a structured ``dashboard.previous_watch_verification`` field.
+
+Two enforcement levels, both gated by ``ANALYSIS_PREVIOUS_WATCH_ENABLED``:
+
+- *Soft* (default): the instruction is in the prompt but missing verification
+  does not fail the report integrity check.
+- *Hard* (``ANALYSIS_PREVIOUS_WATCH_HARD=true``): the report integrity checker
+  validates ``dashboard.previous_watch_verification`` — missing or invalid
+  output triggers LLM retry (legacy path) or placeholder fill (Agent path).
+  See ``docs/previous-watch-hard-constraint.md`` for the full design.
 """
 
 from __future__ import annotations
@@ -229,7 +234,12 @@ _LABELS = {
             "请逐条核对以上「上次观察条件」在今日行情/最新数据中的兑现情况"
             "（例如止损位是否已跌破、压力位是否有效突破、量能与资金是否配合），"
             "对每一条明确标注「已兑现 / 未兑现 / 部分兑现」，并说明其对本次决策的影响。"
-            "若上次分析距今超过 10 个交易日，可判定观察点已失效并直接说明，不必强行引用。"
+            "若上次分析距今超过 10 个交易日，可判定观察点已失效并直接说明，不必强行引用。\n"
+            "输出要求：必须在 `dashboard.previous_watch_verification` 字段输出结构化核对结果：\n"
+            "- has_previous: true（本次已注入上次观察点）\n"
+            "- previous_analysis_time: 上次分析时间（YYYY-MM-DD HH:MM）\n"
+            "- items: 数组，每条含 condition（上次条件原文）、status（fulfilled/not_fulfilled/partially_fulfilled/stale）、evidence（今日数据依据）、impact（对本次决策影响）\n"
+            "- summary: 整体核对结论"
         ),
     },
     "en": {
@@ -245,7 +255,12 @@ _LABELS = {
             "(e.g. whether the stop-loss was breached, resistance was broken, or volume / capital "
             "flow confirmed), mark each as \"fulfilled / not fulfilled / partially fulfilled\", and "
             "state the impact on today's conclusion. If the previous analysis is older than 10 "
-            "calendar days, treat the watch points as stale and say so instead of force-citing them."
+            "calendar days, treat the watch points as stale and say so instead of force-citing them.\n"
+            "Output requirement: you MUST emit a structured result in `dashboard.previous_watch_verification`:\n"
+            "- has_previous: true (previous watch points were injected this run)\n"
+            "- previous_analysis_time: previous analysis time (YYYY-MM-DD HH:MM)\n"
+            "- items: array; each item has condition (original text), status (fulfilled/not_fulfilled/partially_fulfilled/stale), evidence (today's data basis), impact (effect on this decision)\n"
+            "- summary: overall verification conclusion"
         ),
     },
     "ko": {
@@ -260,7 +275,12 @@ _LABELS = {
             "위의 이전 관찰 조건 각각을 오늘 시세/최신 데이터와 대조해 "
             "(예: 손절선 이탈 여부, 저항선 돌파 여부, 거래량·자금 동반 여부) "
             "「이행됨 / 미이행 / 부분 이행」으로 명시하고 이번 판단에 미치는 영향을 서술하세요. "
-            "이전 분석이 10일 이상 지났다면 관찰 포인트가 유효하지 않다고 판단하고 그렇게 밝히세요."
+            "이전 분석이 10일 이상 지났다면 관찰 포인트가 유효하지 않다고 판단하고 그렇게 밝히세요.\n"
+            "출력 요구: `dashboard.previous_watch_verification` 필드에 구조화된 결과를 반드시 출력하세요:\n"
+            "- has_previous: true (이전 관찰 포인트가 이번에 주입됨)\n"
+            "- previous_analysis_time: 이전 분석 시간 (YYYY-MM-DD HH:MM)\n"
+            "- items: 배열; 각 항목은 condition(원문), status(fulfilled/not_fulfilled/partially_fulfilled/stale), evidence(오늘 데이터 근거), impact(이번 결정에 미치는 영향)\n"
+            "- summary: 전체 검증 결론"
         ),
     },
 }

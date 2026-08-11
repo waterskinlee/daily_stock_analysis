@@ -147,6 +147,19 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
             "confidence_reason": "置信度理由，说明阶段和数据质量限制",
             "data_limitations": ["阶段或数据质量限制1", "阶段或数据质量限制2"]
         }},
+        "previous_watch_verification": {{
+            "has_previous": true,
+            "previous_analysis_time": "YYYY-MM-DD HH:MM（上次分析时间）",
+            "items": [
+                {{
+                    "condition": "上次观察条件原文",
+                    "status": "fulfilled/not_fulfilled/partially_fulfilled/stale",
+                    "evidence": "今日行情/最新数据中的核对依据",
+                    "impact": "对本次决策的影响"
+                }}
+            ],
+            "summary": "整体核对结论"
+        }},
         "signal_attribution": {{
             "technical_indicators": 技术指标贡献度(0-100；有效非零贡献度之和应为100；全零表示无有效信号),
             "news_sentiment": 新闻舆情贡献度(0-100；有效非零贡献度之和应为100；全零表示无有效信号),
@@ -218,6 +231,7 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 - 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
 - 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
+- 若提示词中注入了「上次分析观察点」section，必须输出 `dashboard.previous_watch_verification` 结构化核对字段：`has_previous=true`，`items` 数组逐条含 condition/status（fulfilled/not_fulfilled/partially_fulfilled/stale）/evidence/impact，`summary` 整体核对结论。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
 - 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
 
@@ -306,6 +320,19 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
             "confidence_reason": "置信度理由，说明阶段和数据质量限制",
             "data_limitations": ["阶段或数据质量限制1", "阶段或数据质量限制2"]
         }},
+        "previous_watch_verification": {{
+            "has_previous": true,
+            "previous_analysis_time": "YYYY-MM-DD HH:MM（上次分析时间）",
+            "items": [
+                {{
+                    "condition": "上次观察条件原文",
+                    "status": "fulfilled/not_fulfilled/partially_fulfilled/stale",
+                    "evidence": "今日行情/最新数据中的核对依据",
+                    "impact": "对本次决策的影响"
+                }}
+            ],
+            "summary": "整体核对结论"
+        }},
         "signal_attribution": {{
             "technical_indicators": 技术指标贡献度(0-100；有效非零贡献度之和应为100；全零表示无有效信号),
             "news_sentiment": 新闻舆情贡献度(0-100；有效非零贡献度之和应为100；全零表示无有效信号),
@@ -374,6 +401,7 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
 - 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
 - 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
+- 若提示词中注入了「上次分析观察点」section，必须输出 `dashboard.previous_watch_verification` 结构化核对字段：`has_previous=true`，`items` 数组逐条含 condition/status（fulfilled/not_fulfilled/partially_fulfilled/stale）/evidence/impact，`summary` 整体核对结论。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
 - 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
 
