@@ -721,3 +721,422 @@ class TestIntegrityRetryPrompt(unittest.TestCase):
         self.assertIn("原始提示", prompt)
         self.assertIn('{"analysis_summary": "已有内容"}', prompt)
         self.assertIn("dashboard.core_conclusion.one_sentence", prompt)
+
+
+class TestAgentIntegrityRepair(unittest.TestCase):
+    """Agent-path bounded LLM repair before placeholder fill."""
+
+    def _make_pipeline(self):
+        from src.core.pipeline import StockAnalysisPipeline
+
+        pipe = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+        pipe.config = type("C", (), {"report_language": "zh"})()
+        return pipe
+    def _base_result(self, sentiment_score=70, operation_advice="持有", analysis_summary="稳健", **dashboard_overrides):
+        dashboard = {
+            "core_conclusion": {"one_sentence": "持有"},
+            "intelligence": {"risk_alerts": ["风险1"]},
+            "battle_plan": {"sniper_points": {"stop_loss": "100"}},
+            "previous_watch_verification": {
+                "has_previous": True,
+                "items": [
+                    {
+                        "condition": "跌破100止损",
+                        "status": "not_fulfilled",
+                        "evidence": "未跌破",
+                        "impact": "继续持有",
+                    }
+                ],
+                "summary": "止损未触发",
+            },
+        }
+        dashboard.update(dashboard_overrides)
+        return AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            trend_prediction="看多",
+            sentiment_score=sentiment_score,
+            operation_advice=operation_advice,
+            analysis_summary=analysis_summary,
+            decision_type="hold",
+            dashboard=dashboard,
+        )
+
+    def _make_context(self, **overrides):
+        ctx = {
+            "previous_analysis_context": "## 上次分析观察点\n- 跌破100止损",
+            "realtime_quote": {"price": 105.2, "change_pct": 2.3, "volume_ratio": 1.8},
+            "trend_result": {
+                "trend_status": "bullish",
+                "buy_signal": "buy",
+                "signal_score": 65,
+                "ma5": 100.0,
+                "ma10": 99.0,
+                "ma20": 98.0,
+                "risk_factors": ["高位放量"],
+            },
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_no_adapter_returns_false(self) -> None:
+        """Repair returns False (→ placeholder) when no LLM adapter available."""
+        pipe = self._make_pipeline()
+        pipe._resolve_repair_llm_adapter = lambda: None
+        result = self._base_result(sentiment_score=None)
+        ok, missing = check_content_integrity(result)
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertFalse(ret)
+
+    def test_empty_response_returns_false(self) -> None:
+        """Empty/error LLM response → False."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                return type("R", (), {"content": "", "provider": "error"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(sentiment_score=None)
+        ok, missing = check_content_integrity(result)
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertFalse(ret)
+
+    def test_timeout_returns_false_no_retry(self) -> None:
+        """Timeout is fatal (no retry) → False."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                raise TimeoutError("60s")
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(sentiment_score=None)
+        ok, missing = check_content_integrity(result)
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=2,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertFalse(ret)
+
+    def test_parse_error_retries_then_fails(self) -> None:
+        """Parse error is retried (non-deterministic JSON drift)."""
+        pipe = self._make_pipeline()
+        calls = [0]
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                calls[0] += 1
+                return type("R", (), {"content": "bad json", "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(sentiment_score=None)
+        ok, missing = check_content_integrity(result)
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=2,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertFalse(ret)
+        self.assertEqual(calls[0], 2)
+
+    def test_successful_repair_merges_and_passes_recheck(self) -> None:
+        """Valid repair response fills missing fields → re-check passes."""
+        pipe = self._make_pipeline()
+        repair = {
+            "sentiment_score": 82,
+            "operation_advice": "加仓",
+            "analysis_summary": "新摘要",
+            "dashboard": {
+                "intelligence": {"risk_alerts": ["新风险"]},
+                "battle_plan": {"sniper_points": {"stop_loss": 95.5}},
+            },
+        }
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                return type("R", (), {"content": json.dumps(repair, ensure_ascii=False), "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = AnalysisResult(
+            code="600519",
+            name="X",
+            trend_prediction="看多",
+            sentiment_score=None,
+            operation_advice="",
+            analysis_summary="",
+            decision_type="hold",
+            dashboard={
+                "core_conclusion": {"one_sentence": "x"},
+                "previous_watch_verification": {
+                    "has_previous": True,
+                    "items": [
+                        {"condition": "c", "status": "fulfilled", "evidence": "e", "impact": "i"}
+                    ],
+                    "summary": "s",
+                },
+            },
+        )
+        ok, missing = check_content_integrity(result)
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertTrue(ret)
+        self.assertEqual(result.sentiment_score, 82)
+        self.assertEqual(result.operation_advice, "加仓")
+        self.assertEqual(result.dashboard["battle_plan"]["sniper_points"]["stop_loss"], 95.5)
+
+    def test_merge_only_does_not_overwrite_existing(self) -> None:
+        """Repair response trying to overwrite existing fields is ignored."""
+        pipe = self._make_pipeline()
+        result = self._base_result(sentiment_score=75)
+        result.analysis_summary = ""
+        ok, missing = check_content_integrity(result)
+        # Only analysis_summary is missing; repair tries to overwrite everything.
+        repair = {
+            "sentiment_score": 999,
+            "operation_advice": "卖出",
+            "analysis_summary": "新摘要",
+            "dashboard": {
+                "core_conclusion": {"one_sentence": "覆盖"},
+                "intelligence": {"risk_alerts": ["覆盖"]},
+                "battle_plan": {"sniper_points": {"stop_loss": 999}},
+            },
+        }
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                return type("R", (), {"content": json.dumps(repair, ensure_ascii=False), "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_previous_watch_verification=False,
+            require_phase_decision=False,
+        )
+        self.assertTrue(ret)
+        # Existing fields preserved.
+        self.assertEqual(result.sentiment_score, 75)
+        self.assertEqual(result.operation_advice, "持有")
+        self.assertEqual(result.dashboard["core_conclusion"]["one_sentence"], "持有")
+        self.assertEqual(result.dashboard["intelligence"]["risk_alerts"], ["风险1"])
+        self.assertEqual(result.dashboard["battle_plan"]["sniper_points"]["stop_loss"], "100")
+        # Only analysis_summary was filled.
+        self.assertEqual(result.analysis_summary, "新摘要")
+
+    def test_bare_shape_repair_root_normalization(self) -> None:
+        """Bare dashboard shape (no nested dashboard key) is handled."""
+        pipe = self._make_pipeline()
+        result = AnalysisResult(
+            code="600519",
+            name="X",
+            trend_prediction="看多",
+            sentiment_score=70,
+            operation_advice="持有",
+            analysis_summary="S",
+            decision_type="hold",
+            dashboard={
+                "core_conclusion": {"one_sentence": "x"},
+                "previous_watch_verification": None,
+            },
+        )
+        bare = {
+            "intelligence": {"risk_alerts": ["新风险"]},
+            "battle_plan": {"sniper_points": {"stop_loss": 95.5}},
+            "previous_watch_verification": {
+                "has_previous": True,
+                "items": [
+                    {"condition": "c", "status": "fulfilled", "evidence": "e", "impact": "i"}
+                ],
+                "summary": "s",
+            },
+        }
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                return type("R", (), {"content": json.dumps(bare, ensure_ascii=False), "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        ok, missing = check_content_integrity(
+            result, require_previous_watch_verification=True
+        )
+        ret = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_previous_watch_verification=True,
+            require_phase_decision=False,
+        )
+        self.assertTrue(ret)
+        pwv = result.dashboard["previous_watch_verification"]
+        self.assertTrue(pwv["has_previous"])
+        self.assertEqual(len(pwv["items"]), 1)
+
+    def test_prompt_includes_previous_section_and_digest(self) -> None:
+        """Repair prompt carries the previous watch section + data digest."""
+        pipe = self._make_pipeline()
+        result = self._base_result()
+        messages = pipe._build_agent_integrity_repair_prompt(
+            result,
+            initial_context=self._make_context(),
+            trend_result=None,
+            realtime_quote=None,
+            missing_fields=["dashboard.previous_watch_verification"],
+            report_language="zh",
+        )
+        self.assertEqual(len(messages), 2)
+        usr = messages[1]["content"]
+        self.assertIn("上次分析观察点", usr)
+        self.assertIn("跌破100止损", usr)
+        self.assertIn("当前价", usr)
+        self.assertIn("105.2", usr)
+        self.assertIn("bullish", usr)
+        self.assertIn("MA5", usr)
+
+    def test_prompt_en_locale(self) -> None:
+        """English repair prompt uses English labels."""
+        pipe = self._make_pipeline()
+        result = self._base_result()
+        messages = pipe._build_agent_integrity_repair_prompt(
+            result,
+            initial_context=self._make_context(),
+            trend_result=None,
+            realtime_quote=None,
+            missing_fields=["dashboard.previous_watch_verification"],
+            report_language="en",
+        )
+        usr = messages[1]["content"]
+        self.assertIn("Previous watch-point section", usr)
+        self.assertIn("Current price", usr)
+
+    def test_prompt_empty_previous_section_shows_placeholder(self) -> None:
+        """Empty previous section renders '(无)' / '(none)'."""
+        pipe = self._make_pipeline()
+        result = self._base_result()
+        ctx = self._make_context(previous_analysis_context="")
+        messages = pipe._build_agent_integrity_repair_prompt(
+            result,
+            initial_context=ctx,
+            trend_result=None,
+            realtime_quote=None,
+            missing_fields=["sentiment_score"],
+            report_language="zh",
+        )
+        self.assertIn("(无)", messages[1]["content"])
+
+    def test_parse_repair_dashboard_fenced_with_prose(self) -> None:
+        """Fenced JSON with leading/trailing prose is extracted."""
+        pipe = self._make_pipeline()
+        content = 'Here is the JSON:\n```json\n{"a": 1}\n```\nDone.'
+        result = pipe._parse_repair_dashboard(content)
+        self.assertEqual(result, {"a": 1})
+
+    def test_parse_repair_dashboard_bare_with_prose(self) -> None:
+        """Bare JSON with leading prose is extracted."""
+        pipe = self._make_pipeline()
+        content = 'Result: {"a": 1, "b": [2]}'
+        result = pipe._parse_repair_dashboard(content)
+        self.assertEqual(result, {"a": 1, "b": [2]})
+
+    def test_parse_repair_dashboard_ambiguous_rejected(self) -> None:
+        """Multiple JSON objects → rejected (ambiguous)."""
+        pipe = self._make_pipeline()
+        self.assertIsNone(pipe._parse_repair_dashboard('{"a":1} and {"b":2}'))
+
+    def test_parse_repair_dashboard_empty(self) -> None:
+        """Empty content → None."""
+        pipe = self._make_pipeline()
+        self.assertIsNone(pipe._parse_repair_dashboard(""))
+        self.assertIsNone(pipe._parse_repair_dashboard("   "))
+
+    def test_parse_repair_dashboard_non_dict_rejected(self) -> None:
+        """Non-dict JSON (array) → None."""
+        pipe = self._make_pipeline()
+        self.assertIsNone(pipe._parse_repair_dashboard("[1, 2, 3]"))
+
+    def test_merge_items_index_path(self) -> None:
+        """items[N].field path is merged correctly."""
+        pipe = self._make_pipeline()
+        result = AnalysisResult(
+            code="600519",
+            name="X",
+            trend_prediction="看多",
+            sentiment_score=70,
+            operation_advice="持有",
+            analysis_summary="S",
+            decision_type="hold",
+            dashboard={
+                "previous_watch_verification": {
+                    "has_previous": True,
+                    "items": [
+                        {"condition": "c1", "status": None, "evidence": None, "impact": None}
+                    ],
+                    "summary": "s",
+                }
+            },
+        )
+        repair = {
+            "previous_watch_verification": {
+                "items": [
+                    {"status": "not_fulfilled", "evidence": "ev", "impact": "im"}
+                ]
+            }
+        }
+        missing = [
+            "dashboard.previous_watch_verification.items[0].status",
+            "dashboard.previous_watch_verification.items[0].evidence",
+            "dashboard.previous_watch_verification.items[0].impact",
+        ]
+        merged = pipe._merge_repaired_fields(
+            result, repaired_dashboard=repair, missing_fields=missing
+        )
+        self.assertEqual(merged, 3)
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "not_fulfilled")
+        self.assertEqual(item["evidence"], "ev")
+        self.assertEqual(item["impact"], "im")
+        self.assertEqual(item["condition"], "c1")  # untouched

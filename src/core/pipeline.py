@@ -102,7 +102,13 @@ from data_provider.us_index_mapping import is_us_stock_code
 from bot.models import BotMessage
 
 
+import json
+import re as _re_module
+
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
+_ITEM_INDEX_RE = _re_module.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*)\[(?P<idx>\d+)\]$")
 
 
 def _share_image_payload(result: Any) -> Optional[Dict[str, Any]]:
@@ -1370,6 +1376,9 @@ class StockAnalysisPipeline:
             )
             # Build executor from shared factory (ToolRegistry and SkillManager prototype are cached)
             executor = build_agent_executor(self.config, requested_skills)
+            # Cache the executor's LLM adapter so the post-run integrity
+            # repair path can issue a stateless text completion.
+            self._last_agent_llm_adapter = getattr(executor, "llm_adapter", None)
 
             # Build initial context to avoid redundant tool calls
             initial_context = {
@@ -1626,7 +1635,7 @@ class StockAnalysisPipeline:
                     query_id=query_id,
                 )
 
-            # Agent weak integrity: placeholder fill only, no LLM retry
+            # Agent integrity: attempt LLM repair (bounded retries), then placeholder fill
             if result and getattr(self.config, "report_integrity_enabled", False):
                 from src.analyzer import check_content_integrity, apply_placeholder_fill
 
@@ -1641,11 +1650,26 @@ class StockAnalysisPipeline:
                     require_previous_watch_verification=require_previous_watch,
                 )
                 if not pass_integrity:
-                    apply_placeholder_fill(result, missing)
-                    logger.info(
-                        "[LLM完整性] integrity_mode=agent_weak 必填字段缺失 %s，已占位补全",
-                        missing,
-                    )
+                    max_retries = int(getattr(self.config, "report_integrity_retry", 0) or 0)
+                    repaired = False
+                    if max_retries > 0:
+                        repaired = self._attempt_integrity_repair(
+                            result,
+                            missing_fields=missing,
+                            initial_context=initial_context,
+                            trend_result=trend_result,
+                            realtime_quote=realtime_quote,
+                            report_language=report_language,
+                            max_retries=max_retries,
+                            require_previous_watch_verification=require_previous_watch,
+                            require_phase_decision=isinstance(market_phase_summary, dict),
+                        )
+                    if not repaired:
+                        apply_placeholder_fill(result, missing)
+                        logger.info(
+                            "[LLM完整性] integrity_mode=agent_weak 必填字段缺失 %s，已占位补全",
+                            missing,
+                        )
             # chip_structure fallback (Issue #589), before save_analysis_history
             if result and chip_data is not None:
                 normalize_chip_structure_availability(result, chip_data)
@@ -3125,6 +3149,455 @@ class StockAnalysisPipeline:
             except Exception:
                 return None
         return None
+    # ------------------------------------------------------------------
+    # Agent integrity repair (bounded LLM retry before placeholder fill)
+    # ------------------------------------------------------------------
+    _REPAIR_CALL_TIMEOUT_S: float = 60.0
+    _REPAIR_MAX_TOKENS: int = 4096
+    def _attempt_integrity_repair(
+        self,
+        result: AnalysisResult,
+        *,
+        missing_fields: List[str],
+        initial_context: Dict[str, Any],
+        trend_result: Optional[TrendAnalysisResult],
+        realtime_quote: Any = None,
+        report_language: str,
+        max_retries: int,
+        require_previous_watch_verification: bool,
+        require_phase_decision: bool,
+    ) -> bool:
+        """Attempt bounded LLM repair of missing mandatory fields.
+
+        Returns True if all missing fields were resolved (re-check passes),
+        False otherwise (caller falls back to placeholder fill).
+
+        Design:
+        - Stateless single LLM call per attempt (no agent loop / no tools).
+        - Repair prompt carries a compact data digest (previous watch points
+          section + today's quote/trend snapshot) so evidence-bearing fields
+          like previous_watch_verification can be grounded, not fabricated.
+        - merge-only: only the paths in ``missing_fields`` are copied from
+          the repair response into ``result``; existing fields are untouched.
+        - Hard ceiling: at most ``max_retries`` attempts (config-bounded to
+          0-2), each with an independent timeout. On timeout/parse-error or
+          re-check still failing, returns False so the caller applies the
+          existing placeholder fill.
+        """
+        from src.analyzer import check_content_integrity
+
+        llm_adapter = self._resolve_repair_llm_adapter()
+        if llm_adapter is None:
+            logger.warning(
+                "[LLM完整性] agent_repair skipped: no LLM adapter available"
+            )
+            return False
+
+        remaining_missing = list(missing_fields)
+        for attempt in range(1, max_retries + 1):
+            if not remaining_missing:
+                break
+            messages = self._build_agent_integrity_repair_prompt(
+                result,
+                initial_context=initial_context,
+                trend_result=trend_result,
+                realtime_quote=realtime_quote,
+                missing_fields=remaining_missing,
+                report_language=report_language,
+            )
+            started = time.monotonic()
+            try:
+                response = llm_adapter.call_text(
+                    messages,
+                    temperature=0,
+                    max_tokens=self._REPAIR_MAX_TOKENS,
+                    timeout=self._REPAIR_CALL_TIMEOUT_S,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[LLM完整性] agent_repair attempt=%d/%d failed reason=%s duration=%.1fs",
+                    attempt,
+                    max_retries,
+                    type(exc).__name__,
+                    time.monotonic() - started,
+                )
+                return False
+
+            content = getattr(response, "content", None)
+            if not isinstance(content, str):
+                content = ""
+            provider = getattr(response, "provider", "")
+            if not content or provider == "error":
+                logger.warning(
+                    "[LLM完整性] agent_repair attempt=%d/%d failed reason=empty_response duration=%.1fs",
+                    attempt,
+                    max_retries,
+                    time.monotonic() - started,
+                )
+                return False
+
+            repaired_dashboard = self._parse_repair_dashboard(content)
+            if repaired_dashboard is None:
+                logger.warning(
+                    "[LLM完整性] agent_repair attempt=%d/%d failed reason=parse_error duration=%.1fs",
+                    attempt,
+                    max_retries,
+                    time.monotonic() - started,
+                )
+                continue
+
+            merged_count = self._merge_repaired_fields(
+                result,
+                repaired_dashboard=repaired_dashboard,
+                missing_fields=remaining_missing,
+            )
+            still_pass, still_missing = check_content_integrity(
+                result,
+                require_phase_decision=require_phase_decision,
+                require_previous_watch_verification=require_previous_watch_verification,
+            )
+            elapsed = time.monotonic() - started
+            if still_pass:
+                logger.info(
+                    "[LLM完整性] agent_repair attempt=%d/%d succeeded merged=%d fields remaining_missing=[] duration=%.1fs",
+                    attempt,
+                    max_retries,
+                    merged_count,
+                    elapsed,
+                )
+                return True
+            logger.info(
+                "[LLM完整性] agent_repair attempt=%d/%d partial merged=%d remaining_missing=%s duration=%.1fs",
+                attempt,
+                max_retries,
+                merged_count,
+                still_missing,
+                elapsed,
+            )
+            remaining_missing = still_missing
+        return False
+
+    def _resolve_repair_llm_adapter(self) -> Any:
+        """Resolve an LLM adapter for integrity repair.
+
+        Prefers the adapter used by the most recent Agent run (cached on
+        ``self`` by the agent branch); falls back to a fresh LLMToolAdapter
+        so the repair path still works when the legacy analyzer path drives
+        the pipeline.
+        """
+        adapter = getattr(self, "_last_agent_llm_adapter", None)
+        if adapter is not None:
+            return adapter
+        try:
+            from src.agent.llm_adapter import LLMToolAdapter
+
+            return LLMToolAdapter(self.config)
+        except Exception as exc:
+            logger.warning(
+                "[LLM完整性] agent_repair: cannot build LLMToolAdapter: %s", exc
+            )
+            return None
+
+    def _build_agent_integrity_repair_prompt(
+        self,
+        result: AnalysisResult,
+        *,
+        initial_context: Dict[str, Any],
+        trend_result: Optional[TrendAnalysisResult],
+        realtime_quote: Any = None,
+        missing_fields: List[str],
+        report_language: str,
+    ) -> List[Dict[str, Any]]:
+        """Build messages for a stateless integrity repair LLM call.
+
+        The user message carries a compact data digest so evidence-bearing
+        fields (previous_watch_verification) are grounded in the prior watch
+        section + today's quote/trend, not fabricated.
+        """
+        from src.analyzer import GeminiAnalyzer
+        from src.report_language import normalize_report_language
+
+        lang = normalize_report_language(report_language)
+        analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
+        complement = analyzer._build_integrity_complement_prompt(
+            missing_fields, report_language=lang
+        )
+        previous_section = initial_context.get("previous_analysis_context") or ""
+        # Prefer the serialized snapshot already in initial_context (always a
+        # dict); fall back to the raw realtime_quote object when missing.
+        realtime = initial_context.get("realtime_quote")
+        if realtime is None and realtime_quote is not None:
+            realtime = realtime_quote
+        if realtime is not None and not isinstance(realtime, dict):
+            realtime = self._safe_to_dict(realtime)
+        if not isinstance(realtime, dict):
+            realtime = {}
+        # trend_result in initial_context is already serialized to a dict
+        # by the agent branch; prefer that, then the raw object.
+        trend = initial_context.get("trend_result")
+        if trend is None and trend_result is not None:
+            trend = trend_result
+        if trend is not None and not isinstance(trend, dict):
+            trend = self._safe_to_dict(trend_result)
+        if not isinstance(trend, dict):
+            trend = {}
+
+        is_en = lang in ("en", "ko")
+        lbl_price = "Current price" if is_en else "当前价"
+        lbl_change = "Change%" if is_en else "涨跌幅"
+        lbl_volume = "Volume ratio" if is_en else "量比"
+        lbl_turnover = "Turnover" if is_en else "换手率"
+        lbl_trend = "Trend" if is_en else "趋势"
+        lbl_signal = "Signal" if is_en else "信号"
+        lbl_score = "Score" if is_en else "评分"
+        lbl_risk = "Risk factors" if is_en else "风险因子"
+        lbl_empty = "(no compact data)" if is_en else "(无紧凑数据)"
+
+        digest_lines: List[str] = []
+        if realtime:
+            price = realtime.get("price")
+            if price is not None:
+                digest_lines.append(
+                    f"{lbl_price}: {price} {lbl_change}: {realtime.get('change_pct', 'N/A')}%"
+                )
+            vr = realtime.get("volume_ratio")
+            tr = realtime.get("turnover_rate")
+            if vr is not None or tr is not None:
+                digest_lines.append(f"{lbl_volume}: {vr} {lbl_turnover}: {tr}")
+        if trend:
+            ts = trend.get("trend_status")
+            bs = trend.get("buy_signal")
+            ss = trend.get("signal_score")
+            if ts or bs or ss is not None:
+                digest_lines.append(
+                    f"{lbl_trend}: {ts} {lbl_signal}: {bs} {lbl_score}: {ss}/100"
+                )
+            for k in ("ma5", "ma10", "ma20"):
+                v = trend.get(k)
+                if v is not None:
+                    digest_lines.append(f"{k.upper()}: {v}")
+            rf = trend.get("risk_factors")
+            if rf:
+                digest_lines.append(f"{lbl_risk}: {rf}")
+        digest = "\n".join(digest_lines) if digest_lines else lbl_empty
+
+        try:
+            current_dashboard_json = json.dumps(
+                result.dashboard if isinstance(result.dashboard, dict) else {},
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            current_dashboard_json = "{}"
+
+        if lang in ("en", "ko"):
+            system = (
+                "You are a report repair assistant. You receive a stock decision "
+                "dashboard that is missing mandatory fields. Fill ONLY the missing "
+                "fields listed below using the provided data digest and the previous "
+                "watch-point section. Do NOT modify or omit any existing field. "
+                "Output the complete dashboard JSON object only."
+            )
+            user = (
+                "### Previous watch-point section (grounding for verification):\n"
+                f"{previous_section or '(none)'}\n\n"
+                "### Today's compact data digest:\n"
+                f"{digest}\n\n"
+                "### Current dashboard (do not change existing fields):\n"
+                f"{current_dashboard_json}\n\n"
+                "### Missing fields to fill:\n"
+                f"{complement}\n\n"
+                "Return the full JSON object with the missing fields filled in. "
+                "Do not wrap in prose or code fences."
+            )
+        else:
+            system = (
+                "你是报告修复助手。给定一个缺失必填字段的个股决策仪表盘，"
+                "请仅补齐下列缺失字段，不要改动或省略任何已有字段。"
+                "证据型字段（如上次观察点核对）必须依据下方提供的上次观察点 section "
+                "与今日数据摘要填写，不得编造。仅输出完整 JSON 对象。"
+            )
+            user = (
+                "### 上次分析观察点 section（核对依据，必须参照）：\n"
+                f"{previous_section or '(无)'}\n\n"
+                "### 今日紧凑数据摘要：\n"
+                f"{digest}\n\n"
+                "### 当前仪表盘（不得改动已有字段）：\n"
+                f"{current_dashboard_json}\n\n"
+                "### 缺失字段补全要求：\n"
+                f"{complement}\n\n"
+                "请输出补齐缺失字段后的完整 JSON 对象，不要包裹在代码块或散文中。"
+            )
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+    @staticmethod
+    def _parse_repair_dashboard(content: str) -> Optional[Dict[str, Any]]:
+        """Extract the single JSON object from a repair LLM response.
+
+        More tolerant than the main analyzer extractor: repair responses
+        often carry a leading sentence ("Here is the repaired dashboard:"),
+        so prose around the JSON is allowed. A single JSON object (fenced
+        or bare) must still be locatable; ambiguous multi-object responses
+        are rejected.
+        """
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        fence = _re_module.compile(
+            r"```[ \t]*(?P<lang>[A-Za-z0-9_-]*)[ \t]*\n?(?P<body>.*?)```",
+            flags=_re_module.DOTALL,
+        )
+        matches = list(fence.finditer(text))
+        if len(matches) > 1:
+            return None
+        if len(matches) == 1:
+            json_str = matches[0].group("body").strip()
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                return None
+            return data if isinstance(data, dict) else None
+
+        # No code fence: locate the first JSON object via raw_decode so
+        # leading/trailing prose is tolerated.
+        decoder = json.JSONDecoder()
+        start = text.find("{")
+        while start != -1:
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                start = text.find("{", start + 1)
+                continue
+            # Reject if another JSON object follows the first (ambiguous).
+            tail = text[start + end:]
+            next_brace = tail.find("{")
+            if next_brace != -1:
+                try:
+                    json.JSONDecoder().raw_decode(tail[next_brace:])
+                    return None
+                except json.JSONDecodeError:
+                    pass
+            return obj if isinstance(obj, dict) else None
+        return None
+
+    def _merge_repaired_fields(
+        self,
+        result: AnalysisResult,
+        *,
+        repaired_dashboard: Dict[str, Any],
+        missing_fields: List[str],
+    ) -> int:
+        """Copy only missing fields from the repair response into result.
+
+        merge-only semantics: exclusively paths listed in ``missing_fields``
+        are written; all other keys in ``repaired_dashboard`` are ignored.
+
+        Path dispatch (matches check_content_integrity/apply_placeholder_fill):
+        - Top-level scalars (``sentiment_score`` / ``operation_advice`` /
+          ``analysis_summary``) → ``setattr`` on ``result``.
+        - ``dashboard.*`` paths → strip the ``dashboard.`` prefix and write
+          into ``result.dashboard``.
+        - The repair response may be either a full report shape
+          (``{"dashboard": {...}, "sentiment_score": ...}``) or a bare
+          dashboard shape (``{"core_conclusion": ...}``); normalize the root
+          once so extract reads the correct object.
+        Returns the count of paths actually merged.
+        """
+        if not isinstance(result.dashboard, dict):
+            result.dashboard = {}
+
+        # Normalize the repair response root. The complement prompt asks for
+        # the dashboard JSON, but models often return the full report shape.
+        if isinstance(repaired_dashboard.get("dashboard"), dict):
+            report_root = repaired_dashboard
+            dashboard_root = repaired_dashboard["dashboard"]
+        else:
+            report_root = repaired_dashboard
+            dashboard_root = repaired_dashboard
+
+        merged = 0
+        for field_path in missing_fields:
+            if field_path.startswith("dashboard."):
+                rel = field_path[len("dashboard."):]
+                value = self._extract_path(dashboard_root, rel)
+                if value is _MISSING:
+                    # Fall back to full-report lookup (some models nest).
+                    value = self._extract_path(report_root, field_path)
+                if value is _MISSING:
+                    continue
+                if self._set_path(result.dashboard, rel, value):
+                    merged += 1
+            elif field_path == "dashboard":
+                # Whole-dashboard replacement is not merge-only; skip and let
+                # the per-field paths handle it.
+                continue
+            else:
+                # Top-level scalar on AnalysisResult.
+                value = self._extract_path(report_root, field_path)
+                if value is _MISSING:
+                    continue
+                if hasattr(result, field_path):
+                    try:
+                        setattr(result, field_path, value)
+                        merged += 1
+                    except (AttributeError, TypeError):
+                        continue
+        return merged
+
+    @staticmethod
+    def _extract_path(source: Dict[str, Any], path: str) -> Any:
+        """Read a dotted path (with items[N] support) from source."""
+        current: Any = source
+        for part in path.split("."):
+            item_match = _ITEM_INDEX_RE.match(part)
+            if item_match:
+                key = item_match.group(1)
+                idx = int(item_match.group(2))
+                if not isinstance(current, dict) or key not in current:
+                    return _MISSING
+                arr = current[key]
+                if not isinstance(arr, list) or idx >= len(arr):
+                    return _MISSING
+                current = arr[idx]
+            else:
+                if not isinstance(current, dict) or part not in current:
+                    return _MISSING
+                current = current[part]
+        return current
+
+    @staticmethod
+    def _set_path(target: Dict[str, Any], path: str, value: Any) -> bool:
+        """Write a dotted path (with items[N] support) into target, merge-only."""
+        parts = path.split(".")
+        current: Any = target
+        for i, part in enumerate(parts):
+            is_last = i == len(parts) - 1
+            item_match = _ITEM_INDEX_RE.match(part)
+            if item_match:
+                key = item_match.group(1)
+                idx = int(item_match.group(2))
+                if key not in current or not isinstance(current[key], list):
+                    current[key] = []
+                arr = current[key]
+                while len(arr) <= idx:
+                    arr.append({})
+                if is_last:
+                    arr[idx] = value
+                    return True
+                if not isinstance(arr[idx], dict):
+                    arr[idx] = {}
+                current = arr[idx]
+            else:
+                if is_last:
+                    current[part] = value
+                    return True
+                if part not in current or not isinstance(current[part], dict):
+                    current[part] = {}
+                current = current[part]
+        return False
 
     def _resolve_query_source(self, query_source: Optional[str] = None) -> str:
         """
