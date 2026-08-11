@@ -566,6 +566,7 @@ def _build_previous_watch_context_fallback(
     if not conditions:
         return None
 
+    analysis_time = previous_watch_context.get("analysis_time")
     if isinstance(analysis_time, (date, datetime)):
         previous_analysis_time: Optional[str] = analysis_time.strftime("%Y-%m-%d %H:%M")
     elif analysis_time is None:
