@@ -121,8 +121,9 @@ daily_stock_analysis/
 | `REPORT_SHOW_LLM_MODEL` | 通知报告底部是否显示本次分析使用的 LLM 模型名称，默认 `true`；设为 `false` 可隐藏运行时模型信息。该变量仅调整展示，不影响 provider/model/Base URL、LiteLLM 路由或运行时模型保存/迁移/清理语义。 | 可选 |
 | `REPORT_TEMPLATES_DIR` | Jinja2 模板目录（相对项目根，默认 `templates`） | 可选 |
 | `REPORT_RENDERER_ENABLED` | 启用 Jinja2 模板渲染（默认 `false`，保证零回归） | 可选 |
-| `REPORT_INTEGRITY_ENABLED` | 启用报告完整性校验，缺失必填字段时重试或占位补全（默认 `true`） | 可选 |
-| `REPORT_INTEGRITY_RETRY` | 完整性校验重试次数（默认 `1`，`0` 表示仅占位不重试） | 可选 |
+| `REPORT_INTEGRITY_ENABLED` | 启用报告必填字段校验，缺失字段最终使用占位补全（默认 `true`） | 可选 |
+| `REPORT_INTEGRITY_AGENT_REPAIR_ENABLED` | Agent 模式下允许二次 LLM 仅修复缺失的结构字段（默认 `false`）；`previous_watch_verification` 等证据字段不进入修复调用 | 可选 |
+| `REPORT_INTEGRITY_RETRY` | Agent 结构字段修复尝试次数（默认 `1`，范围 `0-2`；`0` 表示仅占位） | 可选 |
 | `REPORT_HISTORY_COMPARE_N` | 历史信号对比条数，`0` 关闭（默认），`>0` 启用 | 可选 |
 | `ANALYSIS_DELAY` | 个股分析和大盘分析之间的延迟（秒），避免API限流，如 `10` | 可选 |
 | `SAVE_CONTEXT_SNAPSHOT` | 是否保存分析历史 `context_snapshot`，默认 `true`；设为 `false` 或使用 `--no-context-snapshot` 时不持久化整份上下文快照 | 可选 |

@@ -119,8 +119,9 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 | `REPORT_SHOW_LLM_MODEL` | Whether notification report footers show the LLM model used for analysis. Defaults to `true`; set to `false` to hide runtime model metadata. This switch only affects presentation and does not change provider/model/Base URL, LiteLLM routing, or runtime model save/migration/cleanup behavior. | Optional |
 | `REPORT_TEMPLATES_DIR` | Jinja2 template directory (relative to project root, default `templates`) | Optional |
 | `REPORT_RENDERER_ENABLED` | Enable Jinja2 template rendering (default `false`, zero regression) | Optional |
-| `REPORT_INTEGRITY_ENABLED` | Enable report integrity checks, retry or placeholder on missing fields (default `true`) | Optional |
-| `REPORT_INTEGRITY_RETRY` | Integrity retry count (default `1`, `0` = placeholder only) | Optional |
+| `REPORT_INTEGRITY_ENABLED` | Enable mandatory report-field validation and placeholder fallback (default `true`) | Optional |
+| `REPORT_INTEGRITY_AGENT_REPAIR_ENABLED` | Allow a secondary LLM call in Agent mode to repair only missing structural fields (default `false`); evidence fields such as `previous_watch_verification` never enter repair | Optional |
+| `REPORT_INTEGRITY_RETRY` | Agent structural-repair attempt count (default `1`, range `0-2`; `0` = placeholders only) | Optional |
 | `REPORT_HISTORY_COMPARE_N` | History signal comparison count, `0` off (default), `>0` enable | Optional |
 | `ANALYSIS_DELAY` | Delay between stock analysis and market review (seconds) to avoid API rate limits, e.g., `10` | Optional |
 | `SAVE_CONTEXT_SNAPSHOT` | Whether to persist analysis-history `context_snapshot`; defaults to `true`. Set to `false` or use `--no-context-snapshot` to stop persisting the full snapshot | Optional |

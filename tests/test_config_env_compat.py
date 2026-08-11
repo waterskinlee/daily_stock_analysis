@@ -1013,6 +1013,34 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         self.assertEqual(stocks, ["600519", "HK01810"])
         self.assertEqual(emails, ["user@example.com"])
 
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    @patch.object(Config, "_parse_stock_email_groups", return_value=[])
+    def test_integrity_agent_repair_has_independent_switch_and_retry_cap(
+        self,
+        _mock_parse_stock_email_groups,
+        _mock_parse_litellm_yaml,
+        _mock_setup_env,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "REPORT_INTEGRITY_AGENT_REPAIR_ENABLED": "true",
+                "REPORT_INTEGRITY_RETRY": "9",
+            },
+            clear=True,
+        ):
+            configured = Config._load_from_env()
+
+        self.assertTrue(configured.report_integrity_agent_repair_enabled)
+        self.assertEqual(configured.report_integrity_retry, 2)
+
+        with patch.dict(os.environ, {}, clear=True):
+            defaulted = Config._load_from_env()
+
+        self.assertFalse(defaulted.report_integrity_agent_repair_enabled)
+        self.assertEqual(defaulted.report_integrity_retry, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

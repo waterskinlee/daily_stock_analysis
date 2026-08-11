@@ -822,8 +822,8 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertFalse(repaired)
         self.assertEqual(remaining, ["sentiment_score"])
 
-    def test_timeout_returns_false_no_retry(self) -> None:
-        """Timeout is fatal and does not start another repair call."""
+    def test_timeout_retries_within_attempt_budget(self) -> None:
+        """Timeouts are transient and retry only within the attempt budget."""
         pipe = self._make_pipeline()
         calls = [0]
 
@@ -846,10 +846,10 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         )
         self.assertFalse(repaired)
         self.assertEqual(remaining, ["sentiment_score"])
-        self.assertEqual(calls[0], 1)
+        self.assertEqual(calls[0], 2)
 
-    def test_parse_error_retries_then_fails(self) -> None:
-        """Parse error is retried (non-deterministic JSON drift)."""
+    def test_parse_error_is_not_retried(self) -> None:
+        """Deterministic JSON parse errors do not consume another attempt."""
         pipe = self._make_pipeline()
         calls = [0]
 
@@ -860,7 +860,7 @@ class TestAgentIntegrityRepair(unittest.TestCase):
 
         pipe._resolve_repair_llm_adapter = lambda: _Adapter()
         result = self._base_result(sentiment_score=None)
-        ok, missing = check_content_integrity(result)
+        _, missing = check_content_integrity(result)
         repaired, remaining = pipe._attempt_integrity_repair(
             result,
             missing_fields=missing,
@@ -872,7 +872,36 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         )
         self.assertFalse(repaired)
         self.assertEqual(remaining, ["sentiment_score"])
+        self.assertEqual(calls[0], 1)
+
+    def test_provider_error_retries_then_succeeds(self) -> None:
+        """Transient provider errors retry within the bounded attempt budget."""
+        pipe = self._make_pipeline()
+        calls = [0]
+
+        class _Adapter:
+            def call_text(self, messages, **kw):
+                calls[0] += 1
+                if calls[0] == 1:
+                    return type("R", (), {"content": "temporary", "provider": "error"})()
+                return type("R", (), {"content": '{"analysis_summary":"已补齐"}', "provider": "ok"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(analysis_summary="")
+        _, missing = check_content_integrity(result)
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=2,
+            require_phase_decision=False,
+        )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
         self.assertEqual(calls[0], 2)
+        self.assertEqual(result.analysis_summary, "已补齐")
 
     def test_successful_repair_merges_and_passes_recheck(self) -> None:
         """Valid repair response fills missing fields → re-check passes."""
@@ -1074,18 +1103,18 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         result = pipe._parse_repair_dashboard(content)
         self.assertEqual(result, {"a": 1, "b": [2]})
 
-    def test_parse_repair_dashboard_ambiguous_rejected(self) -> None:
-        """Multiple JSON objects → rejected (ambiguous)."""
+    def test_parse_repair_dashboard_uses_first_object(self) -> None:
+        """The first complete JSON object is accepted despite trailing prose."""
         pipe = self._make_pipeline()
-        self.assertIsNone(pipe._parse_repair_dashboard('{"a":1} and {"b":2}'))
+        result = pipe._parse_repair_dashboard('{"a":1} and {"b":2}')
+        self.assertEqual(result, {"a": 1})
 
     def test_parse_repair_dashboard_empty(self) -> None:
         """Empty content → None."""
         pipe = self._make_pipeline()
         self.assertIsNone(pipe._parse_repair_dashboard(""))
-        self.assertIsNone(pipe._parse_repair_dashboard("   "))
 
-    def test_parse_repair_dashboard_non_dict_rejected(self) -> None:
+    def test_parse_repair_dashboard_non_dict(self) -> None:
         """Non-dict JSON (array) → None."""
         pipe = self._make_pipeline()
         self.assertIsNone(pipe._parse_repair_dashboard("[1, 2, 3]"))
@@ -1236,3 +1265,62 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         release.set()
         self.assertTrue(started.is_set())
         self.assertLess(elapsed, 0.5)
+
+    def test_invalid_repair_values_are_rejected_before_merge(self) -> None:
+        """Repair candidates with invalid types or ranges never pollute result."""
+        pipe = self._make_pipeline()
+        result = self._base_result(
+            phase_decision={
+                "action_window": "盘中",
+                "immediate_action": "观察",
+                "watch_conditions": [],
+                "next_check_time": "10:00",
+                "confidence_reason": "数据有限",
+                "data_limitations": [],
+            }
+        )
+        result.sentiment_score = None
+        merged = pipe._merge_repaired_fields(
+            result,
+            repaired_dashboard={
+                "sentiment_score": 101,
+                "dashboard": {"phase_decision": {"phase_context": []}},
+            },
+            missing_fields=[
+                "sentiment_score",
+                "dashboard.phase_decision.phase_context",
+            ],
+        )
+        self.assertEqual(merged, 0)
+        self.assertIsNone(result.sentiment_score)
+        self.assertNotIn("phase_context", result.dashboard["phase_decision"])
+
+    def test_repair_records_start_and_result_diagnostics(self) -> None:
+        """Every repair completion is visible in run diagnostics."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                return type("R", (), {"content": '{"analysis_summary":"已补齐"}', "provider": "newapio"})()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(analysis_summary="")
+        _, missing = check_content_integrity(result)
+        with patch("src.core.pipeline.record_llm_run_started") as started, patch(
+            "src.core.pipeline.record_llm_run"
+        ) as recorded:
+            repaired, remaining = pipe._attempt_integrity_repair(
+                result,
+                missing_fields=missing,
+                initial_context=self._make_context(),
+                trend_result=None,
+                report_language="zh",
+                max_retries=1,
+                require_phase_decision=False,
+            )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+        started.assert_called_once()
+        recorded.assert_called_once()
+        self.assertTrue(recorded.call_args.kwargs["success"])
+        self.assertEqual(recorded.call_args.kwargs["call_type"], "integrity_repair")

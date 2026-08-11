@@ -1124,14 +1124,25 @@ const settingsHelpZhCN: SettingsHelpMap = {
   },
   'settings.report.REPORT_INTEGRITY_ENABLED': {
     title: '报告完整性校验',
-    summary: 'LLM 输出后校验必填字段，缺失时重试或使用占位符。',
-    usage: '开启后系统会检查报告是否包含必要的分析字段；REPORT_INTEGRITY_RETRY 控制重试次数。',
+    summary: 'LLM 输出后校验必填字段，缺失字段最终使用占位符兜底。',
+    usage: '开启后系统会检查报告是否包含必要分析字段；结构字段二次修复由独立开关控制。',
     valueNotes: [
       '校验失败的字段会用占位符填充。',
-      '重试会增加 LLM 调用次数和耗时。',
+      '上次观察点核对等证据字段不会交给二次 LLM 生成。',
     ],
-    impact: ['影响报告完整度和 LLM 调用次数。'],
-    notes: ['REPORT_INTEGRITY_RETRY=0 时不重试，仅用占位符。'],
+    impact: ['影响报告完整度，不会单独增加 LLM 调用。'],
+    notes: ['启用 REPORT_INTEGRITY_AGENT_REPAIR_ENABLED 才会尝试修复结构字段。'],
+  },
+  'settings.report.REPORT_INTEGRITY_AGENT_REPAIR_ENABLED': {
+    title: 'Agent 结构字段修复',
+    summary: '缺少结构字段时，允许有界二次 LLM 修复后再占位兜底。',
+    usage: '默认关闭；仅作用于 Agent 模式的结构字段，不处理 previous_watch_verification 等证据字段。',
+    valueNotes: [
+      '单次调用最多 60 秒，总修复预算最多 75 秒。',
+      'REPORT_INTEGRITY_RETRY 范围为 0-2，表示最大尝试次数。',
+    ],
+    impact: ['开启会增加 LLM 调用次数和最长 75 秒延迟。'],
+    notes: ['REPORT_INTEGRITY_RETRY=0 时直接占位，不发起二次 LLM。'],
   },
   'settings.report.REPORT_HISTORY_COMPARE_N': {
     title: '历史信号对比',
@@ -2342,14 +2353,25 @@ const settingsHelpEnUS: SettingsHelpMap = {
   },
   'settings.report.REPORT_INTEGRITY_ENABLED': {
     title: 'Report Integrity Check',
-    summary: 'Validate mandatory fields after LLM output; retry or use placeholders for missing fields.',
-    usage: 'When enabled, the system checks whether reports contain required analysis fields. REPORT_INTEGRITY_RETRY controls retry count.',
+    summary: 'Validate mandatory fields after LLM output and always fall back to placeholders.',
+    usage: 'When enabled, the system checks required report fields. Secondary structural repair has a separate switch.',
     valueNotes: [
       'Missing fields are filled with placeholders.',
-      'Retries increase LLM call count and latency.',
+      'Evidence fields such as previous-watch verification are never sent to the secondary LLM.',
     ],
-    impact: ['Affects report completeness and LLM call count.'],
-    notes: ['REPORT_INTEGRITY_RETRY=0 disables retries and uses placeholders only.'],
+    impact: ['Affects report completeness without adding LLM calls by itself.'],
+    notes: ['Enable REPORT_INTEGRITY_AGENT_REPAIR_ENABLED to attempt structural-field repair.'],
+  },
+  'settings.report.REPORT_INTEGRITY_AGENT_REPAIR_ENABLED': {
+    title: 'Agent Structural-Field Repair',
+    summary: 'Allow bounded secondary LLM repair attempts before placeholder fallback.',
+    usage: 'Off by default. Applies only to structural fields in Agent mode, never evidence fields such as previous_watch_verification.',
+    valueNotes: [
+      'Each call is capped at 60 seconds and the total repair budget at 75 seconds.',
+      'REPORT_INTEGRITY_RETRY ranges from 0 to 2 and is the maximum attempt count.',
+    ],
+    impact: ['Adds LLM calls and up to 75 seconds of latency when enabled.'],
+    notes: ['REPORT_INTEGRITY_RETRY=0 skips the secondary LLM and uses placeholders.'],
   },
   'settings.report.REPORT_HISTORY_COMPARE_N': {
     title: 'Historical Signal Comparison',

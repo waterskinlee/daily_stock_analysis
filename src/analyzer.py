@@ -296,6 +296,82 @@ class _AllModelsFailedError(Exception):
 from src.utils.data_processing import normalize_report_signal_attribution
 
 
+_INTEGRITY_FIELD_DESCRIPTIONS_EN: Dict[str, str] = {
+    "sentiment_score": "integer score from 0 to 100",
+    "operation_advice": "localized action advice",
+    "analysis_summary": "concise analysis summary",
+    "dashboard.core_conclusion.one_sentence": "one-line decision",
+    "dashboard.intelligence.risk_alerts": "risk alert list (can be empty)",
+    "dashboard.battle_plan.sniper_points.stop_loss": "stop-loss level",
+    "dashboard.phase_decision.phase_context": "public market phase summary subset",
+    "dashboard.phase_decision.action_window": "phase-aware action window",
+    "dashboard.phase_decision.immediate_action": "act now / wait / watch / no intraday action",
+    "dashboard.phase_decision.watch_conditions": "list of watch conditions",
+    "dashboard.phase_decision.next_check_time": "next checkpoint or local market time",
+    "dashboard.phase_decision.confidence_reason": "confidence rationale and data limits",
+    "dashboard.phase_decision.data_limitations": "list of phase/data quality limitations",
+    "dashboard.previous_watch_verification": "structured verification object with has_previous, previous_analysis_time, items (each: condition/status/evidence/impact), summary",
+    "dashboard.previous_watch_verification.has_previous": "boolean (true when previous watch points were injected)",
+    "dashboard.previous_watch_verification.items": "non-empty array; each item has condition, status (fulfilled/not_fulfilled/partially_fulfilled/stale), evidence, impact",
+    "dashboard.previous_watch_verification.summary": "overall verification conclusion",
+}
+
+_INTEGRITY_FIELD_DESCRIPTIONS_ZH: Dict[str, str] = {
+    "sentiment_score": "0-100 综合评分",
+    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
+    "analysis_summary": "综合分析摘要",
+    "dashboard.core_conclusion.one_sentence": "一句话决策",
+    "dashboard.intelligence.risk_alerts": "风险警报列表（可为空数组）",
+    "dashboard.battle_plan.sniper_points.stop_loss": "止损价",
+    "dashboard.phase_decision.phase_context": "公开低敏市场阶段摘要子集",
+    "dashboard.phase_decision.action_window": "阶段化行动窗口",
+    "dashboard.phase_decision.immediate_action": "立即行动/等待确认/观察/无盘中动作",
+    "dashboard.phase_decision.watch_conditions": "观察条件数组",
+    "dashboard.phase_decision.next_check_time": "下一次检查点或市场本地时间",
+    "dashboard.phase_decision.confidence_reason": "置信度理由与数据限制",
+    "dashboard.phase_decision.data_limitations": "阶段/数据质量限制数组",
+    "dashboard.previous_watch_verification": "结构化核对对象，含 has_previous、previous_analysis_time、items（每条含 condition/status/evidence/impact）、summary",
+    "dashboard.previous_watch_verification.has_previous": "布尔值（本次注入了上次观察点时为 true）",
+    "dashboard.previous_watch_verification.items": "非空数组；每条含 condition、status（fulfilled/not_fulfilled/partially_fulfilled/stale）、evidence、impact",
+    "dashboard.previous_watch_verification.summary": "整体核对结论",
+}
+
+
+def build_integrity_complement_prompt(
+    missing_fields: List[str],
+    report_language: str = "zh",
+) -> str:
+    """Build field-level completion instructions without analyzer state."""
+    language = normalize_report_language(report_language)
+    is_en = language in ("en", "ko")
+    descriptions = (
+        _INTEGRITY_FIELD_DESCRIPTIONS_EN
+        if is_en
+        else _INTEGRITY_FIELD_DESCRIPTIONS_ZH
+    )
+    lines = [
+        "### Completion requirements: fill the missing mandatory fields below and output the full JSON again:"
+        if is_en
+        else "### 补全要求：请在上方分析基础上补充以下必填内容，并输出完整 JSON："
+    ]
+    item_prefix = "dashboard.previous_watch_verification.items["
+    for field_path in missing_fields:
+        description = descriptions.get(field_path)
+        if description is not None:
+            lines.append(f"- {field_path}: {description}")
+        elif field_path.startswith(item_prefix):
+            suffix = (
+                field_path.split("].", 1)[-1]
+                if "]." in field_path
+                else "entry"
+            )
+            if is_en:
+                lines.append(f"- {field_path}: fill {suffix} for this previous-watch verification item")
+            else:
+                lines.append(f"- {field_path}: 补全该上次观察点核对{suffix}字段")
+    return "\n".join(lines)
+
+
 def check_content_integrity(
     result: "AnalysisResult",
     *,
@@ -4557,89 +4633,6 @@ class GeminiAnalyzer:
             require_previous_watch_verification=require_previous_watch_verification,
         )
 
-    def _build_integrity_complement_prompt(self, missing_fields: List[str], report_language: str = "zh") -> str:
-        """Build complement instruction for missing mandatory fields."""
-        report_language = normalize_report_language(report_language)
-        if report_language in ("en", "ko"):
-            lines = ["### Completion requirements: fill the missing mandatory fields below and output the full JSON again:"]
-            for f in missing_fields:
-                if f == "sentiment_score":
-                    lines.append("- sentiment_score: integer score from 0 to 100")
-                elif f == "operation_advice":
-                    lines.append("- operation_advice: localized action advice")
-                elif f == "analysis_summary":
-                    lines.append("- analysis_summary: concise analysis summary")
-                elif f == "dashboard.core_conclusion.one_sentence":
-                    lines.append("- dashboard.core_conclusion.one_sentence: one-line decision")
-                elif f == "dashboard.intelligence.risk_alerts":
-                    lines.append("- dashboard.intelligence.risk_alerts: risk alert list (can be empty)")
-                elif f == "dashboard.battle_plan.sniper_points.stop_loss":
-                    lines.append("- dashboard.battle_plan.sniper_points.stop_loss: stop-loss level")
-                elif f == "dashboard.phase_decision.phase_context":
-                    lines.append("- dashboard.phase_decision.phase_context: public market phase summary subset")
-                elif f == "dashboard.phase_decision.action_window":
-                    lines.append("- dashboard.phase_decision.action_window: phase-aware action window")
-                elif f == "dashboard.phase_decision.immediate_action":
-                    lines.append("- dashboard.phase_decision.immediate_action: act now / wait / watch / no intraday action")
-                elif f == "dashboard.phase_decision.watch_conditions":
-                    lines.append("- dashboard.phase_decision.watch_conditions: list of watch conditions")
-                elif f == "dashboard.phase_decision.confidence_reason":
-                    lines.append("- dashboard.phase_decision.confidence_reason: confidence rationale and data limits")
-                elif f == "dashboard.phase_decision.data_limitations":
-                    lines.append("- dashboard.phase_decision.data_limitations: list of phase/data quality limitations")
-                elif f == "dashboard.previous_watch_verification":
-                    lines.append("- dashboard.previous_watch_verification: structured verification object with has_previous, previous_analysis_time, items (each: condition/status/evidence/impact), summary")
-                elif f == "dashboard.previous_watch_verification.has_previous":
-                    lines.append("- dashboard.previous_watch_verification.has_previous: boolean (true when previous watch points were injected)")
-                elif f == "dashboard.previous_watch_verification.items":
-                    lines.append("- dashboard.previous_watch_verification.items: non-empty array; each item has condition, status (fulfilled/not_fulfilled/partially_fulfilled/stale), evidence, impact")
-                elif f == "dashboard.previous_watch_verification.summary":
-                    lines.append("- dashboard.previous_watch_verification.summary: overall verification conclusion")
-                elif f.startswith("dashboard.previous_watch_verification.items["):
-                    suffix = f.split("].", 1)[-1] if "]." in f else "entry"
-                    lines.append(f"- {f}: fill {suffix} for this previous-watch verification item")
-            return "\n".join(lines)
-
-        lines = ["### 补全要求：请在上方分析基础上补充以下必填内容，并输出完整 JSON："]
-        for f in missing_fields:
-            if f == "sentiment_score":
-                lines.append("- sentiment_score: 0-100 综合评分")
-            elif f == "operation_advice":
-                lines.append("- operation_advice: 买入/加仓/持有/减仓/卖出/观望")
-            elif f == "analysis_summary":
-                lines.append("- analysis_summary: 综合分析摘要")
-            elif f == "dashboard.core_conclusion.one_sentence":
-                lines.append("- dashboard.core_conclusion.one_sentence: 一句话决策")
-            elif f == "dashboard.intelligence.risk_alerts":
-                lines.append("- dashboard.intelligence.risk_alerts: 风险警报列表（可为空数组）")
-            elif f == "dashboard.battle_plan.sniper_points.stop_loss":
-                lines.append("- dashboard.battle_plan.sniper_points.stop_loss: 止损价")
-            elif f == "dashboard.phase_decision.phase_context":
-                lines.append("- dashboard.phase_decision.phase_context: 公开低敏市场阶段摘要子集")
-            elif f == "dashboard.phase_decision.action_window":
-                lines.append("- dashboard.phase_decision.action_window: 阶段化行动窗口")
-            elif f == "dashboard.phase_decision.immediate_action":
-                lines.append("- dashboard.phase_decision.immediate_action: 立即行动/等待确认/观察/无盘中动作")
-            elif f == "dashboard.phase_decision.watch_conditions":
-                lines.append("- dashboard.phase_decision.watch_conditions: 观察条件数组")
-            elif f == "dashboard.phase_decision.next_check_time":
-                lines.append("- dashboard.phase_decision.next_check_time: 下一次检查点或市场本地时间")
-            elif f == "dashboard.phase_decision.confidence_reason":
-                lines.append("- dashboard.phase_decision.confidence_reason: 置信度理由与数据限制")
-            elif f == "dashboard.phase_decision.data_limitations":
-                lines.append("- dashboard.phase_decision.data_limitations: 阶段/数据质量限制数组")
-            elif f == "dashboard.previous_watch_verification":
-                lines.append("- dashboard.previous_watch_verification: 结构化核对对象，含 has_previous、previous_analysis_time、items（每条含 condition/status/evidence/impact）、summary")
-            elif f == "dashboard.previous_watch_verification.has_previous":
-                lines.append("- dashboard.previous_watch_verification.has_previous: 布尔值（本次注入了上次观察点时为 true）")
-            elif f == "dashboard.previous_watch_verification.items":
-                lines.append("- dashboard.previous_watch_verification.items: 非空数组；每条含 condition、status（fulfilled/not_fulfilled/partially_fulfilled/stale）、evidence、impact")
-            elif f == "dashboard.previous_watch_verification.summary":
-                lines.append("- dashboard.previous_watch_verification.summary: 整体核对结论")
-            elif f.startswith("dashboard.previous_watch_verification.items["):
-                suffix = f.split("].", 1)[-1] if "]." in f else "条目"
-                lines.append(f"- {f}: 补全该上次观察点核对{suffix}字段")
-        return "\n".join(lines)
 
     def _build_integrity_retry_prompt(
         self,
@@ -4649,7 +4642,10 @@ class GeminiAnalyzer:
         report_language: str = "zh",
     ) -> str:
         """Build retry prompt using the previous response as the complement baseline."""
-        complement = self._build_integrity_complement_prompt(missing_fields, report_language=report_language)
+        complement = build_integrity_complement_prompt(
+            missing_fields,
+            report_language=report_language,
+        )
         previous_output = previous_response.strip()
         if normalize_report_language(report_language) in ("en", "ko"):
             prefix = "### The previous output is below. Complete the missing fields based on that output and return the full JSON again. Do not omit existing fields:"

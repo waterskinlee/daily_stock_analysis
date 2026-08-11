@@ -2158,6 +2158,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             mock_cfg.save_context_snapshot = False
             mock_cfg.report_language = "zh"
             mock_cfg.report_integrity_enabled = True
+            mock_cfg.report_integrity_agent_repair_enabled = False
             mock_cfg.agent_orchestrator_timeout_s = 600
             mock_config.return_value = mock_cfg
 
@@ -2177,6 +2178,9 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
                         "data_quality": {"limitations": []},
                     },
                 )
+            )
+            pipeline._attempt_integrity_repair = MagicMock(
+                side_effect=AssertionError("repair switch is disabled")
             )
 
             agent_result = AgentResult(
@@ -2234,6 +2238,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             self.assertEqual(phase_decision["watch_conditions"], [])
             self.assertEqual(phase_decision["next_check_time"], "模型未提供下一次检查点")
             self.assertEqual(phase_decision["confidence_reason"], "模型未提供阶段化置信度理由")
+            pipeline._attempt_integrity_repair.assert_not_called()
 
     def test_analyze_with_agent_explains_daily_market_softening_before_risk(self):
         """A partial result produced before risk must retain its Pipeline start signal."""

@@ -1659,7 +1659,15 @@ class StockAnalysisPipeline:
                     max_retries = int(
                         getattr(self.config, "report_integrity_retry", 0) or 0
                     )
-                    if max_retries > 0 and repairable_missing:
+                    if (
+                        getattr(
+                            self.config,
+                            "report_integrity_agent_repair_enabled",
+                            False,
+                        )
+                        and max_retries > 0
+                        and repairable_missing
+                    ):
                         _, remaining_repairable = self._attempt_integrity_repair(
                             result,
                             missing_fields=repairable_missing,
@@ -3255,6 +3263,9 @@ class StockAnalysisPipeline:
         repairable_missing, _ = self._partition_integrity_missing_fields(missing_fields)
         if not repairable_missing:
             return True, []
+        attempt_limit = min(2, max(0, int(max_retries)))
+        if attempt_limit == 0:
+            return False, list(repairable_missing)
         llm_adapter = self._resolve_repair_llm_adapter()
         if llm_adapter is None:
             logger.warning(
@@ -3264,9 +3275,10 @@ class StockAnalysisPipeline:
 
         remaining_missing = list(repairable_missing)
         deadline = time.monotonic() + max(0.0, self._REPAIR_TOTAL_BUDGET_S)
-        for attempt in range(1, max(0, max_retries) + 1):
+        configured_model = getattr(self.config, "litellm_model", None)
+        for attempt in range(1, attempt_limit + 1):
             remaining_budget = deadline - time.monotonic()
-            if not remaining_missing or remaining_budget <= 0:
+            if remaining_budget <= 0:
                 break
             messages = self._build_agent_integrity_repair_prompt(
                 initial_context=initial_context,
@@ -3274,6 +3286,10 @@ class StockAnalysisPipeline:
                 realtime_quote=realtime_quote,
                 missing_fields=remaining_missing,
                 report_language=report_language,
+            )
+            record_llm_run_started(
+                model=configured_model,
+                call_type="integrity_repair",
             )
             started = time.monotonic()
             call_timeout = min(self._REPAIR_CALL_TIMEOUT_S, remaining_budget)
@@ -3284,42 +3300,87 @@ class StockAnalysisPipeline:
                     timeout=call_timeout,
                 )
             except Exception as exc:
+                elapsed = time.monotonic() - started
+                record_llm_run(
+                    success=False,
+                    model=configured_model,
+                    call_type="integrity_repair",
+                    duration_ms=round(elapsed * 1000),
+                    error_type=type(exc).__name__,
+                    error_message=exc,
+                )
                 logger.warning(
                     "[LLM完整性] agent_repair attempt=%d/%d failed reason=%s duration=%.1fs",
                     attempt,
-                    max_retries,
+                    attempt_limit,
                     type(exc).__name__,
-                    time.monotonic() - started,
+                    elapsed,
                 )
+                if attempt < attempt_limit and deadline - time.monotonic() > 0:
+                    continue
                 return False, remaining_missing
 
+            provider = getattr(response, "provider", None) or None
+            response_model = getattr(response, "model", None) or configured_model
             content = getattr(response, "content", None)
-            if not isinstance(content, str) or not content.strip():
-                logger.warning(
-                    "[LLM完整性] agent_repair attempt=%d/%d failed reason=empty_response duration=%.1fs",
-                    attempt,
-                    max_retries,
-                    time.monotonic() - started,
+            elapsed = time.monotonic() - started
+            if provider == "error":
+                record_llm_run(
+                    success=False,
+                    provider=provider,
+                    model=response_model,
+                    call_type="integrity_repair",
+                    duration_ms=round(elapsed * 1000),
+                    error_type="provider_error",
+                    error_message=content,
                 )
-                return False, remaining_missing
-            if getattr(response, "provider", "") == "error":
                 logger.warning(
                     "[LLM完整性] agent_repair attempt=%d/%d failed reason=provider_error duration=%.1fs",
                     attempt,
-                    max_retries,
-                    time.monotonic() - started,
+                    attempt_limit,
+                    elapsed,
                 )
+                if attempt < attempt_limit and deadline - time.monotonic() > 0:
+                    continue
+                return False, remaining_missing
+            if not isinstance(content, str) or not content.strip():
+                record_llm_run(
+                    success=False,
+                    provider=provider,
+                    model=response_model,
+                    call_type="integrity_repair",
+                    duration_ms=round(elapsed * 1000),
+                    error_type="empty_response",
+                    error_message="repair response contained no text",
+                )
+                logger.warning(
+                    "[LLM完整性] agent_repair attempt=%d/%d failed reason=empty_response duration=%.1fs",
+                    attempt,
+                    attempt_limit,
+                    elapsed,
+                )
+                if attempt < attempt_limit and deadline - time.monotonic() > 0:
+                    continue
                 return False, remaining_missing
 
             repaired_dashboard = self._parse_repair_dashboard(content)
             if repaired_dashboard is None:
+                record_llm_run(
+                    success=False,
+                    provider=provider,
+                    model=response_model,
+                    call_type="integrity_repair",
+                    duration_ms=round(elapsed * 1000),
+                    error_type="parse_error",
+                    error_message="repair response was not a JSON object",
+                )
                 logger.warning(
                     "[LLM完整性] agent_repair attempt=%d/%d failed reason=parse_error duration=%.1fs",
                     attempt,
-                    max_retries,
-                    time.monotonic() - started,
+                    attempt_limit,
+                    elapsed,
                 )
-                continue
+                return False, remaining_missing
 
             merged_count = self._merge_repaired_fields(
                 result,
@@ -3337,11 +3398,23 @@ class StockAnalysisPipeline:
                 if not field.startswith("dashboard.previous_watch_verification")
             ]
             elapsed = time.monotonic() - started
-            if still_pass or not remaining_missing:
+            complete = still_pass or not remaining_missing
+            record_llm_run(
+                success=complete,
+                provider=provider,
+                model=response_model,
+                call_type="integrity_repair",
+                duration_ms=round(elapsed * 1000),
+                error_type=None if complete else "incomplete_repair",
+                error_message=None
+                if complete
+                else f"remaining fields: {', '.join(remaining_missing)}",
+            )
+            if complete:
                 logger.info(
                     "[LLM完整性] agent_repair attempt=%d/%d succeeded merged=%d fields remaining_missing=[] duration=%.1fs",
                     attempt,
-                    max_retries,
+                    attempt_limit,
                     merged_count,
                     elapsed,
                 )
@@ -3349,7 +3422,7 @@ class StockAnalysisPipeline:
             logger.info(
                 "[LLM完整性] agent_repair attempt=%d/%d partial merged=%d remaining_missing=%s duration=%.1fs",
                 attempt,
-                max_retries,
+                attempt_limit,
                 merged_count,
                 remaining_missing,
                 elapsed,
@@ -3392,12 +3465,11 @@ class StockAnalysisPipeline:
         the existing dashboard. Evidence-bearing previous-watch paths are
         filtered before this method is called.
         """
-        from src.analyzer import GeminiAnalyzer
+        from src.analyzer import build_integrity_complement_prompt
         from src.report_language import normalize_report_language
 
         lang = normalize_report_language(report_language)
-        analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
-        complement = analyzer._build_integrity_complement_prompt(
+        complement = build_integrity_complement_prompt(
             missing_fields, report_language=lang
         )
         complement_lines = complement.splitlines()
@@ -3495,13 +3567,10 @@ class StockAnalysisPipeline:
 
     @staticmethod
     def _parse_repair_dashboard(content: str) -> Optional[Dict[str, Any]]:
-        """Extract the single JSON object from a repair LLM response.
+        """Extract the first complete JSON object from a repair response.
 
-        More tolerant than the main analyzer extractor: repair responses
-        often carry a leading sentence ("Here is the repaired dashboard:"),
-        so prose around the JSON is allowed. A single JSON object (fenced
-        or bare) must still be locatable; ambiguous multi-object responses
-        are rejected.
+        Leading/trailing prose and extra fenced examples are tolerated. Merge
+        validation remains the authority for which values can reach a report.
         """
         text = (content or "").strip()
         if not text:
@@ -3511,38 +3580,82 @@ class StockAnalysisPipeline:
             r"```[ \t]*(?P<lang>[A-Za-z0-9_-]*)[ \t]*\n?(?P<body>.*?)```",
             flags=_re_module.DOTALL,
         )
-        matches = list(fence.finditer(text))
-        if len(matches) > 1:
-            return None
-        if len(matches) == 1:
-            json_str = matches[0].group("body").strip()
+        for match in fence.finditer(text):
             try:
-                data = json.loads(json_str)
+                data = json.loads(match.group("body").strip())
             except json.JSONDecodeError:
-                return None
-            return data if isinstance(data, dict) else None
+                continue
+            if isinstance(data, dict):
+                return data
 
-        # No code fence: locate the first JSON object via raw_decode so
-        # leading/trailing prose is tolerated.
         decoder = json.JSONDecoder()
         start = text.find("{")
         while start != -1:
             try:
-                obj, end = decoder.raw_decode(text[start:])
+                obj, _ = decoder.raw_decode(text[start:])
             except json.JSONDecodeError:
                 start = text.find("{", start + 1)
                 continue
-            # Reject if another JSON object follows the first (ambiguous).
-            tail = text[start + end:]
-            next_brace = tail.find("{")
-            if next_brace != -1:
-                try:
-                    json.JSONDecoder().raw_decode(tail[next_brace:])
-                    return None
-                except json.JSONDecodeError:
-                    pass
             return obj if isinstance(obj, dict) else None
         return None
+
+    @staticmethod
+    def _is_valid_repair_value(field_path: str, value: Any) -> bool:
+        """Validate a repair candidate against the mandatory-field contract."""
+        if value is _MISSING:
+            return False
+        if field_path == "sentiment_score":
+            return (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and 0 <= value <= 100
+            )
+        if field_path in {
+            "operation_advice",
+            "analysis_summary",
+            "dashboard.core_conclusion.one_sentence",
+            "dashboard.phase_decision.action_window",
+            "dashboard.phase_decision.immediate_action",
+            "dashboard.phase_decision.next_check_time",
+            "dashboard.phase_decision.confidence_reason",
+            "dashboard.previous_watch_verification.summary",
+        }:
+            return isinstance(value, str) and bool(value.strip())
+        if field_path in {
+            "dashboard.intelligence.risk_alerts",
+            "dashboard.phase_decision.watch_conditions",
+            "dashboard.phase_decision.data_limitations",
+            "dashboard.previous_watch_verification.items",
+        }:
+            return isinstance(value, list)
+        if field_path in {
+            "dashboard.phase_decision.phase_context",
+            "dashboard.previous_watch_verification",
+        }:
+            return isinstance(value, dict)
+        if field_path == "dashboard.battle_plan.sniper_points.stop_loss":
+            if isinstance(value, bool) or isinstance(value, (list, tuple, dict)):
+                return False
+            return value is not None and (
+                not isinstance(value, str) or bool(value.strip())
+            )
+        if field_path == "dashboard.previous_watch_verification.has_previous":
+            return isinstance(value, bool)
+        item_prefix = "dashboard.previous_watch_verification.items["
+        if field_path.startswith(item_prefix):
+            if "]." not in field_path:
+                return isinstance(value, dict)
+            suffix = field_path.split("].", 1)[1]
+            if suffix == "status":
+                return isinstance(value, str) and value in {
+                    "fulfilled",
+                    "not_fulfilled",
+                    "partially_fulfilled",
+                    "stale",
+                }
+            if suffix in {"condition", "evidence", "impact"}:
+                return isinstance(value, str) and bool(value.strip())
+        return False
 
     def _merge_repaired_fields(
         self,
@@ -3589,6 +3702,13 @@ class StockAnalysisPipeline:
                     value = self._extract_path(report_root, field_path)
                 if value is _MISSING:
                     continue
+                if not self._is_valid_repair_value(field_path, value):
+                    logger.warning(
+                        "[LLM完整性] agent_repair rejected invalid field=%s type=%s",
+                        field_path,
+                        type(value).__name__,
+                    )
+                    continue
                 if self._set_path(result.dashboard, rel, value):
                     merged += 1
             elif field_path == "dashboard":
@@ -3599,6 +3719,13 @@ class StockAnalysisPipeline:
                 # Top-level scalar on AnalysisResult.
                 value = self._extract_path(report_root, field_path)
                 if value is _MISSING:
+                    continue
+                if not self._is_valid_repair_value(field_path, value):
+                    logger.warning(
+                        "[LLM完整性] agent_repair rejected invalid field=%s type=%s",
+                        field_path,
+                        type(value).__name__,
+                    )
                     continue
                 if hasattr(result, field_path):
                     try:

@@ -2727,7 +2727,33 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "help_key": "settings.report.REPORT_INTEGRITY_ENABLED",
         "examples": [
             "REPORT_INTEGRITY_ENABLED=true",
-            "REPORT_INTEGRITY_RETRY=1",
+            "REPORT_INTEGRITY_AGENT_REPAIR_ENABLED=false",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：环境变量完整列表",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+            },
+        ],
+        "warning_codes": [],
+    },
+    "REPORT_INTEGRITY_AGENT_REPAIR_ENABLED": {
+        "title": "Report Integrity Agent Repair Enabled",
+        "description": "Allow bounded secondary LLM repair for structural report fields before placeholder fallback.",
+        "category": "notification",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 59,
+        "help_key": "settings.report.REPORT_INTEGRITY_AGENT_REPAIR_ENABLED",
+        "examples": [
+            "REPORT_INTEGRITY_AGENT_REPAIR_ENABLED=false",
+            "REPORT_INTEGRITY_AGENT_REPAIR_ENABLED=true",
         ],
         "docs": [
             {
@@ -2739,7 +2765,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "REPORT_INTEGRITY_RETRY": {
         "title": "Report Integrity Retry",
-        "description": "Retry count when mandatory fields missing (0 = placeholder only, no retry).",
+        "description": "Agent structural-repair attempt count (0 = placeholders only, maximum 2).",
         "category": "notification",
         "data_type": "integer",
         "ui_control": "number",
@@ -2748,9 +2774,9 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_editable": True,
         "default_value": "1",
         "options": [],
-        "validation": {"min": 0, "max": 3},
-        "display_order": 59,
-        "help_key": "settings.report.REPORT_INTEGRITY_ENABLED",
+        "validation": {"min": 0, "max": 2},
+        "display_order": 60,
+        "help_key": "settings.report.REPORT_INTEGRITY_AGENT_REPAIR_ENABLED",
         "examples": [
             "REPORT_INTEGRITY_RETRY=1",
             "REPORT_INTEGRITY_RETRY=0",
@@ -2775,7 +2801,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "default_value": "0",
         "options": [],
         "validation": {"min": 0, "max": 10},
-        "display_order": 60,
+        "display_order": 61,
         "help_key": "settings.report.REPORT_HISTORY_COMPARE_N",
         "examples": [
             "REPORT_HISTORY_COMPARE_N=0",

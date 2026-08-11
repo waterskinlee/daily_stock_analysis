@@ -1157,7 +1157,8 @@ class Config:
     report_templates_dir: str = "templates"  # Template directory (relative to project root)
     report_renderer_enabled: bool = False  # Enable Jinja2 rendering (default off for zero regression)
     report_integrity_enabled: bool = True  # Content integrity validation after LLM output
-    report_integrity_retry: int = 1  # Retry count when mandatory fields missing (0 = placeholder only)
+    report_integrity_agent_repair_enabled: bool = False  # Agent structural repair before placeholder fill
+    report_integrity_retry: int = 1  # Repair attempt count (0 = placeholder only, max 2)
     report_history_compare_n: int = 0  # History comparison count (0 = disabled)
 
     # PushPlus 推送配置
@@ -2165,7 +2166,8 @@ class Config:
             report_templates_dir=os.getenv('REPORT_TEMPLATES_DIR', 'templates'),
             report_renderer_enabled=os.getenv('REPORT_RENDERER_ENABLED', 'false').lower() == 'true',
             report_integrity_enabled=os.getenv('REPORT_INTEGRITY_ENABLED', 'true').lower() == 'true',
-            report_integrity_retry=parse_env_int(os.getenv('REPORT_INTEGRITY_RETRY'), 1, field_name='REPORT_INTEGRITY_RETRY', minimum=0),
+            report_integrity_agent_repair_enabled=os.getenv('REPORT_INTEGRITY_AGENT_REPAIR_ENABLED', 'false').lower() == 'true',
+            report_integrity_retry=parse_env_int(os.getenv('REPORT_INTEGRITY_RETRY'), 1, field_name='REPORT_INTEGRITY_RETRY', minimum=0, maximum=2),
             report_history_compare_n=parse_env_int(os.getenv('REPORT_HISTORY_COMPARE_N'), 0, field_name='REPORT_HISTORY_COMPARE_N', minimum=0),
             analysis_delay=parse_env_float(os.getenv('ANALYSIS_DELAY'), 0.0, field_name='ANALYSIS_DELAY', minimum=0.0),
             merge_email_notification=os.getenv('MERGE_EMAIL_NOTIFICATION', 'false').lower() == 'true',
