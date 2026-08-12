@@ -592,6 +592,200 @@ class RunFlowTestCase(unittest.TestCase):
         self.assertIn("llm_run_started", {event.type for event in snapshot.events})
         self.assertIn("llm_run", {event.type for event in snapshot.events})
 
+    def test_active_multi_agent_llm_nodes_chain_in_event_order(self) -> None:
+        flow_events: list[dict] = []
+        token = activate_run_diagnostic_context(
+            trace_id="trace-live-agents",
+            task_id="task-live-agents",
+            query_id="query-live-agents",
+            stock_code="600519",
+            trigger_source="api",
+            event_sink=flow_events.append,
+        )
+        try:
+            for agent_name in ("technical", "intel"):
+                record_llm_run_started(
+                    model="openai/gpt-test",
+                    call_type=f"agent_{agent_name}",
+                    agent_name=agent_name,
+                    step=1,
+                )
+            record_llm_run(
+                success=True,
+                provider="openai",
+                model="openai/gpt-test",
+                call_type="agent_technical",
+                agent_name="technical",
+                step=1,
+                duration_ms=25,
+            )
+            record_llm_run_started(
+                model="openai/gpt-test",
+                call_type="agent_decision",
+                agent_name="decision",
+                step=1,
+            )
+            for agent_name in ("intel", "decision"):
+                record_llm_run(
+                    success=True,
+                    provider="openai",
+                    model="openai/gpt-test",
+                    call_type=f"agent_{agent_name}",
+                    agent_name=agent_name,
+                    step=1,
+                    duration_ms=25,
+                )
+        finally:
+            reset_run_diagnostic_context(token)
+
+        snapshot = build_task_run_flow_snapshot(
+            TaskInfo(
+                task_id="task-live-agents",
+                trace_id="trace-live-agents",
+                stock_code="600519",
+                stock_name="贵州茅台",
+                status=TaskStatus.PROCESSING,
+                created_at=datetime(2026, 6, 8, 10, 0, 0),
+                flow_events=flow_events,
+            )
+        )
+
+        llm_nodes = [node for node in snapshot.nodes if node.id.startswith("llm_agent_")]
+        self.assertEqual(
+            [node.id for node in llm_nodes],
+            ["llm_agent_technical_1", "llm_agent_intel_1", "llm_agent_decision_1"],
+        )
+        self.assertEqual(
+            [event.node_id for event in snapshot.events if event.type == "llm_run_started"],
+            ["llm_agent_technical_1", "llm_agent_intel_1", "llm_agent_decision_1"],
+        )
+        self.assertEqual(
+            [event.node_id for event in snapshot.events if event.type == "llm_run"],
+            ["llm_agent_technical_1", "llm_agent_intel_1", "llm_agent_decision_1"],
+        )
+        self.assertEqual(
+            [(edge.from_node, edge.to_node) for edge in snapshot.edges if edge.to_node.startswith("llm_agent_")],
+            [
+                ("analysis_pipeline", "llm_agent_technical_1"),
+                ("llm_agent_technical_1", "llm_agent_intel_1"),
+                ("llm_agent_intel_1", "llm_agent_decision_1"),
+            ],
+        )
+
+    def test_multi_agent_llm_runs_render_distinct_agent_nodes(self) -> None:
+        diagnostics = _diagnostics()
+        diagnostics["llm_runs"] = [
+            {
+                "trace_id": "trace-flow",
+                "provider": "litellm",
+                "model": "deepseek-chat",
+                "call_type": "agent_technical",
+                "agent_name": "technical",
+                "step": 1,
+                "success": True,
+                "tokens": 320,
+                "duration_ms": 900,
+                "created_at": "2026-06-08T10:00:03",
+            },
+            {
+                "trace_id": "trace-flow",
+                "provider": "litellm",
+                "model": "deepseek-chat",
+                "call_type": "agent_intel",
+                "agent_name": "intel",
+                "step": 1,
+                "success": True,
+                "tokens": 280,
+                "duration_ms": 800,
+                "created_at": "2026-06-08T10:00:04",
+            },
+            {
+                "trace_id": "trace-flow",
+                "provider": "litellm",
+                "model": "deepseek-chat",
+                "call_type": "agent_decision",
+                "agent_name": "decision",
+                "step": 1,
+                "success": True,
+                "tokens": 410,
+                "duration_ms": 1000,
+                "created_at": "2026-06-08T10:00:05",
+            },
+        ]
+
+        snapshot = build_history_run_flow_snapshot(
+            _history_record(context_snapshot={"diagnostics": diagnostics})
+        )
+
+        llm_nodes = [node for node in snapshot.nodes if node.kind == "model"]
+        self.assertEqual(
+            [node.id for node in llm_nodes],
+            ["llm_agent_technical_1", "llm_agent_intel_1", "llm_agent_decision_1"],
+        )
+        self.assertEqual(
+            [node.label for node in llm_nodes],
+            ["技术 Agent · LLM 生成", "情报 Agent · LLM 生成", "决策 Agent · LLM 生成"],
+        )
+        self.assertEqual(
+            [node.metadata.get("agent_name") for node in llm_nodes],
+            ["technical", "intel", "decision"],
+        )
+        self.assertEqual(
+            [(edge.from_node, edge.to_node) for edge in snapshot.edges if edge.to_node.startswith("llm_agent_")],
+            [
+                ("context_pack", "llm_agent_technical_1"),
+                ("llm_agent_technical_1", "llm_agent_intel_1"),
+                ("llm_agent_intel_1", "llm_agent_decision_1"),
+            ],
+        )
+
+    def test_multi_agent_retries_keep_attempt_index_per_agent(self) -> None:
+        diagnostics = _diagnostics()
+        diagnostics["llm_runs"] = [
+            {
+                "call_type": "agent_technical",
+                "agent_name": "technical",
+                "model": "deepseek-chat",
+                "success": False,
+                "created_at": "2026-06-08T10:00:03",
+            },
+            {
+                "call_type": "agent_technical",
+                "agent_name": "technical",
+                "model": "deepseek-chat",
+                "success": True,
+                "created_at": "2026-06-08T10:00:04",
+            },
+            {
+                "call_type": "agent_intel",
+                "agent_name": "intel",
+                "model": "deepseek-chat",
+                "success": True,
+                "created_at": "2026-06-08T10:00:05",
+            },
+        ]
+
+        snapshot = build_history_run_flow_snapshot(
+            _history_record(context_snapshot={"diagnostics": diagnostics})
+        )
+        llm_nodes = [node for node in snapshot.nodes if node.kind == "model"]
+        self.assertEqual(
+            [node.id for node in llm_nodes],
+            ["llm_agent_technical_1", "llm_agent_technical_2", "llm_agent_intel_1"],
+        )
+        self.assertEqual(
+            [
+                (edge.from_node, edge.to_node, edge.kind)
+                for edge in snapshot.edges
+                if edge.to_node.startswith("llm_agent_")
+            ],
+            [
+                ("context_pack", "llm_agent_technical_1", "data"),
+                ("llm_agent_technical_1", "llm_agent_technical_2", "retry"),
+                ("llm_agent_technical_2", "llm_agent_intel_1", "data"),
+            ],
+        )
+
     def test_completed_active_snapshot_prunes_skeleton_tail_when_live_nodes_exist(self) -> None:
         flow_events: list[dict] = []
         token = activate_run_diagnostic_context(

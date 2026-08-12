@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import uuid
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
@@ -186,6 +187,9 @@ class LLMRun:
     provider: Optional[str] = None
     model: Optional[str] = None
     call_type: str = "analysis"
+    agent_name: Optional[str] = None
+    agent_label: Optional[str] = None
+    step: Optional[int] = None
     success: bool = True
     tokens: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -200,6 +204,9 @@ class LLMRun:
             "provider": self.provider,
             "model": self.model,
             "call_type": self.call_type,
+            "agent_name": self.agent_name,
+            "agent_label": self.agent_label,
+            "step": self.step,
             "success": self.success,
             "tokens": self.tokens,
             "duration_ms": self.duration_ms,
@@ -331,29 +338,30 @@ class RunDiagnosticContext:
     flow_event_index: int = 0
     provider_attempt_index_by_type: Dict[str, int] = field(default_factory=dict)
     provider_pending_attempt_index_by_key: Dict[str, List[int]] = field(default_factory=dict)
-    llm_attempt_index_by_type: Dict[str, int] = field(default_factory=dict)
+    llm_attempt_index_by_key: Dict[str, int] = field(default_factory=dict)
     llm_pending_attempt_index_by_key: Dict[str, List[int]] = field(default_factory=dict)
-    llm_pending_attempt_index_by_call_type: Dict[str, List[int]] = field(default_factory=dict)
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def record_provider_run(self, provider_run: ProviderRun) -> None:
-        self.provider_runs.append(provider_run)
-        data_type_key = _safe_event_key(provider_run.data_type) or "provider"
-        pending_key = _provider_pending_key(
-            provider_run.data_type,
-            provider_run.provider,
-            provider_run.operation,
-        )
-        pending_indexes = self.provider_pending_attempt_index_by_key.get(pending_key) or []
-        if pending_indexes:
-            attempt_index = pending_indexes.pop(0)
+        with self.lock:
+            self.provider_runs.append(provider_run)
+            data_type_key = _safe_event_key(provider_run.data_type) or "provider"
+            pending_key = _provider_pending_key(
+                provider_run.data_type,
+                provider_run.provider,
+                provider_run.operation,
+            )
+            pending_indexes = self.provider_pending_attempt_index_by_key.get(pending_key) or []
             if pending_indexes:
-                self.provider_pending_attempt_index_by_key[pending_key] = pending_indexes
+                attempt_index = pending_indexes.pop(0)
+                if pending_indexes:
+                    self.provider_pending_attempt_index_by_key[pending_key] = pending_indexes
+                else:
+                    self.provider_pending_attempt_index_by_key.pop(pending_key, None)
             else:
-                self.provider_pending_attempt_index_by_key.pop(pending_key, None)
-        else:
-            attempt_index = self.provider_attempt_index_by_type.get(data_type_key, 0) + 1
-            self.provider_attempt_index_by_type[data_type_key] = attempt_index
-        self._emit_flow_event(_provider_flow_event(self, provider_run, attempt_index))
+                attempt_index = self.provider_attempt_index_by_type.get(data_type_key, 0) + 1
+                self.provider_attempt_index_by_type[data_type_key] = attempt_index
+            self._emit_flow_event(_provider_flow_event(self, provider_run, attempt_index))
 
     def record_provider_run_started(
         self,
@@ -362,68 +370,41 @@ class RunDiagnosticContext:
         provider: str,
         operation: str,
     ) -> None:
-        data_type_key = _safe_event_key(data_type) or "provider"
-        attempt_index = self.provider_attempt_index_by_type.get(data_type_key, 0) + 1
-        self.provider_attempt_index_by_type[data_type_key] = attempt_index
-        pending_key = _provider_pending_key(data_type, provider, operation)
-        pending_indexes = self.provider_pending_attempt_index_by_key.get(pending_key) or []
-        pending_indexes.append(attempt_index)
-        self.provider_pending_attempt_index_by_key[pending_key] = pending_indexes
-        self._emit_flow_event(
-            _provider_started_flow_event(
-                self,
-                data_type=data_type,
-                provider=provider,
-                operation=operation,
-                index=attempt_index,
+        with self.lock:
+            data_type_key = _safe_event_key(data_type) or "provider"
+            attempt_index = self.provider_attempt_index_by_type.get(data_type_key, 0) + 1
+            self.provider_attempt_index_by_type[data_type_key] = attempt_index
+            pending_key = _provider_pending_key(data_type, provider, operation)
+            pending_indexes = self.provider_pending_attempt_index_by_key.get(pending_key) or []
+            pending_indexes.append(attempt_index)
+            self.provider_pending_attempt_index_by_key[pending_key] = pending_indexes
+            self._emit_flow_event(
+                _provider_started_flow_event(
+                    self,
+                    data_type=data_type,
+                    provider=provider,
+                    operation=operation,
+                    index=attempt_index,
+                )
             )
-        )
 
     def record_llm_run(self, llm_run: LLMRun) -> None:
-        self.llm_runs.append(llm_run)
-        call_type_key = _safe_event_key(llm_run.call_type) or "analysis"
-        pending_key = _llm_pending_key(llm_run.call_type, llm_run.provider, llm_run.model)
-        pending_indexes = self.llm_pending_attempt_index_by_key.get(pending_key) or []
-        if pending_indexes:
-            attempt_index = pending_indexes.pop(0)
+        with self.lock:
+            self.llm_runs.append(llm_run)
+            attempt_key = _llm_attempt_key(llm_run.call_type, llm_run.agent_name)
+            pending_key = _llm_pending_key(llm_run.call_type, llm_run.agent_name)
+            pending_indexes = self.llm_pending_attempt_index_by_key.get(pending_key) or []
             if pending_indexes:
-                self.llm_pending_attempt_index_by_key[pending_key] = pending_indexes
-            else:
-                self.llm_pending_attempt_index_by_key.pop(pending_key, None)
-            self._remove_llm_pending_call_type_index(call_type_key, attempt_index)
-        else:
-            call_type_pending_indexes = self.llm_pending_attempt_index_by_call_type.get(call_type_key) or []
-            if call_type_pending_indexes:
-                attempt_index = call_type_pending_indexes.pop(0)
-                if call_type_pending_indexes:
-                    self.llm_pending_attempt_index_by_call_type[call_type_key] = call_type_pending_indexes
+                attempt_index = pending_indexes.pop(0)
+                if pending_indexes:
+                    self.llm_pending_attempt_index_by_key[pending_key] = pending_indexes
                 else:
-                    self.llm_pending_attempt_index_by_call_type.pop(call_type_key, None)
-                self._remove_llm_pending_exact_index(attempt_index)
+                    self.llm_pending_attempt_index_by_key.pop(pending_key, None)
             else:
-                attempt_index = self.llm_attempt_index_by_type.get(call_type_key, 0) + 1
-                self.llm_attempt_index_by_type[call_type_key] = attempt_index
-        self._emit_flow_event(_llm_flow_event(self, llm_run, attempt_index))
+                attempt_index = self.llm_attempt_index_by_key.get(attempt_key, 0) + 1
+                self.llm_attempt_index_by_key[attempt_key] = attempt_index
+            self._emit_flow_event(_llm_flow_event(self, llm_run, attempt_index))
 
-    def _remove_llm_pending_call_type_index(self, call_type_key: str, attempt_index: int) -> None:
-        pending_indexes = self.llm_pending_attempt_index_by_call_type.get(call_type_key) or []
-        if attempt_index not in pending_indexes:
-            return
-        pending_indexes = [index for index in pending_indexes if index != attempt_index]
-        if pending_indexes:
-            self.llm_pending_attempt_index_by_call_type[call_type_key] = pending_indexes
-        else:
-            self.llm_pending_attempt_index_by_call_type.pop(call_type_key, None)
-
-    def _remove_llm_pending_exact_index(self, attempt_index: int) -> None:
-        for pending_key, pending_indexes in list(self.llm_pending_attempt_index_by_key.items()):
-            if attempt_index not in pending_indexes:
-                continue
-            pending_indexes = [index for index in pending_indexes if index != attempt_index]
-            if pending_indexes:
-                self.llm_pending_attempt_index_by_key[pending_key] = pending_indexes
-            else:
-                self.llm_pending_attempt_index_by_key.pop(pending_key, None)
 
     def record_llm_run_started(
         self,
@@ -431,60 +412,68 @@ class RunDiagnosticContext:
         call_type: str = "analysis",
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_label: Optional[str] = None,
+        step: Optional[int] = None,
     ) -> None:
-        call_type_key = _safe_event_key(call_type) or "analysis"
-        attempt_index = self.llm_attempt_index_by_type.get(call_type_key, 0) + 1
-        self.llm_attempt_index_by_type[call_type_key] = attempt_index
-        pending_key = _llm_pending_key(call_type, provider, model)
-        pending_indexes = self.llm_pending_attempt_index_by_key.get(pending_key) or []
-        pending_indexes.append(attempt_index)
-        self.llm_pending_attempt_index_by_key[pending_key] = pending_indexes
-        call_type_pending_indexes = self.llm_pending_attempt_index_by_call_type.get(call_type_key) or []
-        call_type_pending_indexes.append(attempt_index)
-        self.llm_pending_attempt_index_by_call_type[call_type_key] = call_type_pending_indexes
-        self._emit_flow_event(
-            _llm_started_flow_event(
-                self,
-                call_type=call_type,
-                provider=provider,
-                model=model,
-                index=attempt_index,
+        with self.lock:
+            attempt_key = _llm_attempt_key(call_type, agent_name)
+            attempt_index = self.llm_attempt_index_by_key.get(attempt_key, 0) + 1
+            self.llm_attempt_index_by_key[attempt_key] = attempt_index
+            pending_key = _llm_pending_key(call_type, agent_name)
+            pending_indexes = self.llm_pending_attempt_index_by_key.get(pending_key) or []
+            pending_indexes.append(attempt_index)
+            self.llm_pending_attempt_index_by_key[pending_key] = pending_indexes
+            self._emit_flow_event(
+                _llm_started_flow_event(
+                    self,
+                    call_type=call_type,
+                    provider=provider,
+                    model=model,
+                    agent_name=agent_name,
+                    agent_label=agent_label,
+                    step=step,
+                    index=attempt_index,
+                )
             )
-        )
 
     def record_notification_run(self, notification_run: NotificationRun) -> None:
-        self.notification_runs.append(notification_run)
-        self._emit_flow_event(_notification_flow_event(self, notification_run, len(self.notification_runs)))
+        with self.lock:
+            self.notification_runs.append(notification_run)
+            self._emit_flow_event(_notification_flow_event(self, notification_run, len(self.notification_runs)))
 
     def record_history_run(self, history_run: HistoryRun) -> None:
-        self.history_runs.append(history_run)
-        self._emit_flow_event(_history_flow_event(self, history_run, len(self.history_runs)))
+        with self.lock:
+            self.history_runs.append(history_run)
+            self._emit_flow_event(_history_flow_event(self, history_run, len(self.history_runs)))
 
     def _emit_flow_event(self, event: Dict[str, Any]) -> None:
-        if self.event_sink is None:
-            return
-        try:
+        with self.lock:
             self.flow_event_index += 1
-            event_payload = sanitize_diagnostic_metadata(event)
-            event_payload = dict(event_payload) if isinstance(event_payload, Mapping) else {}
+            event_payload = dict(sanitize_diagnostic_metadata(event))
             event_payload["id"] = event_payload.get("id") or f"flow_{self.flow_event_index:04d}"
-            self.event_sink(event_payload)
-        except Exception as exc:  # pragma: no cover - defensive fail-open guard
-            logger.warning("run-flow event sink failed: %s", exc)
+            sink = self.event_sink
+            if sink is None:
+                return
+            try:
+                sink(event_payload)
+            except Exception as exc:  # pragma: no cover - defensive fail-open guard
+                logger.warning("run-flow event sink failed: %s", exc)
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
-            "trace_id": self.trace_id,
-            "task_id": self.task_id,
-            "query_id": self.query_id,
-            "stock_code": self.stock_code,
-            "trigger_source": self.trigger_source,
-            "scope": self.scope,
-            "provider_runs": [run.to_dict() for run in self.provider_runs],
-            "llm_runs": [run.to_dict() for run in self.llm_runs],
-            "notification_runs": [run.to_dict() for run in self.notification_runs],
-            "history_runs": [run.to_dict() for run in self.history_runs],
-        }
+        with self.lock:
+            return {
+                "trace_id": self.trace_id,
+                "task_id": self.task_id,
+                "query_id": self.query_id,
+                "stock_code": self.stock_code,
+                "trigger_source": self.trigger_source,
+                "scope": self.scope,
+                "provider_runs": [run.to_dict() for run in self.provider_runs],
+                "llm_runs": [run.to_dict() for run in self.llm_runs],
+                "notification_runs": [run.to_dict() for run in self.notification_runs],
+                "history_runs": [run.to_dict() for run in self.history_runs],
+            }
 
 
 def get_current_diagnostic_context() -> Optional[RunDiagnosticContext]:
@@ -570,9 +559,17 @@ def _provider_pending_key(data_type: Any, provider: Any, operation: Any) -> str:
     )
 
 
-def _llm_pending_key(call_type: Any, provider: Any, model: Any) -> str:
-    _ = (provider, model)
-    return _safe_event_key(call_type) or "analysis"
+def _llm_attempt_key(call_type: Any, agent_name: Any = None) -> str:
+    return "|".join(
+        (
+            _safe_event_key(call_type) or "analysis",
+            _safe_event_key(agent_name) or "unscoped",
+        )
+    )
+
+
+def _llm_pending_key(call_type: Any, agent_name: Any = None) -> str:
+    return _llm_attempt_key(call_type, agent_name)
 
 
 def _flow_status_for_success(success: bool, *, fallback: bool = False, skipped: bool = False) -> str:
@@ -695,12 +692,40 @@ def _provider_flow_event(
     }
 
 
+def _llm_node_label(agent_name: Optional[str], agent_label: Optional[str] = None) -> str:
+    explicit_label = sanitize_diagnostic_text(agent_label, max_length=40)
+    if explicit_label:
+        return f"{explicit_label} · LLM 生成"
+
+    agent_key = _safe_event_key(agent_name)
+    role_labels = {
+        "technical": "技术 Agent",
+        "intel": "情报 Agent",
+        "risk": "风控 Agent",
+        "decision": "决策 Agent",
+        "research": "研究 Agent",
+        "portfolio": "组合 Agent",
+    }
+    if agent_key in role_labels:
+        return f"{role_labels[agent_key]} · LLM 生成"
+    for prefix in ("skill_", "strategy_"):
+        if agent_key.startswith(prefix):
+            skill_name = agent_key.removeprefix(prefix).replace("_", " ").strip()
+            return f"技能 Agent · {skill_name or 'unknown'} · LLM 生成"
+    if agent_key:
+        return f"{agent_key.replace('_', ' ')} Agent · LLM 生成"
+    return "LLM 生成"
+
+
 def _llm_started_flow_event(
     context: RunDiagnosticContext,
     *,
     call_type: str,
     provider: Optional[str],
     model: Optional[str],
+    agent_name: Optional[str],
+    agent_label: Optional[str],
+    step: Optional[int],
     index: int,
 ) -> Dict[str, Any]:
     call_type_key = _safe_event_key(call_type) or "analysis"
@@ -721,11 +746,14 @@ def _llm_started_flow_event(
                 "provider": provider,
                 "model": model,
                 "call_type": call_type,
+                "agent_name": agent_name,
+                "agent_label": agent_label,
+                "step": step,
                 "node": {
                     "id": node_id,
                     "lane": "analysis",
                     "kind": "model",
-                    "label": "LLM 生成",
+                    "label": _llm_node_label(agent_name, agent_label),
                     "status": "running",
                     "provider": display_model,
                     "started_at": timestamp,
@@ -744,7 +772,7 @@ def _llm_flow_event(
 ) -> Dict[str, Any]:
     call_type = _safe_event_key(run.call_type) or "analysis"
     model = run.model or run.provider or "unknown"
-    status = _flow_status_for_success(run.success, fallback=bool(run.fallback_model or index > 1))
+    status = _flow_status_for_success(run.success, fallback=bool(run.fallback_model))
     node_id = f"llm_{call_type}_{index}"
     started_at = _started_at_from_end_and_duration(run.created_at, run.duration_ms)
     message = (
@@ -765,6 +793,9 @@ def _llm_flow_event(
                 "provider": run.provider,
                 "model": run.model,
                 "call_type": run.call_type,
+                "agent_name": run.agent_name,
+                "agent_label": run.agent_label,
+                "step": run.step,
                 "duration_ms": run.duration_ms,
                 "fallback_model": run.fallback_model,
                 "error_type": run.error_type,
@@ -772,7 +803,7 @@ def _llm_flow_event(
                     "id": node_id,
                     "lane": "analysis",
                     "kind": "model",
-                    "label": "LLM 生成",
+                    "label": _llm_node_label(run.agent_name, run.agent_label),
                     "status": status,
                     "provider": model,
                     "started_at": started_at,
@@ -934,6 +965,9 @@ def record_llm_run(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     call_type: str = "analysis",
+    agent_name: Optional[str] = None,
+    agent_label: Optional[str] = None,
+    step: Optional[int] = None,
     tokens: Optional[int] = None,
     duration_ms: Optional[int] = None,
     fallback_model: Optional[str] = None,
@@ -952,6 +986,9 @@ def record_llm_run(
                 provider=provider,
                 model=model,
                 call_type=call_type,
+                agent_name=agent_name,
+                agent_label=agent_label,
+                step=step,
                 success=success,
                 tokens=tokens,
                 duration_ms=duration_ms,
@@ -969,6 +1006,9 @@ def record_llm_run_started(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     call_type: str = "analysis",
+    agent_name: Optional[str] = None,
+    agent_label: Optional[str] = None,
+    step: Optional[int] = None,
 ) -> None:
     """Emit a live LLM-start event without changing persisted diagnostics."""
     context = get_current_diagnostic_context()
@@ -980,6 +1020,9 @@ def record_llm_run_started(
             provider=provider,
             model=model,
             call_type=call_type,
+            agent_name=agent_name,
+            agent_label=agent_label,
+            step=step,
         )
     except Exception as exc:  # pragma: no cover - defensive fail-open guard
         logger.warning("llm started diagnostic record failed: %s", exc)

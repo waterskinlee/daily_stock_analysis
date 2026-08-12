@@ -542,31 +542,36 @@ def _append_llm_runs(
 ) -> Optional[str]:
     previous_node_id = "context_pack"
     last_node_id: Optional[str] = None
-    for index, raw_run in enumerate(llm_runs, start=1):
+    attempt_index_by_agent: Dict[str, int] = defaultdict(int)
+    for raw_run in llm_runs:
         run = _as_mapping(raw_run)
         if not run:
             continue
         call_type = _safe_key(run.get("call_type") or "analysis")
+        agent_name = _safe_key(run.get("agent_name"))
+        attempt_key = f"{call_type}|{agent_name or 'unscoped'}"
+        attempt_index_by_agent[attempt_key] += 1
+        attempt_index = attempt_index_by_agent[attempt_key]
         model = normalize_model_used(run.get("model")) or normalize_model_used(raw_result.get("model_used"))
         provider = _safe_text(run.get("provider"), max_length=80)
-        node_id = f"llm_{call_type}_{index}"
+        node_id = f"llm_{call_type}_{attempt_index}"
         success = run.get("success") is True
         status = "success" if success else "failed"
-        if success and (run.get("fallback_model") or index > 1):
+        if success and run.get("fallback_model"):
             status = "fallback"
         timestamp = _datetime_to_iso(run.get("created_at"))
         duration_ms = _safe_int(run.get("duration_ms"))
         started_at = _started_at_from_end_and_duration(timestamp, duration_ms)
         message = _llm_run_message(model, run, success=success)
         edge_kind = "data"
-        if index > 1:
+        if attempt_index > 1:
             edge_kind = "fallback" if run.get("fallback_model") else "retry"
         _put_node(
             nodes,
             node_id,
             lane="analysis",
             kind="model",
-            label="LLM 生成",
+            label=_llm_node_label(agent_name, run.get("agent_label")),
             status=status,
             provider=model or provider,
             started_at=started_at,
@@ -578,6 +583,9 @@ def _append_llm_runs(
                 "provider": provider,
                 "model": model,
                 "call_type": call_type,
+                "agent_name": agent_name,
+                "agent_label": run.get("agent_label"),
+                "step": run.get("step"),
                 "tokens": run.get("tokens"),
                 "fallback_model": run.get("fallback_model"),
                 "error_type": run.get("error_type"),
@@ -597,6 +605,9 @@ def _append_llm_runs(
                 "provider": provider,
                 "model": model,
                 "call_type": call_type,
+                "agent_name": agent_name,
+                "agent_label": run.get("agent_label"),
+                "step": run.get("step"),
                 "tokens": run.get("tokens"),
                 "duration_ms": duration_ms,
                 "fallback_model": run.get("fallback_model"),
@@ -946,6 +957,7 @@ def _append_active_flow_events(
     known_node_ids = set(nodes)
     last_provider_node_by_type: Dict[str, Tuple[str, Dict[str, Any]]] = {}
     last_llm_node: Optional[str] = None
+    last_completed_llm_node: Optional[str] = None
     last_history_node: Optional[str] = None
 
     for raw_event in flow_events:
@@ -997,8 +1009,8 @@ def _append_active_flow_events(
             _refresh_incoming_edge_status(edges, node_id, nodes[node_id].get("status"))
             if provider_data_type and provider_run:
                 last_provider_node_by_type[provider_data_type] = (node_id, provider_run)
-            elif event_type in {"llm_run", "llm_run_started"}:
-                last_llm_node = node_id
+            elif event_type == "llm_run":
+                last_completed_llm_node = node_id
             elif event_type == "history_run":
                 last_history_node = node_id
 
@@ -1020,15 +1032,17 @@ def _append_active_flow_events(
                     _append_edge(edges, "task_queue", node_id, "control", nodes[node_id].get("status", "unknown"), label="调用")
                 last_provider_node_by_type[provider_data_type] = (node_id, provider_run)
             elif event_type in {"llm_run", "llm_run_started"}:
-                anchor = "analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue"
+                anchor = last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
                 _append_edge(edges, anchor, node_id, "data", nodes[node_id].get("status", "unknown"), label="生成")
                 last_llm_node = node_id
+                if event_type == "llm_run":
+                    last_completed_llm_node = node_id
             elif event_type == "history_run":
-                anchor = last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
+                anchor = last_completed_llm_node or last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
                 _append_edge(edges, anchor, node_id, "data", nodes[node_id].get("status", "unknown"), label="保存")
                 last_history_node = node_id
             elif event_type == "notification_run":
-                anchor = last_history_node or last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
+                anchor = last_history_node or last_completed_llm_node or last_llm_node or ("analysis_pipeline" if "analysis_pipeline" in nodes else "task_queue")
                 _append_edge(edges, anchor, node_id, "control", nodes[node_id].get("status", "unknown"), label="通知")
             known_node_ids.add(node_id)
 
@@ -1156,6 +1170,31 @@ def _context_block_message(block: Dict[str, Any]) -> str:
     if status == "not_supported":
         return "当前市场或链路不支持该输入块"
     return f"输入块状态为 {status or 'unknown'}"
+
+
+def _llm_node_label(agent_name: Any, agent_label: Any = None) -> str:
+    explicit_label = _safe_text(agent_label, max_length=40)
+    if explicit_label:
+        return f"{explicit_label} · LLM 生成"
+
+    agent_key = _safe_key(agent_name)
+    role_labels = {
+        "technical": "技术 Agent",
+        "intel": "情报 Agent",
+        "risk": "风控 Agent",
+        "decision": "决策 Agent",
+        "research": "研究 Agent",
+        "portfolio": "组合 Agent",
+    }
+    if agent_key in role_labels:
+        return f"{role_labels[agent_key]} · LLM 生成"
+    for prefix in ("skill_", "strategy_"):
+        if agent_key.startswith(prefix):
+            skill_name = agent_key.removeprefix(prefix).replace("_", " ").strip()
+            return f"技能 Agent · {skill_name or 'unknown'} · LLM 生成"
+    if agent_key:
+        return f"{agent_key.replace('_', ' ')} Agent · LLM 生成"
+    return "LLM 生成"
 
 
 def _provider_run_message(label: str, provider: str, run: Dict[str, Any], *, success: bool) -> str:

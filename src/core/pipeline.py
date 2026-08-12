@@ -1548,22 +1548,26 @@ class StockAnalysisPipeline:
                 message = f"Analyze stock {code} ({stock_name}) and return the full decision dashboard JSON."
             else:
                 message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
+            agent_arch = str(getattr(self.config, "agent_arch", "single") or "single").strip().lower()
+            record_aggregate_llm = agent_arch != "multi"
             llm_started_at = time.monotonic()
             try:
-                record_llm_run_started(
-                    model=getattr(self.config, "agent_litellm_model", None),
-                    call_type="agent_analysis",
-                )
+                if record_aggregate_llm:
+                    record_llm_run_started(
+                        model=getattr(self.config, "agent_litellm_model", None),
+                        call_type="agent_analysis",
+                    )
                 agent_result = executor.run(message, context=initial_context)
             except Exception as exc:
-                record_llm_run(
-                    success=False,
-                    model=getattr(self.config, "agent_litellm_model", None),
-                    call_type="agent_analysis",
-                    duration_ms=int((time.monotonic() - llm_started_at) * 1000),
-                    error_type=type(exc).__name__,
-                    error_message=exc,
-                )
+                if record_aggregate_llm:
+                    record_llm_run(
+                        success=False,
+                        model=getattr(self.config, "agent_litellm_model", None),
+                        call_type="agent_analysis",
+                        duration_ms=int((time.monotonic() - llm_started_at) * 1000),
+                        error_type=type(exc).__name__,
+                        error_message=exc,
+                    )
                 raise
 
             # 转换为 AnalysisResult
@@ -1575,22 +1579,23 @@ class StockAnalysisPipeline:
                 query_id,
                 trend_result=trend_result,
             )
-            record_llm_run(
-                success=bool(result and getattr(result, "success", True)),
-                model=getattr(result, "model_used", None) if result else getattr(agent_result, "model", None),
-                call_type="agent_analysis",
-                duration_ms=int((time.monotonic() - llm_started_at) * 1000),
-                error_type=(
-                    None
-                    if result and getattr(result, "success", True)
-                    else "AgentResultError"
-                ),
-                error_message=(
-                    getattr(result, "error_message", None)
-                    if result and not getattr(result, "success", True)
-                    else ("Agent returned empty result" if result is None else None)
-                ),
-            )
+            if record_aggregate_llm:
+                record_llm_run(
+                    success=bool(result and getattr(result, "success", True)),
+                    model=getattr(result, "model_used", None) if result else getattr(agent_result, "model", None),
+                    call_type="agent_analysis",
+                    duration_ms=int((time.monotonic() - llm_started_at) * 1000),
+                    error_type=(
+                        None
+                        if result and getattr(result, "success", True)
+                        else "AgentResultError"
+                    ),
+                    error_message=(
+                        getattr(result, "error_message", None)
+                        if result and not getattr(result, "success", True)
+                        else ("Agent returned empty result" if result is None else None)
+                    ),
+                )
             if result:
                 result.query_id = query_id
             resolved_stock_name = result.name if result and result.name else stock_name

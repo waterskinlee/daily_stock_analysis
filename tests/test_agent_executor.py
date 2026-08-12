@@ -48,6 +48,90 @@ from src.services.analysis_context_builder import (
 from src.storage import DatabaseManager
 
 
+class _SequenceAdapter:
+    def __init__(self, responses):
+        self._responses = iter(responses)
+
+    def call_with_tools(self, messages, tools, timeout=None):
+        return next(self._responses)
+
+
+class TestAgentLLMRunDiagnostics(unittest.TestCase):
+    def test_agent_loop_records_each_llm_round_trip_with_agent_identity(self):
+        adapter = _SequenceAdapter(
+            [
+                LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="call-1", name="echo", arguments={"message": "ping"})],
+                    usage={"total_tokens": 11},
+                    provider="openai",
+                    model="openai/gpt-test",
+                ),
+                LLMResponse(
+                    content="Done.",
+                    tool_calls=[],
+                    usage={"total_tokens": 7},
+                    provider="openai",
+                    model="openai/gpt-test",
+                ),
+            ]
+        )
+
+        with patch("src.agent.runner.record_llm_run_started") as record_started, patch(
+            "src.agent.runner.record_llm_run"
+        ) as record_finished:
+            result = run_agent_loop(
+                messages=[{"role": "user", "content": "Analyze"}],
+                tool_registry=_make_registry_with_echo(),
+                llm_adapter=adapter,
+                max_steps=2,
+                agent_name="technical",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(record_started.call_count, 2)
+        self.assertEqual(record_finished.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["call_type"] for call in record_started.call_args_list],
+            ["agent_technical", "agent_technical"],
+        )
+        self.assertEqual(
+            [call.kwargs["agent_name"] for call in record_finished.call_args_list],
+            ["technical", "technical"],
+        )
+        self.assertEqual(
+            [call.kwargs["step"] for call in record_finished.call_args_list],
+            [1, 2],
+        )
+
+    def test_unscoped_agent_loop_keeps_legacy_diagnostics_behavior(self):
+        adapter = _SequenceAdapter(
+            [
+                LLMResponse(
+                    content="Done.",
+                    tool_calls=[],
+                    usage={"total_tokens": 7},
+                    provider="openai",
+                    model="openai/gpt-test",
+                )
+            ]
+        )
+
+        with patch("src.agent.runner.record_llm_run_started") as record_started, patch(
+            "src.agent.runner.record_llm_run"
+        ) as record_finished:
+            result = run_agent_loop(
+                messages=[{"role": "user", "content": "Analyze"}],
+                tool_registry=_make_registry_with_echo(),
+                llm_adapter=adapter,
+                max_steps=1,
+            )
+
+        self.assertTrue(result.success)
+        record_started.assert_not_called()
+        record_finished.assert_not_called()
+
+
 # ============================================================
 # Helpers
 # ============================================================

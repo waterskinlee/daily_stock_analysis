@@ -855,6 +855,72 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
         finally:
             reset_run_diagnostic_context(token)
 
+    def test_multi_agent_history_snapshot_uses_per_agent_llm_runs_without_aggregate(self):
+        pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)
+        pipeline.config.agent_arch = "multi"
+        pipeline._ensure_agent_history = MagicMock()
+
+        from src.agent.executor import AgentResult
+        from src.services.run_diagnostics import record_llm_run
+
+        executor = MagicMock()
+
+        def run_with_agent_diagnostics(*_args, **_kwargs):
+            record_llm_run(
+                success=True,
+                model="openai/gpt-test",
+                call_type="agent_technical",
+                agent_name="technical",
+                step=1,
+            )
+            record_llm_run(
+                success=True,
+                model="openai/gpt-test",
+                call_type="agent_decision",
+                agent_name="decision",
+                step=1,
+            )
+            return AgentResult(
+                success=True,
+                content="{}",
+                dashboard={
+                    "stock_name": "贵州茅台",
+                    "sentiment_score": 66,
+                    "trend_prediction": "震荡",
+                    "operation_advice": "持有",
+                    "decision_type": "hold",
+                },
+                provider="test",
+            )
+
+        executor.run.side_effect = run_with_agent_diagnostics
+        token = activate_run_diagnostic_context(
+            trace_id="trace-multi-agent",
+            query_id="q-multi-agent",
+            stock_code="600519",
+            trigger_source="system",
+        )
+        try:
+            with patch("src.agent.factory.build_agent_executor", return_value=executor):
+                result = pipeline._analyze_with_agent(
+                    code="600519",
+                    report_type=ReportType.SIMPLE,
+                    query_id="q-multi-agent",
+                    stock_name="贵州茅台",
+                    realtime_quote=None,
+                    chip_data=None,
+                )
+
+            self.assertIsNotNone(result)
+            diagnostics = pipeline.db.save_analysis_history.call_args.kwargs["context_snapshot"]["diagnostics"]
+            self.assertEqual(
+                [run["call_type"] for run in diagnostics["llm_runs"]],
+                ["agent_technical", "agent_decision"],
+            )
+            self.assertNotIn("agent_analysis", [run["call_type"] for run in diagnostics["llm_runs"]])
+        finally:
+            reset_run_diagnostic_context(token)
+
     def test_decision_signal_helper_uses_saved_history_id(self):
         pipeline = _make_pipeline(agent_mode=False, save_context_snapshot=True)
         pipeline.trace_id = "trace-helper"

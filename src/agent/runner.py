@@ -29,6 +29,7 @@ from src.agent.dashboard_payload import sanitize_agent_dashboard_payload
 from src.agent.protocols import StageFailureReason
 from src.agent.stream_events import stream_event
 from src.agent.tools.registry import ToolRegistry
+from src.services.run_diagnostics import record_llm_run, record_llm_run_started
 from src.agent.tools.execution import (
     _build_tool_cache_key,
     _guard_tool_stock_scope,
@@ -320,6 +321,14 @@ def _build_budget_guard_result(
 # Core loop
 # ============================================================
 
+def _safe_agent_diagnostic_name(value: Any) -> str:
+    """Return a bounded stable key for low-sensitivity run diagnostics."""
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+    return normalized.strip("_")[:64]
+
+
+
+
 def run_agent_loop(
     *,
     messages: List[Dict[str, Any]],
@@ -332,6 +341,7 @@ def run_agent_loop(
     tool_call_timeout_seconds: Optional[float] = None,
     stock_scope: Optional[StockScope] = None,
     emit_stage_events: bool = True,
+    agent_name: Optional[str] = None,
 ) -> RunLoopResult:
     """Execute the ReAct LLM ↔ tool loop.
 
@@ -352,6 +362,8 @@ def run_agent_loop(
         emit_stage_events: Whether to emit the synthetic ``agent_loop``
             stage lifecycle. Orchestrated business stages disable this so
             ``stage_start`` / ``stage_done`` only describe real stages.
+        agent_name: Optional orchestrated-agent identity. When set, every LLM
+            round-trip is recorded under ``agent_<name>`` diagnostics.
 
     Returns:
         A :class:`RunLoopResult` with the final content, stats, and the
@@ -450,11 +462,48 @@ def run_agent_loop(
             progress_callback(stream_event("thinking", step=step + 1, message=thinking_msg))
 
         # --- LLM call ---
-        response = llm_adapter.call_with_tools(
-            messages,
-            tool_decls,
-            timeout=remaining_timeout,
-        )
+        llm_call_started_at = time.monotonic()
+        diagnostic_agent_name = _safe_agent_diagnostic_name(agent_name)
+        diagnostic_call_type = f"agent_{diagnostic_agent_name}" if diagnostic_agent_name else None
+        if diagnostic_call_type:
+            record_llm_run_started(
+                call_type=diagnostic_call_type,
+                agent_name=diagnostic_agent_name,
+                step=step + 1,
+            )
+        try:
+            response = llm_adapter.call_with_tools(
+                messages,
+                tool_decls,
+                timeout=remaining_timeout,
+            )
+        except Exception as exc:
+            if diagnostic_call_type:
+                record_llm_run(
+                    success=False,
+                    call_type=diagnostic_call_type,
+                    agent_name=diagnostic_agent_name,
+                    step=step + 1,
+                    duration_ms=int((time.monotonic() - llm_call_started_at) * 1000),
+                    error_type=type(exc).__name__,
+                    error_message=exc,
+                )
+            raise
+        if diagnostic_call_type:
+            response_tokens = (response.usage or {}).get("total_tokens", 0)
+            response_is_error = response.provider == "error"
+            record_llm_run(
+                success=not response_is_error,
+                provider=response.provider,
+                model=getattr(response, "model", None) or None,
+                call_type=diagnostic_call_type,
+                agent_name=diagnostic_agent_name,
+                step=step + 1,
+                tokens=response_tokens,
+                duration_ms=int((time.monotonic() - llm_call_started_at) * 1000),
+                error_type="LLMResponseError" if response_is_error else None,
+                error_message=response.content if response_is_error else None,
+            )
         provider_used = response.provider
         total_tokens += (response.usage or {}).get("total_tokens", 0)
         m = getattr(response, "model", "") or response.provider

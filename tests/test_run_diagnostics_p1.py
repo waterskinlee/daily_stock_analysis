@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import unittest
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,8 +19,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from data_provider.base import BaseFetcher, DataFetcherManager
 from src.services.run_diagnostics import (
     RunDiagnosticContext,
-    activate_run_diagnostic_context,
+    LLMRun,
     current_diagnostic_snapshot,
+    record_llm_run,
+    record_llm_run_started,
+    activate_run_diagnostic_context,
     record_provider_run,
     reset_run_diagnostic_context,
 )
@@ -256,6 +259,45 @@ class RunDiagnosticsP1TestCase(unittest.TestCase):
         llm_started = datetime.fromisoformat(llm_node["started_at"])
         llm_ended = datetime.fromisoformat(llm_node["ended_at"])
         self.assertEqual(int((llm_ended - llm_started).total_seconds() * 1000), 34)
+
+    def test_shared_context_serializes_concurrent_agent_llm_records(self) -> None:
+        events: list[dict] = []
+        context = RunDiagnosticContext(trace_id="trace-concurrent", event_sink=events.append)
+
+        def record_agent(agent_name: str) -> None:
+            call_type = f"agent_{agent_name}"
+            context.record_llm_run_started(
+                call_type=call_type,
+                agent_name=agent_name,
+                step=1,
+            )
+            context.record_llm_run(
+                LLMRun(
+                    trace_id=context.trace_id,
+                    provider="openai",
+                    model="openai/gpt-test",
+                    call_type=call_type,
+                    agent_name=agent_name,
+                    step=1,
+                )
+            )
+
+        agent_names = [f"skill_{index}" for index in range(8)]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(record_agent, agent_name) for agent_name in agent_names]
+            for future in futures:
+                future.result()
+
+        snapshot = context.snapshot()
+        self.assertEqual(len(snapshot["llm_runs"]), len(agent_names))
+        self.assertEqual(
+            {run["agent_name"] for run in snapshot["llm_runs"]},
+            set(agent_names),
+        )
+        self.assertEqual(len(events), len(agent_names) * 2)
+        for agent_name in agent_names:
+            node_id = f"llm_agent_{agent_name}_1"
+            self.assertEqual(sum(event["node_id"] == node_id for event in events), 2)
 
     def test_provider_flow_event_attempt_index_is_scoped_by_data_type(self) -> None:
         events = []
