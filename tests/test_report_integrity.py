@@ -1415,3 +1415,46 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         recorded.assert_called_once()
         self.assertTrue(recorded.call_args.kwargs["success"])
         self.assertEqual(recorded.call_args.kwargs["call_type"], "integrity_repair")
+
+    def test_phase_context_never_counts_as_repair_failure(self) -> None:
+        """phase_context is deterministic system data: the repair LLM is not
+        asked to regenerate it. When it is the only missing structural field,
+        the repair short-circuits as complete and never records a failure.
+        """
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                raise AssertionError("repair LLM must not be called")
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(
+            phase_decision={
+                "action_window": "盘中跟踪",
+                "immediate_action": "等待确认",
+                "watch_conditions": ["放量突破"],
+                "next_check_time": "14:50",
+                "confidence_reason": "数据完整",
+                "data_limitations": [],
+            }
+        )
+        ok, missing = check_content_integrity(result, require_phase_decision=True)
+        self.assertFalse(ok)
+        self.assertIn("dashboard.phase_decision.phase_context", missing)
+        self.assertEqual(
+            missing, ["dashboard.phase_decision.phase_context"]
+        )
+
+        with patch("src.core.pipeline.record_llm_run") as recorded:
+            repaired, remaining = pipe._attempt_integrity_repair(
+                result,
+                missing_fields=missing,
+                initial_context=self._make_context(),
+                trend_result=None,
+                report_language="zh",
+                max_retries=1,
+                require_phase_decision=True,
+            )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+        recorded.assert_not_called()

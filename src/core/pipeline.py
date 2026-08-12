@@ -3433,7 +3433,11 @@ class StockAnalysisPipeline:
             remaining_missing = [
                 field
                 for field in still_missing
-                if not field.startswith("dashboard.previous_watch_verification")
+                if not (
+                    field.startswith("dashboard.previous_watch_verification")
+                    or field == "dashboard.phase_decision.phase_context"
+                    or field.startswith("dashboard.phase_decision.phase_context.")
+                )
             ]
             elapsed = time.monotonic() - started
             complete = still_pass or not remaining_missing
