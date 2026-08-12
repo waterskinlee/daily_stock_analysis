@@ -911,7 +911,7 @@ class AgentOrchestrator:
         if not role or self.config is None:
             return self.llm_adapter
         try:
-            from src.config import get_effective_agent_role_model
+            from src.config import get_effective_agent_primary_model, get_effective_agent_role_model
             from src.agent.llm_adapter import LLMToolAdapter
         except ImportError:  # pragma: no cover - defensive
             return self.llm_adapter
