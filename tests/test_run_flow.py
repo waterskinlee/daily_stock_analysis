@@ -1069,6 +1069,10 @@ class RunFlowTestCase(unittest.TestCase):
 
         self.assertIn("新闻舆情 · Tavily", node_labels)
         self.assertIn("新闻舆情 · SearXNG", node_labels)
+        tavily_node = next(node for node in snapshot.nodes if node.label == "新闻舆情 · Tavily")
+        searxng_node = next(node for node in snapshot.nodes if node.label == "新闻舆情 · SearXNG")
+        self.assertEqual(tavily_node.status, "empty")
+        self.assertEqual(searxng_node.status, "fallback")
         self.assertTrue(any(edge["kind"] == "fallback" for edge in edge_payload))
         self.assertTrue(any(event.type == "provider_run" and event.node_id.endswith("searxng_2") for event in snapshot.events))
 

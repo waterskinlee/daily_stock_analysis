@@ -192,6 +192,10 @@ class LLMRun:
     step: Optional[int] = None
     success: bool = True
     tokens: Optional[int] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    time_to_first_token_ms: Optional[int] = None
+    models_tried: Optional[List[str]] = None
     duration_ms: Optional[int] = None
     fallback_model: Optional[str] = None
     error_type: Optional[str] = None
@@ -209,6 +213,10 @@ class LLMRun:
             "step": self.step,
             "success": self.success,
             "tokens": self.tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "time_to_first_token_ms": self.time_to_first_token_ms,
+            "models_tried": self.models_tried,
             "duration_ms": self.duration_ms,
             "fallback_model": self.fallback_model,
             "error_type": self.error_type,
@@ -216,6 +224,7 @@ class LLMRun:
             "created_at": self.created_at,
         }
         return {key: value for key, value in payload.items() if value is not None}
+
 
 
 @dataclass
@@ -969,6 +978,10 @@ def record_llm_run(
     agent_label: Optional[str] = None,
     step: Optional[int] = None,
     tokens: Optional[int] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    time_to_first_token_ms: Optional[int] = None,
+    models_tried: Optional[List[str]] = None,
     duration_ms: Optional[int] = None,
     fallback_model: Optional[str] = None,
     error_type: Optional[str] = None,
@@ -991,6 +1004,10 @@ def record_llm_run(
                 step=step,
                 success=success,
                 tokens=tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                time_to_first_token_ms=time_to_first_token_ms,
+                models_tried=models_tried,
                 duration_ms=duration_ms,
                 fallback_model=fallback_model,
                 error_type=error_type,

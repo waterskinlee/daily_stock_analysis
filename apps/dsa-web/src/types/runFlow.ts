@@ -2,6 +2,7 @@ export type RunFlowStatus =
   | 'pending'
   | 'running'
   | 'success'
+  | 'empty'
   | 'failed'
   | 'degraded'
   | 'fallback'

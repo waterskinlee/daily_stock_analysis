@@ -24,7 +24,9 @@ from src.search_service import (
     SearchService,
     _call_topic_news_in_subprocess,
     get_search_service,
+    reset_active_search_service,
     reset_search_service,
+    set_active_search_service,
 )
 
 
@@ -540,6 +542,56 @@ class SearchServiceConcurrencyTestCase(unittest.TestCase):
         self.assertEqual(mock_cls.call_count, 1)
         self.assertEqual(len(created), 1)
         self.assertEqual(len({id(service) for service in services}), 1)
+
+    def test_active_search_service_overrides_global_singleton(self):
+        reset_search_service()
+        task_service = SearchService(
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+
+        token = set_active_search_service(task_service)
+        try:
+            self.assertIs(get_search_service(), task_service)
+        finally:
+            reset_active_search_service(token)
+
+        self.assertIsNot(get_search_service(), task_service)
+
+    def test_active_search_service_is_isolated_across_contexts(self):
+        service_a = SearchService(
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        service_b = SearchService(
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        barrier = threading.Barrier(2)
+        resolved: dict = {}
+
+        def worker(name, service):
+            token = set_active_search_service(service)
+            try:
+                barrier.wait(timeout=1)
+                resolved[name] = get_search_service()
+            finally:
+                reset_active_search_service(token)
+
+        threads = [
+            threading.Thread(target=worker, args=("a", service_a)),
+            threading.Thread(target=worker, args=("b", service_b)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertIs(resolved["a"], service_a)
+        self.assertIs(resolved["b"], service_b)
 
 
 if __name__ == "__main__":

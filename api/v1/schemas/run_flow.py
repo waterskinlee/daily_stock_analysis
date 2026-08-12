@@ -12,6 +12,7 @@ RunFlowStatus = Literal[
     "pending",
     "running",
     "success",
+    "empty",
     "failed",
     "degraded",
     "fallback",

@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 class TechnicalAgent(BaseAgent):
     agent_name = "technical"
     max_steps = 6
+    context_keys = [
+        "realtime_quote",
+        "daily_history",
+        "daily_bars",
+        "trend_result",
+        "chip_distribution",
+        "analysis_context",
+        "market_phase_context",
+    ]
     tool_names = [
         "get_realtime_quote",
         "get_daily_history",
@@ -33,7 +42,6 @@ class TechnicalAgent(BaseAgent):
         "get_chip_distribution",
         "get_analysis_context",
     ]
-
     def system_prompt(self, ctx: AgentContext) -> str:
         skills = ""
         if self.skill_instructions:

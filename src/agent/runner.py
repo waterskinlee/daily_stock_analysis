@@ -490,7 +490,10 @@ def run_agent_loop(
                 )
             raise
         if diagnostic_call_type:
-            response_tokens = (response.usage or {}).get("total_tokens", 0)
+            response_usage = response.usage or {}
+            response_tokens = response_usage.get("total_tokens", 0)
+            response_prompt_tokens = response_usage.get("prompt_tokens") or response_usage.get("normalized_prompt_tokens")
+            response_completion_tokens = response_usage.get("completion_tokens") or response_usage.get("normalized_completion_tokens")
             response_is_error = response.provider == "error"
             record_llm_run(
                 success=not response_is_error,
@@ -500,6 +503,9 @@ def run_agent_loop(
                 agent_name=diagnostic_agent_name,
                 step=step + 1,
                 tokens=response_tokens,
+                prompt_tokens=response_prompt_tokens,
+                completion_tokens=response_completion_tokens,
+                models_tried=list(getattr(response, "models_tried", []) or []),
                 duration_ms=int((time.monotonic() - llm_call_started_at) * 1000),
                 error_type="LLMResponseError" if response_is_error else None,
                 error_message=response.content if response_is_error else None,

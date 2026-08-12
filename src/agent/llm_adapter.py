@@ -91,6 +91,7 @@ class LLMResponse:
     usage: Dict[str, Any] = field(default_factory=dict)       # token usage info
     provider: str = ""                     # which provider handled this call
     model: str = ""                        # full model name used (e.g. gemini/gemini-2.0-flash), for report meta
+    models_tried: List[str] = field(default_factory=list)  # ordered candidate models attempted before success
     raw: Any = None                        # raw provider response for debugging
 
 
@@ -341,9 +342,10 @@ class LLMToolAdapter:
     load balancing.
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, model_override: Optional[str] = None):
         config = config or get_config()
         self._config = config
+        self._model_override = (model_override or "").strip() or None
         self._router = None          # litellm Router (multi-key primary model)
         self._legacy_router_model_list: List[Dict[str, Any]] = []
         self._litellm_available = False
@@ -607,6 +609,12 @@ class LLMToolAdapter:
             return LLMResponse(content=error_msg, provider="error")
         route_resolution = resolve_agent_litellm_route(config)
         models_to_try = route_resolution.models_to_try
+        if self._model_override:
+            override_models = [self._model_override] + [
+                model for model in models_to_try if model != self._model_override
+            ]
+            if override_models:
+                models_to_try = override_models
         if not models_to_try:
             error_msg = (
                 "No LLM configured. Please set LITELLM_MODEL, LLM_CHANNELS, "
@@ -637,6 +645,7 @@ class LLMToolAdapter:
                     max_tokens=max_tokens,
                     timeout=remaining_timeout,
                     reasoning_effort=reasoning_effort,
+                    models_tried=list(models_to_try[: idx + 1]),
                 )
             except Exception as e:
                 if isinstance(e, _resolve_litellm_exception("RateLimitError")):
@@ -689,6 +698,7 @@ class LLMToolAdapter:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         reasoning_effort: Optional[str] = None,
+        models_tried: Optional[List[str]] = None,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages, target_model=model)
@@ -793,6 +803,7 @@ class LLMToolAdapter:
             model,
             openai_messages,
             model_list=recovery_model_list,
+            models_tried=models_tried,
         )
 
     def _get_temperature(self) -> float:
@@ -878,6 +889,7 @@ class LLMToolAdapter:
         messages: Optional[List[Dict[str, Any]]] = None,
         *,
         model_list: Optional[List[Dict[str, Any]]] = None,
+        models_tried: Optional[List[str]] = None,
     ) -> LLMResponse:
         """Parse litellm OpenAI-compatible response into LLMResponse."""
         choice = response.choices[0]
@@ -952,6 +964,7 @@ class LLMToolAdapter:
             usage=usage,
             provider=provider_name,
             model=model,
+            models_tried=list(models_tried or [model]),
             raw=response,
         )
 

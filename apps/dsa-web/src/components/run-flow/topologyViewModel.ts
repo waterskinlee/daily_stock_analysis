@@ -29,6 +29,7 @@ const STATUS_RANK: Record<RunFlowStatus, number> = {
   success: 4,
   cancelled: 5,
   cancel_requested: 6,
+  empty: 6,
   fallback: 7,
   degraded: 8,
   timeout: 9,

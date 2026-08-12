@@ -1277,6 +1277,49 @@ class TestOrchestratorExecution(unittest.TestCase):
             "risk_warning": "",
         }, ensure_ascii=False)
 
+    def test_run_parallel_stages_isolates_and_merges_opinions(self):
+        from src.agent.agents.technical_agent import TechnicalAgent
+        from src.agent.agents.intel_agent import IntelAgent
+        from src.agent.protocols import AgentRunStats
+
+        orch = self._make_orchestrator(config=SimpleNamespace(agent_dag_parallel=True))
+        technical = TechnicalAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        intel = IntelAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        ctx = AgentContext(query="test", stock_code="600519", stock_name="贵州茅台")
+
+        def fake_run(agent, isolated, **kwargs):
+            isolated.add_opinion(AgentOpinion(
+                agent_name=agent.agent_name,
+                signal="hold",
+                confidence=0.6,
+                reasoning=f"{agent.agent_name} opinion",
+            ))
+            if agent.agent_name == "intel":
+                isolated.set_data("intel_opinion", {"signal": "hold"})
+            result = StageResult(stage_name=agent.agent_name, status=StageStatus.COMPLETED)
+            result.opinion = isolated.opinions[-1]
+            result.meta["models_used"] = ["test/model"]
+            result.meta["tool_calls_log"] = []
+            return result
+
+        with patch.object(orch, "_run_stage_agent", side_effect=fake_run):
+            results = orch._run_parallel_stages(
+                [technical, intel],
+                ctx,
+                progress_callback=None,
+                timeout_seconds=None,
+            )
+            stats = AgentRunStats()
+            all_tool_calls = []
+            models_used = []
+            orch._merge_parallel_stage_results(
+                ctx, results, stats, all_tool_calls, models_used
+            )
+
+        self.assertEqual([agent.agent_name for agent, _, _ in results], ["technical", "intel"])
+        self.assertEqual([op.agent_name for op in ctx.opinions], ["technical", "intel"])
+        self.assertEqual(ctx.get_data("intel_opinion"), {"signal": "hold"})
+
     class _OpinionStage:
         def __init__(
             self,
@@ -2442,6 +2485,31 @@ class TestBaseAgentMessageAssembly(unittest.TestCase):
 
         self.assertEqual(result.status, StageStatus.COMPLETED)
         self.assertIs(run_loop.call_args.kwargs["stock_scope"], ctx.meta["stock_scope"])
+
+    def test_context_keys_projection_limits_prefetched_data(self):
+        from src.agent.agents.base_agent import BaseAgent
+
+        class ScopedAgent(BaseAgent):
+            agent_name = "scoped"
+            context_keys = ["realtime_quote", "trend_result"]
+
+            def system_prompt(self, ctx):
+                return "system"
+
+            def build_user_message(self, ctx):
+                return "user"
+
+        agent = ScopedAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        ctx = AgentContext(query="hello", stock_code="600519")
+        ctx.set_data("realtime_quote", {"price": 1880.0})
+        ctx.set_data("trend_result", {"signal": "hold"})
+        ctx.set_data("news_context", "should-not-appear")
+
+        injected = agent._inject_cached_data(ctx)
+
+        self.assertIn("[Pre-fetched: realtime_quote]", injected)
+        self.assertIn("[Pre-fetched: trend_result]", injected)
+        self.assertNotIn("should-not-appear", injected)
 
 
 # ============================================================

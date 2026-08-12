@@ -8,8 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
-- [改进] Agent 模式运行流按实际 Agent 与每轮 LLM 往返展示独立「LLM 生成」节点，保留角色、顺序、耗时、模型与成功状态；多 Agent 不再与外层聚合节点重复，旧单 Agent 路径保持原展示。
-
+- [改进] 多 Agent 分析管线支持按角色独立模型（`AGENT_TECHNICAL_MODEL` 等 7 个开关，空值继承 `AGENT_LITELLM_MODEL`→`LITELLM_MODEL`），并记录输入/输出 Token 分离与候选模型链；pipeline 预取与 Agent 工具共用同一任务级搜索缓存，避免新闻源重复请求；运行流将「无匹配」与真实失败区分展示；Agent 仅注入各自所需上下文，决策阶段不再让 LLM 生成确定性的 `phase_context`/`strategy_synthesis`；specialist/full 模式下技术、情报两个独立阶段并行执行（`AGENT_DAG_PARALLEL` 可关闭）。
 - [修复] Web 个股报告新增「决策上下文」卡：展示策略层多策略综合（综合信号/共识度/冲突/置信度/支持与反方策略）到最终决策的路径，明确标注「策略层共识 ≠ 最终决策」，并在风控下调（如 buy→sell）或数据降级时高亮原因，消除「多策略综合偏多但核心结论偏空」的歧义；后端通知、历史 Markdown 与 Jinja 模板同步渲染同一决策上下文（`agent_disagreement_explanation` 首次被消费渲染），三语本地化。
 - [新功能] 个股分析自动回读最近一次历史分析的观察点并注入本次提示词（`ANALYSIS_PREVIOUS_WATCH_ENABLED=true` 默认开启）：每次分析从 `analysis_history` 读取上一份报告的 `phase_decision.watch_conditions`（无则回退 `battle_plan.action_checklist`）、狙击点位（ideal_buy/secondary_buy/stop_loss/take_profit 独立列）、操作建议与摘要，要求 LLM 逐条核对「已兑现/未兑现/部分兑现」后再下结论，避免昨日观察条件在今日分析中被静默丢弃；同日盘前→盘中多次分析自动复用（排除本次 query_id），大盘复盘记录不混入，超 10 天视为过期自动降权。默认为软约束（提示词要求但不强制）；新增 `ANALYSIS_PREVIOUS_WATCH_HARD=true` 硬约束开关，要求 LLM 输出结构化 `dashboard.previous_watch_verification` 字段（has_previous/items[condition/status/evidence/impact]/summary），由报告完整性校验强制——缺失或不合规时 legacy 路径触发 LLM 重试、Agent 路径走占位补全。三语本地化渲染，Jinja 模板与通知同步新增「上次观察点核对」表格块。legacy 与 Agent 两条路径共用同一渲染模块 `src/analysis_previous_context.py`。
 - [改进] Agent 模式报告完整性校验新增独立门禁 `REPORT_INTEGRITY_AGENT_REPAIR_ENABLED`（默认关闭）：开启后仅对缺失结构字段发起有界无状态 LLM 修复，证据型 `previous_watch_verification` 永不进入二次 LLM；修复调用使用最小 JSON 片段契约、温度 0、关闭 reasoning、单次 60 秒/总计 75 秒硬墙钟与最多 2 次尝试，瞬时故障可重试、确定性解析错误不重试。候选值经类型、范围与枚举校验后 merge-only，修复结果进入 run diagnostics，失败或剩余字段均由诚实占位兜底。

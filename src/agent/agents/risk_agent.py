@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 class RiskAgent(BaseAgent):
     agent_name = "risk"
     max_steps = 4
+    context_keys = [
+        "intel_opinion",
+        "fundamental_context",
+        "shareholder_actions",
+        "realtime_quote",
+        "trend_result",
+        "analysis_context",
+        "market_phase_context",
+    ]
     tool_names = [
         "search_stock_news",
         "get_realtime_quote",

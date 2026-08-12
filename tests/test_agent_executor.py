@@ -63,9 +63,18 @@ class TestAgentLLMRunDiagnostics(unittest.TestCase):
                 LLMResponse(
                     content="",
                     tool_calls=[ToolCall(id="call-1", name="echo", arguments={"message": "ping"})],
-                    usage={"total_tokens": 11},
+                    usage={"total_tokens": 11, "prompt_tokens": 4, "completion_tokens": 7},
                     provider="openai",
                     model="openai/gpt-test",
+                    models_tried=["openai/gpt-test", "openai/gpt-fallback"],
+                ),
+                LLMResponse(
+                    content="Done.",
+                    tool_calls=[],
+                    usage={"total_tokens": 7, "prompt_tokens": 3, "completion_tokens": 4},
+                    provider="openai",
+                    model="openai/gpt-test",
+                    models_tried=["openai/gpt-test"],
                 ),
                 LLMResponse(
                     content="Done.",
@@ -92,8 +101,16 @@ class TestAgentLLMRunDiagnostics(unittest.TestCase):
         self.assertEqual(record_started.call_count, 2)
         self.assertEqual(record_finished.call_count, 2)
         self.assertEqual(
-            [call.kwargs["call_type"] for call in record_started.call_args_list],
-            ["agent_technical", "agent_technical"],
+            [call.kwargs["prompt_tokens"] for call in record_finished.call_args_list],
+            [4, 3],
+        )
+        self.assertEqual(
+            [call.kwargs["completion_tokens"] for call in record_finished.call_args_list],
+            [7, 4],
+        )
+        self.assertEqual(
+            record_finished.call_args_list[0].kwargs["models_tried"],
+            ["openai/gpt-test", "openai/gpt-fallback"],
         )
         self.assertEqual(
             [call.kwargs["agent_name"] for call in record_finished.call_args_list],

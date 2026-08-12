@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 class IntelAgent(BaseAgent):
     agent_name = "intel"
     max_steps = 4
+    context_keys = [
+        "news_context",
+        "fundamental_context",
+        "capital_flow",
+        "analysis_context",
+        "market_phase_context",
+    ]
     tool_names = [
         "search_stock_news",
         "search_comprehensive_intel",

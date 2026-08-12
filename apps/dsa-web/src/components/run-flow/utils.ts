@@ -17,6 +17,7 @@ export const RUN_FLOW_STATUS_STYLE: Record<RunFlowStatus, {
   pending: { badge: 'default', tone: 'neutral' },
   running: { badge: 'info', tone: 'info', pulse: true },
   success: { badge: 'success', tone: 'success' },
+  empty: { badge: 'default', tone: 'neutral' },
   failed: { badge: 'danger', tone: 'danger' },
   degraded: { badge: 'warning', tone: 'warning' },
   fallback: { badge: 'warning', tone: 'warning' },
@@ -36,12 +37,12 @@ export const RUN_FLOW_SEVERITY_STYLE: Record<RunFlowEventSeverity, {
   warning: { badge: 'warning', tone: 'warning' },
   danger: { badge: 'danger', tone: 'danger' },
 };
-
 const STATUS_LABEL_KEYS: Record<RunFlowStatus, UiTextKey> = {
   pending: 'runFlow.status.pending',
   running: 'runFlow.status.running',
   success: 'runFlow.status.success',
   failed: 'runFlow.status.failed',
+  empty: 'runFlow.status.empty',
   degraded: 'runFlow.status.degraded',
   fallback: 'runFlow.status.fallback',
   timeout: 'runFlow.status.timeout',

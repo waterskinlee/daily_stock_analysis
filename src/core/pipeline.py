@@ -48,7 +48,7 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
 )
-from src.search_service import SearchService
+from src.search_service import SearchService, reset_active_search_service, set_active_search_service
 from src.analysis_context_pack_prompt import format_analysis_context_pack_prompt_section
 from src.analysis_context_pack_overview import render_analysis_context_pack_overview
 from src.market_phase_summary import MARKET_PHASE_SUMMARY_KEY, render_market_phase_summary
@@ -1551,6 +1551,9 @@ class StockAnalysisPipeline:
             agent_arch = str(getattr(self.config, "agent_arch", "single") or "single").strip().lower()
             record_aggregate_llm = agent_arch != "multi"
             llm_started_at = time.monotonic()
+            search_service_token = None
+            if self.search_service is not None:
+                search_service_token = set_active_search_service(self.search_service)
             try:
                 if record_aggregate_llm:
                     record_llm_run_started(
@@ -1569,6 +1572,8 @@ class StockAnalysisPipeline:
                         error_message=exc,
                     )
                 raise
+            finally:
+                reset_active_search_service(search_service_token)
 
             # 转换为 AnalysisResult
             result = self._agent_result_to_analysis_result(
@@ -3485,12 +3490,17 @@ class StockAnalysisPipeline:
         the pipeline.
         """
         adapter = getattr(self, "_last_agent_llm_adapter", None)
-        if adapter is not None:
+        try:
+            from src.config import get_effective_agent_role_model
+            repair_model = get_effective_agent_role_model(self.config, "repair")
+        except Exception:
+            repair_model = ""
+        if adapter is not None and not repair_model:
             return adapter
         try:
             from src.agent.llm_adapter import LLMToolAdapter
 
-            return LLMToolAdapter(self.config)
+            return LLMToolAdapter(self.config, model_override=repair_model or None)
         except Exception as exc:
             logger.warning(
                 "[LLM完整性] agent_repair: cannot build LLMToolAdapter: %s", exc

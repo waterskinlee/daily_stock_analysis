@@ -29,6 +29,8 @@ import inspect
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from math import ceil
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -344,6 +346,114 @@ class AgentOrchestrator:
         ):
             run_kwargs["timeout_seconds"] = timeout_seconds
         return agent.run(ctx, **run_kwargs)
+    @staticmethod
+    def _clone_context_for_stage(ctx: AgentContext) -> AgentContext:
+        """Clone a context for one parallel stage so writes stay isolated."""
+        return AgentContext(
+            query=ctx.query,
+            stock_code=ctx.stock_code,
+            stock_name=ctx.stock_name,
+            session_id=ctx.session_id,
+            data=dict(ctx.data or {}),
+            opinions=list(ctx.opinions or []),
+            risk_flags=[dict(flag) for flag in (ctx.risk_flags or []) if isinstance(flag, dict)],
+            meta=dict(ctx.meta or {}),
+            created_at=ctx.created_at,
+        )
+
+    def _run_parallel_stages(
+        self,
+        agents: List[Any],
+        ctx: AgentContext,
+        progress_callback: Optional[Callable],
+        timeout_seconds: Optional[float],
+    ) -> List[tuple]:
+        """Run independent stages concurrently with isolated contexts.
+
+        Returns ``(agent, isolated_ctx, stage_result)`` in input order.
+        """
+        ordered = []
+
+        def _run_one(agent):
+            isolated = self._clone_context_for_stage(ctx)
+            if progress_callback:
+                progress_callback(stream_event(
+                    "stage_start",
+                    stage=agent.agent_name,
+                    message=f"Starting {agent.agent_name} analysis...",
+                ))
+            try:
+                result = self._run_stage_agent(
+                    agent,
+                    isolated,
+                    progress_callback=progress_callback,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                logger.error("[Orchestrator] parallel stage '%s' failed: %s", agent.agent_name, exc)
+                result = StageResult(
+                    stage_name=agent.agent_name,
+                    status=StageStatus.FAILED,
+                    error=str(exc),
+                    failure_reason=StageFailureReason.STAGE_FAILURE,
+                )
+            if progress_callback:
+                progress_callback(stream_event(
+                    "stage_done",
+                    stage=agent.agent_name,
+                    status=result.status.value,
+                    duration=result.duration_s,
+                ))
+            return agent, isolated, result
+
+        if len(agents) == 1:
+            ordered.append(_run_one(agents[0]))
+            return ordered
+
+        workers = min(len(agents), 4)
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-dag")
+        try:
+            futures = {
+                executor.submit(copy_context().run, _run_one, agent): agent
+                for agent in agents
+            }
+            for future in as_completed(futures):
+                ordered.append(future.result())
+        finally:
+            executor.shutdown(wait=True)
+
+        return sorted(ordered, key=lambda item: agents.index(item[0]))
+
+    def _merge_parallel_stage_results(
+        self,
+        ctx: AgentContext,
+        results: List[tuple],
+        stats: AgentRunStats,
+        all_tool_calls: List[Dict[str, Any]],
+        models_used: List[str],
+    ) -> None:
+        """Merge isolated stage outputs back into the shared pipeline context."""
+        for _agent, isolated, result in results:
+            stats.record_stage(result)
+            all_tool_calls.extend(
+                tc for tc in (result.meta.get("tool_calls_log") or [])
+            )
+            if result.opinion is not None:
+                ctx.add_opinion(result.opinion)
+            else:
+                for op in isolated.opinions:
+                    if op.agent_name == _agent.agent_name and op not in ctx.opinions:
+                        ctx.add_opinion(op)
+            for flag in isolated.risk_flags:
+                if flag not in ctx.risk_flags:
+                    ctx.risk_flags.append(flag)
+            for key, value in isolated.data.items():
+                if key not in ctx.data and value is not None:
+                    ctx.set_data(key, value)
+
+    # -----------------------------------------------------------------
+    # Public interface (mirrors AgentExecutor)
+    # -----------------------------------------------------------------
 
     # -----------------------------------------------------------------
     # Public interface (mirrors AgentExecutor)
@@ -492,6 +602,33 @@ class AgentOrchestrator:
         agents = self._build_agent_chain(ctx)
         specialist_agents_inserted = False
         index = 0
+
+        # Wave-1 DAG: technical and intel are independent; run them together
+        # when the mode uses both and the feature is enabled.
+        if (
+            self.mode in {"full", "specialist"}
+            and getattr(self.config, "agent_dag_parallel", True)
+            and [agent.agent_name for agent in agents[:2]] == ["technical", "intel"]
+        ):
+            wave1_timeout = (
+                max(0.0, timeout_s - (time.time() - t0))
+                if timeout_s
+                else None
+            )
+            wave1_results = self._run_parallel_stages(
+                agents[:2],
+                ctx,
+                progress_callback=progress_callback,
+                timeout_seconds=wave1_timeout,
+            )
+            self._merge_parallel_stage_results(
+                ctx,
+                wave1_results,
+                stats,
+                all_tool_calls,
+                models_used,
+            )
+            index = 2
 
         # Minimum seconds required for a stage to do useful work.  Starting
         # a stage with less budget virtually guarantees a timeout that wastes
@@ -769,6 +906,21 @@ class AgentOrchestrator:
     # Agent chain construction
     # -----------------------------------------------------------------
 
+    def _adapter_for_role(self, role: str) -> "LLMToolAdapter":
+        """Return a per-role adapter when that role has an explicit model."""
+        if not role or self.config is None:
+            return self.llm_adapter
+        try:
+            from src.config import get_effective_agent_role_model
+            from src.agent.llm_adapter import LLMToolAdapter
+        except ImportError:  # pragma: no cover - defensive
+            return self.llm_adapter
+        model = get_effective_agent_role_model(self.config, role)
+        primary = get_effective_agent_primary_model(self.config)
+        if not model or model == primary:
+            return self.llm_adapter
+        return LLMToolAdapter(self.config, model_override=model)
+
     def _build_agent_chain(self, ctx: AgentContext) -> list:
         """Instantiate the ordered agent list based on ``self.mode``."""
         from src.agent.agents.technical_agent import TechnicalAgent
@@ -778,17 +930,18 @@ class AgentOrchestrator:
 
         self._skill_agent_names = set()
 
-        common_kwargs = dict(
-            tool_registry=self.tool_registry,
-            llm_adapter=self.llm_adapter,
-            skill_instructions=self.skill_instructions,
-            technical_skill_policy=self.technical_skill_policy,
-        )
+        def _agent_kwargs(role: str) -> dict:
+            return dict(
+                tool_registry=self.tool_registry,
+                llm_adapter=self._adapter_for_role(role),
+                skill_instructions=self.skill_instructions,
+                technical_skill_policy=self.technical_skill_policy,
+            )
 
-        technical = self._prepare_agent(TechnicalAgent(**common_kwargs))
-        intel = self._prepare_agent(IntelAgent(**common_kwargs))
-        risk = self._prepare_agent(RiskAgent(**common_kwargs))
-        decision = self._prepare_agent(DecisionAgent(**common_kwargs))
+        technical = self._prepare_agent(TechnicalAgent(**_agent_kwargs("technical")))
+        intel = self._prepare_agent(IntelAgent(**_agent_kwargs("intel")))
+        risk = self._prepare_agent(RiskAgent(**_agent_kwargs("risk")))
+        decision = self._prepare_agent(DecisionAgent(**_agent_kwargs("decision")))
 
         if self.mode == "quick":
             return [technical, decision]
@@ -811,9 +964,10 @@ class AgentOrchestrator:
         """
         try:
             from src.agent.skills.router import SkillRouter
+            skill_llm_adapter = self._adapter_for_role("skill")
             common_kwargs = dict(
                 tool_registry=self.tool_registry,
-                llm_adapter=self.llm_adapter,
+                llm_adapter=skill_llm_adapter,
                 skill_instructions=self.skill_instructions,
                 technical_skill_policy=self.technical_skill_policy,
             )
@@ -1170,8 +1324,15 @@ class AgentOrchestrator:
                 ctx.meta["analysis_context_pack_summary"] = analysis_context_pack_summary
 
             # Pre-populate data fields that the caller already has
-            for data_key in ("realtime_quote", "daily_history", "chip_distribution",
-                             "trend_result", "news_context"):
+            for data_key in (
+                "realtime_quote",
+                "daily_history",
+                "chip_distribution",
+                "trend_result",
+                "news_context",
+                "fundamental_context",
+                "analysis_context",
+            ):
                 if context.get(data_key):
                     ctx.set_data(data_key, context[data_key])
 

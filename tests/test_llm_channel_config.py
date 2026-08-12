@@ -18,6 +18,7 @@ from src.config import (
     get_configured_llm_models,
     get_effective_agent_models_to_try,
     get_effective_agent_primary_model,
+    get_effective_agent_role_model,
     get_fixed_litellm_temperature,
     normalize_litellm_temperature,
 )
@@ -1671,6 +1672,28 @@ class LLMChannelConfigTestCase(unittest.TestCase):
 
         self.assertEqual(config.agent_litellm_model, "openai/deepseek-chat")
         self.assertEqual(get_effective_agent_primary_model(config), "openai/deepseek-chat")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_per_role_model_overrides_and_inherits(self, _mock_parse_yaml, _mock_setup_env) -> None:
+        env = {
+            "OPENAI_API_KEY": "sk-test-value",
+            "LITELLM_MODEL": "openai/gpt-4o-mini",
+            "AGENT_LITELLM_MODEL": "openai/gpt-5",
+            "AGENT_TECHNICAL_MODEL": "deepseek/deepseek-chat",
+            "AGENT_DECISION_MODEL": "openai/gpt-5.6-sol",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.agent_technical_model, "deepseek/deepseek-chat")
+        self.assertEqual(config.agent_decision_model, "openai/gpt-5.6-sol")
+        self.assertEqual(config.agent_intel_model, "")
+        self.assertEqual(get_effective_agent_role_model(config, "technical"), "deepseek/deepseek-chat")
+        self.assertEqual(get_effective_agent_role_model(config, "decision"), "openai/gpt-5.6-sol")
+        self.assertEqual(get_effective_agent_role_model(config, "intel"), "openai/gpt-5")
+        self.assertEqual(get_effective_agent_role_model(config, "risk"), "openai/gpt-5")
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

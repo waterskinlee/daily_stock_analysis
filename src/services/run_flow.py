@@ -587,7 +587,10 @@ def _append_llm_runs(
                 "agent_label": run.get("agent_label"),
                 "step": run.get("step"),
                 "tokens": run.get("tokens"),
-                "fallback_model": run.get("fallback_model"),
+                "prompt_tokens": run.get("prompt_tokens"),
+                "completion_tokens": run.get("completion_tokens"),
+                "time_to_first_token_ms": run.get("time_to_first_token_ms"),
+                "models_tried": run.get("models_tried"),
                 "error_type": run.get("error_type"),
                 "error_message": run.get("error_message_sanitized"),
             },
@@ -605,10 +608,12 @@ def _append_llm_runs(
                 "provider": provider,
                 "model": model,
                 "call_type": call_type,
-                "agent_name": agent_name,
-                "agent_label": run.get("agent_label"),
-                "step": run.get("step"),
                 "tokens": run.get("tokens"),
+                "prompt_tokens": run.get("prompt_tokens"),
+                "completion_tokens": run.get("completion_tokens"),
+                "time_to_first_token_ms": run.get("time_to_first_token_ms"),
+                "models_tried": run.get("models_tried"),
+                "step": run.get("step"),
                 "duration_ms": duration_ms,
                 "fallback_model": run.get("fallback_model"),
                 "error_type": run.get("error_type"),
@@ -1087,6 +1092,8 @@ def _provider_run_status(run: Dict[str, Any], *, had_previous_failure: bool) -> 
     error_type = str(run.get("error_type") or "").lower()
     if "timeout" in error_type:
         return "timeout"
+    if error_type == "nousablenews" or "无匹配" in error_type:
+        return "empty"
     return "failed"
 
 
@@ -1423,6 +1430,7 @@ def _valid_status(value: Any) -> str:
         "running",
         "success",
         "failed",
+        "empty",
         "degraded",
         "fallback",
         "timeout",

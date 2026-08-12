@@ -17,6 +17,7 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -44,8 +45,12 @@ from src.data.stock_mapping import (
     foreign_stock_english_aliases,
 )
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
-
 logger = logging.getLogger(__name__)
+
+_ACTIVE_SEARCH_SERVICE: ContextVar[Optional["SearchService"]] = ContextVar(
+    "active_search_service",
+    default=None,
+)
 
 _SEARCH_TIMEOUT_PROCESS_START_METHOD = "spawn"
 _SEARCH_TIMEOUT_PROCESS_JOIN_GRACE_SECONDS = 1.0
@@ -6195,18 +6200,38 @@ class SearchService:
             date_str = f" [{result.published_date}]" if result.published_date else ""
             lines.append(f"{i}. 【{result.source}】{result.title}{date_str}")
             lines.append(f"   {result.snippet[:200]}...")
-            lines.append("")
-        
-        return "\n".join(lines)
-
-
 # === 便捷函数 ===
 _search_service: Optional[SearchService] = None
 _search_service_lock = threading.Lock()
 
 
+def set_active_search_service(service: Optional[SearchService]) -> Token:
+    """Bind a task-local search service for the current execution context.
+
+    Agent tools resolve ``get_search_service()`` and therefore share the same
+    instance (and in-memory result cache) as the owning analysis pipeline
+    when the pipeline activates this override. Callers must reset the returned
+    token when the task ends.
+    """
+    return _ACTIVE_SEARCH_SERVICE.set(service)
+
+
+def reset_active_search_service(token: Optional[Token]) -> None:
+    """Reset a task-local search service override (defensive fail-open)."""
+    if token is None:
+        return
+    try:
+        _ACTIVE_SEARCH_SERVICE.reset(token)
+    except Exception as exc:  # pragma: no cover - defensive fail-open guard
+        logger.warning("active search service reset failed: %s", exc)
+
+
 def get_search_service() -> SearchService:
-    """获取搜索服务单例"""
+    """获取当前任务或全局的搜索服务单例。"""
+    active = _ACTIVE_SEARCH_SERVICE.get()
+    if active is not None:
+        return active
+
     global _search_service
     
     if _search_service is None:

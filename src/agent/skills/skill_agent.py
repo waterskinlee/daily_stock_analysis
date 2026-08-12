@@ -26,6 +26,16 @@ class SkillAgent(BaseAgent):
     """Agent that evaluates a single trading skill for a stock."""
 
     max_steps = 4
+    context_keys = [
+        "realtime_quote",
+        "daily_history",
+        "daily_bars",
+        "trend_result",
+        "chip_distribution",
+        "news_context",
+        "fundamental_context",
+        "market_phase_context",
+    ]
 
     def __init__(self, skill_id: Optional[str] = None, strategy_id: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)

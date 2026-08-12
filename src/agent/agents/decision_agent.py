@@ -26,6 +26,16 @@ class DecisionAgent(BaseAgent):
 
     agent_name = "decision"
     max_steps = 3  # pure synthesis, should not need many tool calls
+    context_keys = [
+        "realtime_quote",
+        "trend_result",
+        "chip_distribution",
+        "news_context",
+        "intel_opinion",
+        "fundamental_context",
+        "market_phase_context",
+        "skill_consensus",
+    ]
     tool_names: Optional[List[str]] = []  # no tool access — works from context only
 
     @staticmethod
@@ -110,15 +120,18 @@ Important: ``decision_type`` must stay within the existing enum
 ``sentiment_score``, and the natural-language fields instead of inventing
 new decision_type values.
 
-The nested ``dashboard`` object must include ``phase_decision`` with these
-keys: ``phase_context``, ``action_window``, ``immediate_action``,
+The nested ``dashboard`` object must include ``phase_decision`` with the
+natural-language keys: ``action_window``, ``immediate_action``,
 ``watch_conditions``, ``next_check_time``, ``confidence_reason``,
-``data_limitations``. For intraday/lunch-break/near-close phases, describe the
-current action, watch conditions, and next check point. For pre-market,
-non-trading, or unknown phases, do not invent today's intraday movement. If
-quote, daily bars, or technical data is stale, fallback, missing, fetch_failed,
-partial, or estimated, ``confidence_level`` must not be High/高 and the
-limitation must be reflected in ``confidence_reason`` or ``data_limitations``.
+``data_limitations``. Do **not** generate ``phase_context`` or
+``strategy_synthesis`` — the pipeline fills both deterministically from
+runtime facts and the strategy engine; omitting them is correct. For
+intraday/lunch-break/near-close phases, describe the current action, watch
+conditions, and next check point. For pre-market, non-trading, or unknown
+phases, do not invent today's intraday movement. If quote, daily bars, or
+technical data is stale, fallback, missing, fetch_failed, partial, or
+estimated, ``confidence_level`` must not be High/高 and the limitation must
+be reflected in ``confidence_reason`` or ``data_limitations``.
 
 The nested ``dashboard`` object should include optional ``signal_attribution`` when
 the available evidence supports attribution, with these keys: ``technical_indicators``, ``news_sentiment``, ``fundamentals``,

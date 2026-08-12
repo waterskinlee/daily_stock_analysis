@@ -52,6 +52,7 @@ class BaseAgent(ABC):
     # Subclass overrides
     agent_name: str = "base"
     tool_names: Optional[List[str]] = None  # None → all tools available
+    context_keys: Optional[List[str]] = None  # None → all ctx.data keys; else projected subset
     max_steps: int = 6
 
     def __init__(
@@ -234,7 +235,10 @@ class BaseAgent(ABC):
         """
         import json
         parts: List[str] = []
+        allowed_keys = set(self.context_keys) if self.context_keys is not None else None
         for key, value in ctx.data.items():
+            if allowed_keys is not None and key not in allowed_keys:
+                continue
             if value is not None:
                 try:
                     serialised = json.dumps(value, ensure_ascii=False, default=str)

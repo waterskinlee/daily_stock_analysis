@@ -807,6 +807,35 @@ def get_effective_agent_primary_model(config: "Config") -> str:
     return (getattr(config, "litellm_model", "") or "").strip()
 
 
+def get_effective_agent_role_model(config: "Config", role: str) -> str:
+    """Resolve a per-role Agent model with AGENT_LITELLM_MODEL inheritance."""
+    configured_router_models = set(
+        get_configured_llm_models(getattr(config, "llm_model_list", []) or [])
+    )
+    role_field = {
+        "technical": "agent_technical_model",
+        "intel": "agent_intel_model",
+        "risk": "agent_risk_model",
+        "decision": "agent_decision_model",
+        "skill": "agent_skill_model",
+        "portfolio": "agent_portfolio_model",
+        "repair": "agent_repair_model",
+    }.get(role, "agent_litellm_model")
+    role_model = normalize_agent_litellm_model(
+        getattr(config, role_field, "") or "",
+        configured_models=configured_router_models,
+    )
+    if role_model:
+        return role_model
+    return get_effective_agent_primary_model(config)
+
+
+def get_effective_agent_model(config: "Config", role: str = "") -> str:
+    """Return the effective Agent model for a role (empty role = global)."""
+    if role:
+        return get_effective_agent_role_model(config, role)
+    return get_effective_agent_primary_model(config)
+
 def get_effective_agent_models_to_try(config: "Config") -> List[str]:
     """Return Agent model try-order: primary + global fallbacks (deduped)."""
     configured_router_models = set(
@@ -1025,6 +1054,13 @@ class Config:
     agent_backend: str = "auto"
     agent_generation_backend: str = AUTO_AGENT_BACKEND_ID
     agent_litellm_model: str = ""  # Optional Agent-only primary model; empty inherits LITELLM_MODEL
+    agent_technical_model: str = ""  # Optional per-role model overrides (empty inherits agent_litellm_model)
+    agent_intel_model: str = ""
+    agent_risk_model: str = ""
+    agent_decision_model: str = ""
+    agent_skill_model: str = ""
+    agent_portfolio_model: str = ""
+    agent_repair_model: str = ""
     agent_mode: bool = False
     _agent_mode_explicit: bool = False  # True when AGENT_MODE was explicitly set in env
     agent_max_steps: int = AGENT_MAX_STEPS_DEFAULT
@@ -1041,6 +1077,7 @@ class Config:
     agent_portfolio_agent_timeout_s: float = 0
     agent_skill_agent_timeout_s: float = 0
     agent_skill_concurrency: int = 3
+    agent_dag_parallel: bool = True  # Run independent specialist stages concurrently
     agent_risk_override: bool = True  # Allow risk agent to veto buy signals
     agent_deep_research_budget: int = 30000  # Max token budget for deep research
     agent_deep_research_timeout: int = 180  # Max seconds for /research command before returning timeout
@@ -1707,6 +1744,21 @@ class Config:
             os.getenv('AGENT_LITELLM_MODEL', ''),
             configured_models=set(get_configured_llm_models(llm_model_list)),
         )
+        _agent_role_models = {
+            role: normalize_agent_litellm_model(
+                os.getenv(f"AGENT_{role.upper()}_MODEL", ''),
+                configured_models=set(get_configured_llm_models(llm_model_list)),
+            )
+            for role in (
+                "technical",
+                "intel",
+                "risk",
+                "decision",
+                "skill",
+                "portfolio",
+                "repair",
+            )
+        }
         agent_context_compression_profile = normalize_agent_context_compression_profile(
             os.getenv('AGENT_CONTEXT_COMPRESSION_PROFILE')
         )
@@ -1988,6 +2040,13 @@ class Config:
             agent_backend=(os.getenv('AGENT_BACKEND', 'auto') or 'auto').strip().lower(),
             agent_generation_backend=agent_generation_backend,
             agent_litellm_model=agent_litellm_model,
+            agent_technical_model=_agent_role_models["technical"],
+            agent_intel_model=_agent_role_models["intel"],
+            agent_risk_model=_agent_role_models["risk"],
+            agent_decision_model=_agent_role_models["decision"],
+            agent_skill_model=_agent_role_models["skill"],
+            agent_portfolio_model=_agent_role_models["portfolio"],
+            agent_repair_model=_agent_role_models["repair"],
             agent_mode=os.getenv('AGENT_MODE', 'false').lower() == 'true',
             _agent_mode_explicit=os.getenv('AGENT_MODE') is not None,
             agent_max_steps=parse_env_int(
@@ -2038,6 +2097,7 @@ class Config:
                 minimum=1,
                 maximum=4,
             ),
+            agent_dag_parallel=os.getenv('AGENT_DAG_PARALLEL', 'true').lower() == 'true',
             agent_risk_override=os.getenv('AGENT_RISK_OVERRIDE', 'true').lower() == 'true',
             agent_deep_research_budget=parse_env_int(
                 os.getenv('AGENT_DEEP_RESEARCH_BUDGET'),
