@@ -512,6 +512,68 @@ class TestApplyPlaceholderFill(unittest.TestCase):
         self.assertEqual(phase_decision["next_check_time"], "模型未提供下一次检查点")
         self.assertEqual(phase_decision["confidence_reason"], "模型未提供阶段化置信度理由")
 
+    def test_phase_context_fallback_restores_market_summary_subset(self) -> None:
+        """Phase-context placeholder restores the authoritative market phase subset."""
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            trend_prediction="震荡",
+            sentiment_score=50,
+            operation_advice="持有",
+            analysis_summary="已有摘要",
+            decision_type="hold",
+            dashboard={
+                "core_conclusion": {"one_sentence": "持有观望"},
+                "intelligence": {"risk_alerts": []},
+                "battle_plan": {"sniper_points": {"stop_loss": "100"}},
+                "phase_decision": {
+                    "phase_context": "invalid",
+                    "action_window": "盘中跟踪",
+                    "immediate_action": "等待确认",
+                    "watch_conditions": ["放量突破"],
+                    "next_check_time": "14:50",
+                    "confidence_reason": "数据完整",
+                    "data_limitations": [],
+                },
+            },
+        )
+        market_phase_summary = {
+            "phase": "intraday",
+            "market": "cn",
+            "market_local_time": "2026-08-12T10:43:44+08:00",
+            "session_date": "2026-08-12",
+            "effective_daily_bar_date": "2026-08-11",
+            "is_trading_day": True,
+            "is_market_open_now": True,
+            "is_partial_bar": True,
+            "minutes_to_open": None,
+            "minutes_to_close": 256,
+            "trigger_source": "api",
+            "analysis_intent": "auto",
+            "warnings": [],
+        }
+
+        ok, missing = check_content_integrity(result, require_phase_decision=True)
+        self.assertFalse(ok)
+        self.assertIn("dashboard.phase_decision.phase_context", missing)
+
+        apply_placeholder_fill(
+            result,
+            missing,
+            market_phase_summary=market_phase_summary,
+        )
+
+        phase_context = result.dashboard["phase_decision"]["phase_context"]
+        self.assertIsInstance(phase_context, dict)
+        self.assertEqual(phase_context["phase"], "intraday")
+        self.assertEqual(phase_context["market"], "cn")
+        self.assertEqual(phase_context["effective_daily_bar_date"], "2026-08-11")
+        self.assertIs(phase_context["is_partial_bar"], True)
+        self.assertEqual(phase_context["minutes_to_close"], 256)
+        ok, missing = check_content_integrity(result, require_phase_decision=True)
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
 
 class TestPreviousWatchVerificationIntegrity(unittest.TestCase):
     """Hard-constraint integrity checks for dashboard.previous_watch_verification."""
@@ -1226,12 +1288,13 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertNotIn("Current dashboard", messages[1]["content"])
 
     def test_previous_watch_fields_are_excluded_from_repair(self) -> None:
-        """Evidence-bearing previous-watch fields bypass the LLM repair."""
+        """Evidence/system-derived fields bypass the LLM repair."""
         from src.core.pipeline import StockAnalysisPipeline
 
         repairable, evidence = StockAnalysisPipeline._partition_integrity_missing_fields(
             [
                 "dashboard.phase_decision.data_limitations",
+                "dashboard.phase_decision.phase_context",
                 "dashboard.previous_watch_verification",
                 "dashboard.previous_watch_verification.items[0].evidence",
             ]
@@ -1240,6 +1303,7 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertEqual(
             evidence,
             [
+                "dashboard.phase_decision.phase_context",
                 "dashboard.previous_watch_verification",
                 "dashboard.previous_watch_verification.items[0].evidence",
             ],

@@ -1690,6 +1690,7 @@ class StockAnalysisPipeline:
                             previous_watch_context=initial_context.get(
                                 "previous_analysis_data"
                             ),
+                            market_phase_summary=market_phase_summary,
                         )
                         logger.info(
                             "[LLM完整性] integrity_mode=agent_weak 必填字段缺失 %s，已占位补全",
@@ -3194,12 +3195,32 @@ class StockAnalysisPipeline:
     def _partition_integrity_missing_fields(
         missing_fields: List[str],
     ) -> Tuple[List[str], List[str]]:
-        """Split structural gaps from evidence-bearing previous-watch gaps."""
-        evidence_prefix = "dashboard.previous_watch_verification"
+        """Split structural gaps from evidence-bearing / system-derived gaps.
+
+        Two path families never enter the repair LLM:
+
+        - ``dashboard.previous_watch_verification*`` — evidence-bearing; must
+          come from the main analysis model or remain an honest placeholder.
+        - ``dashboard.phase_decision.phase_context`` — deterministic market
+          phase data computed by ``build_market_phase_context()``. Asking a
+          repair LLM to regenerate it is wasted work and frequently produces
+          the wrong type (e.g. a string instead of an object). It is restored
+          from the authoritative ``market_phase_summary`` by
+          ``apply_phase_decision_guardrails()`` right after the fill step, so
+          the placeholder only needs to guarantee a valid dict.
+
+        Everything else is structural and may be repaired by a bounded LLM call.
+        """
+        system_derived_prefixes = (
+            "dashboard.previous_watch_verification",
+            "dashboard.phase_decision.phase_context",
+        )
         repairable: List[str] = []
         evidence: List[str] = []
         for field in missing_fields:
-            if field == evidence_prefix or field.startswith(evidence_prefix + "."):
+            if field in system_derived_prefixes or field.startswith(
+                system_derived_prefixes
+            ):
                 evidence.append(field)
             else:
                 repairable.append(field)

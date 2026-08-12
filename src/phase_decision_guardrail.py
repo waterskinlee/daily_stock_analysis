@@ -18,7 +18,7 @@ INTRADAY_PHASES = {"intraday", "lunch_break", "closing_auction"}
 CONSERVATIVE_ACTION_PHASES = {"premarket", "non_trading", "unknown"}
 CORE_DATA_BLOCKS = {"quote", "daily_bars", "technical"}
 
-_PHASE_CONTEXT_KEYS = (
+PHASE_CONTEXT_KEYS = (
     "phase",
     "market",
     "market_local_time",
@@ -223,7 +223,7 @@ def _safe_phase_summary(value: Any) -> Optional[Dict[str, Any]]:
 
 
 def _phase_context_from_summary(summary: Mapping[str, Any]) -> Dict[str, Any]:
-    return {key: summary.get(key) for key in _PHASE_CONTEXT_KEYS if key in summary}
+    return {key: summary.get(key) for key in PHASE_CONTEXT_KEYS if key in summary}
 
 
 def _has_core_degraded_block(overview: Optional[Mapping[str, Any]]) -> bool:

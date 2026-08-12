@@ -30,6 +30,7 @@ from src.agent.llm_adapter import (
 )
 from src.agent.provider_trace import resolved_model_provider_identity
 from src.agent.skills.defaults import CORE_TRADING_SKILL_POLICY_ZH
+from src.phase_decision_guardrail import PHASE_CONTEXT_KEYS
 from src.config import (
     Config,
     extra_litellm_params,
@@ -677,11 +678,26 @@ def _build_previous_watch_context_fallback(
     }
 
 
+def _phase_context_from_market_summary(value: Any) -> Dict[str, Any]:
+    """Build the phase_context subset from authoritative market phase data.
+
+    ``phase_context`` is deterministic system data (computed by
+    ``build_market_phase_context()``), not LLM insight. This helper mirrors
+    ``src.phase_decision_guardrail._phase_context_from_summary`` so the
+    placeholder fill can restore honest content when the main model omitted
+    the field; the guardrail later overwrites it with the full summary.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {key: value.get(key) for key in PHASE_CONTEXT_KEYS if key in value}
+
+
 def apply_placeholder_fill(
     result: "AnalysisResult",
     missing_fields: List[str],
     *,
     previous_watch_context: Optional[Dict[str, Any]] = None,
+    market_phase_summary: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Fill mandatory gaps in-place, retaining real prior watch-point context."""
 
@@ -788,7 +804,9 @@ def apply_placeholder_fill(
                 result.dashboard["phase_decision"] = phase_decision
             if field == "dashboard.phase_decision.phase_context":
                 if not isinstance(phase_decision.get("phase_context"), dict):
-                    phase_decision["phase_context"] = {}
+                    phase_decision["phase_context"] = _phase_context_from_market_summary(
+                        market_phase_summary
+                    )
             elif field == "dashboard.phase_decision.watch_conditions":
                 if not isinstance(phase_decision.get("watch_conditions"), list):
                     phase_decision["watch_conditions"] = []
@@ -4037,6 +4055,7 @@ class GeminiAnalyzer:
                         result,
                         missing_fields,
                         previous_watch_context=context.get("previous_analysis_data"),
+                        market_phase_summary=context.get("market_phase_context"),
                     )
                     logger.warning(
                         "[LLM完整性] 必填字段缺失 %s，已占位补全，不阻塞流程",
@@ -4868,12 +4887,14 @@ class GeminiAnalyzer:
         missing_fields: List[str],
         *,
         previous_watch_context: Optional[Dict[str, Any]] = None,
+        market_phase_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Delegate to module-level apply_placeholder_fill."""
         apply_placeholder_fill(
             result,
             missing_fields,
             previous_watch_context=previous_watch_context,
+            market_phase_summary=market_phase_summary,
         )
 
     def _extract_analysis_json_object(self, response_text: str) -> Tuple[str, Dict[str, Any]]:
