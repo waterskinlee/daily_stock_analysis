@@ -657,7 +657,11 @@ def _provider_flow_event(
     provider_key = _safe_event_key(run.provider) or "unknown"
     label = _DATA_TYPE_LABELS.get(data_type, data_type)
     fallback = bool(run.fallback_from or run.fallback_to)
-    status = _flow_status_for_success(run.success, fallback=fallback)
+    error_type = str(run.error_type or "").lower()
+    if not run.success and (error_type == "nousablenews" or "无匹配" in error_type):
+        status = "empty"
+    else:
+        status = _flow_status_for_success(run.success, fallback=fallback)
     node_id = f"provider_{data_type}_{provider_key}_{index}"
     started_at = _started_at_from_end_and_duration(run.created_at, run.latency_ms)
     message = (
