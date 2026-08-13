@@ -1133,10 +1133,23 @@ const SettingsPage: React.FC = () => {
   const promptCacheAdvancedItems = activeCategory === 'ai_model'
     ? activeItems.filter(isPromptCacheAdvancedSetting)
     : [];
+  const AGENT_ROLE_MODEL_KEYS: Record<string, true> = {
+    AGENT_TECHNICAL_MODEL: true,
+    AGENT_INTEL_MODEL: true,
+    AGENT_RISK_MODEL: true,
+    AGENT_DECISION_MODEL: true,
+    AGENT_SKILL_MODEL: true,
+    AGENT_PORTFOLIO_MODEL: true,
+    AGENT_REPAIR_MODEL: true,
+  };
+  const agentRoleModelItems = activeCategory === 'ai_model'
+    ? activeItems.filter((item) => AGENT_ROLE_MODEL_KEYS[item.key])
+    : [];
   const visibleActiveItems = activeCategory === 'ai_model'
-    ? activeItems.filter((item) => !isPromptCacheAdvancedSetting(item))
+    ? activeItems.filter((item) => !isPromptCacheAdvancedSetting(item) && !AGENT_ROLE_MODEL_KEYS[item.key])
     : activeItems;
-  const hasActiveConfigItems = visibleActiveItems.length > 0 || promptCacheAdvancedItems.length > 0;
+  const hasActiveConfigItems =
+    visibleActiveItems.length > 0 || promptCacheAdvancedItems.length > 0 || agentRoleModelItems.length > 0;
   const isEnvBackupAllowed = isDesktopRuntime || authEnabled;
   const envBackupActionDisabled = isLoading || isSaving || isExportingEnv || isImportingEnv || !isEnvBackupAllowed;
 
@@ -1821,6 +1834,25 @@ const SettingsPage: React.FC = () => {
                   }}
                   disabled={isSaving || isLoading}
                 />
+              </SettingsSectionCard>
+            ) : null}
+            {activeCategory === 'ai_model' && agentRoleModelItems.length ? (
+              <SettingsSectionCard
+                title={t('settings.agentRoleModels')}
+                description={t('settings.agentRoleModelsDescription')}
+              >
+                <div className="divide-y divide-[var(--settings-border-soft)] overflow-hidden rounded-lg border border-[var(--settings-border)] bg-[var(--settings-surface)]">
+                  {agentRoleModelItems.map((item) => (
+                    <SettingsField
+                      key={item.key}
+                      item={item}
+                      value={item.value}
+                      disabled={isSaving}
+                      onChange={setDraftValue}
+                      issues={issueByKey[item.key] || []}
+                    />
+                  ))}
+                </div>
               </SettingsSectionCard>
             ) : null}
             {activeCategory === 'system' && passwordChangeable ? (
