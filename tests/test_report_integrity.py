@@ -1416,6 +1416,49 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertTrue(recorded.call_args.kwargs["success"])
         self.assertEqual(recorded.call_args.kwargs["call_type"], "integrity_repair")
 
+    def test_repair_records_token_and_model_observability(self) -> None:
+        """Repair completion carries prompt/completion tokens and models_tried."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                return type(
+                    "R",
+                    (),
+                    {
+                        "content": '{"analysis_summary":"已补齐"}',
+                        "provider": "newapia",
+                        "model": "anthropic/deepseek-v4-flash",
+                        "usage": {
+                            "prompt_tokens": 512,
+                            "completion_tokens": 64,
+                            "total_tokens": 576,
+                        },
+                        "models_tried": ["anthropic/deepseek-v4-flash"],
+                    },
+                )()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(analysis_summary="")
+        _, missing = check_content_integrity(result)
+        with patch("src.core.pipeline.record_llm_run") as recorded:
+            repaired, _ = pipe._attempt_integrity_repair(
+                result,
+                missing_fields=missing,
+                initial_context=self._make_context(),
+                trend_result=None,
+                report_language="zh",
+                max_retries=1,
+                require_phase_decision=False,
+            )
+        self.assertTrue(repaired)
+        kwargs = recorded.call_args.kwargs
+        self.assertEqual(kwargs["prompt_tokens"], 512)
+        self.assertEqual(kwargs["completion_tokens"], 64)
+        self.assertEqual(kwargs["tokens"], 576)
+        self.assertEqual(kwargs["models_tried"], ["anthropic/deepseek-v4-flash"])
+        self.assertEqual(kwargs["model"], "anthropic/deepseek-v4-flash")
+
     def test_phase_context_never_counts_as_repair_failure(self) -> None:
         """phase_context is deterministic system data: the repair LLM is not
         asked to regenerate it. When it is the only missing structural field,

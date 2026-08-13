@@ -3323,7 +3323,14 @@ class StockAnalysisPipeline:
 
         remaining_missing = list(repairable_missing)
         deadline = time.monotonic() + max(0.0, self._REPAIR_TOTAL_BUDGET_S)
-        configured_model = getattr(self.config, "litellm_model", None)
+        try:
+            from src.config import get_effective_agent_role_model
+
+            configured_model = get_effective_agent_role_model(self.config, "repair") or getattr(
+                self.config, "litellm_model", None
+            )
+        except Exception:
+            configured_model = getattr(self.config, "litellm_model", None)
         for attempt in range(1, attempt_limit + 1):
             remaining_budget = deadline - time.monotonic()
             if remaining_budget <= 0:
@@ -3372,6 +3379,15 @@ class StockAnalysisPipeline:
             response_model = getattr(response, "model", None) or configured_model
             content = getattr(response, "content", None)
             elapsed = time.monotonic() - started
+            response_usage = getattr(response, "usage", None) or {}
+            response_prompt_tokens = response_usage.get("prompt_tokens") or response_usage.get(
+                "normalized_prompt_tokens"
+            )
+            response_completion_tokens = response_usage.get("completion_tokens") or response_usage.get(
+                "normalized_completion_tokens"
+            )
+            response_total_tokens = response_usage.get("total_tokens", 0)
+            response_models_tried = list(getattr(response, "models_tried", []) or [])
             if provider == "error":
                 record_llm_run(
                     success=False,
@@ -3379,6 +3395,10 @@ class StockAnalysisPipeline:
                     model=response_model,
                     call_type="integrity_repair",
                     duration_ms=round(elapsed * 1000),
+                    tokens=response_total_tokens,
+                    prompt_tokens=response_prompt_tokens,
+                    completion_tokens=response_completion_tokens,
+                    models_tried=response_models_tried,
                     error_type="provider_error",
                     error_message=content,
                 )
@@ -3398,6 +3418,10 @@ class StockAnalysisPipeline:
                     model=response_model,
                     call_type="integrity_repair",
                     duration_ms=round(elapsed * 1000),
+                    tokens=response_total_tokens,
+                    prompt_tokens=response_prompt_tokens,
+                    completion_tokens=response_completion_tokens,
+                    models_tried=response_models_tried,
                     error_type="empty_response",
                     error_message="repair response contained no text",
                 )
@@ -3419,6 +3443,10 @@ class StockAnalysisPipeline:
                     model=response_model,
                     call_type="integrity_repair",
                     duration_ms=round(elapsed * 1000),
+                    tokens=response_total_tokens,
+                    prompt_tokens=response_prompt_tokens,
+                    completion_tokens=response_completion_tokens,
+                    models_tried=response_models_tried,
                     error_type="parse_error",
                     error_message="repair response was not a JSON object",
                 )
@@ -3457,6 +3485,10 @@ class StockAnalysisPipeline:
                 model=response_model,
                 call_type="integrity_repair",
                 duration_ms=round(elapsed * 1000),
+                tokens=response_total_tokens,
+                prompt_tokens=response_prompt_tokens,
+                completion_tokens=response_completion_tokens,
+                models_tried=response_models_tried,
                 error_type=None if complete else "incomplete_repair",
                 error_message=None
                 if complete
