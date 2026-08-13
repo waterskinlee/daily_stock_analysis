@@ -47,6 +47,10 @@ vi.mock('../../api/analysis', async () => {
       getTasks: vi.fn(),
       getTaskFlow: vi.fn(),
     },
+    scheduledRunApi: {
+      listActiveRuns: vi.fn().mockResolvedValue([]),
+      getRunFlow: vi.fn(),
+    },
   };
 });
 

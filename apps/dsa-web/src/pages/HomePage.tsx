@@ -16,7 +16,7 @@ import { MarketReviewReportView } from '../components/report/MarketReviewReportV
 import { MarketReviewRegionSelector } from '../components/market-review/MarketReviewRegionSelector';
 import { ReportSummary } from '../components/report/ReportSummary';
 import { RunFlowPanel } from '../components/run-flow';
-import { TaskPanel } from '../components/tasks';
+import { TaskPanel, ScheduledRunBanner } from '../components/tasks';
 import {
   HomeStockWorkspace,
   type HomeWatchlistRow,
@@ -1586,6 +1586,11 @@ const HomePage: React.FC = () => {
             ) : null}
           </div>
         ) : null}
+
+        <div className="px-3 pb-2 md:px-4">
+          <ScheduledRunBanner />
+        </div>
+
 
         {setupNeedsAction ? (
           <div className="px-3 pb-2 md:px-4">

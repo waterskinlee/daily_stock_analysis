@@ -186,6 +186,52 @@ export const analysisApi = {
   },
 };
 
+export type ScheduledRunStatus = {
+  runId: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | string;
+  stockCount: number;
+  completedCount: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+};
+
+export type ScheduledRunFlow = {
+  status: ScheduledRunStatus;
+  events: Array<{
+    runId: string;
+    stockCode: string | null;
+    eventIndex: number;
+    event: Record<string, unknown>;
+    createdAt: string | null;
+  }>;
+  eventCount: number;
+};
+
+/**
+ * Get live status of background scheduled analysis batches (analyzer path).
+ */
+export const scheduledRunApi = {
+  listActiveRuns: async (): Promise<ScheduledRunStatus[]> => {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/analysis/scheduled-runs'
+    );
+    const data = toCamelCase<{ runs: ScheduledRunStatus[] }>(response.data);
+    return Array.isArray(data.runs) ? data.runs : [];
+  },
+  getRunFlow: async (
+    runId: string,
+    params?: { stockCode?: string; sinceEventIndex?: number }
+  ): Promise<ScheduledRunFlow> => {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/analysis/scheduled-runs/${encodeURIComponent(runId)}/flow`,
+      { params }
+    );
+    return toCamelCase<ScheduledRunFlow>(response.data);
+  },
+};
+
+
 // ============ Custom Error Classes ============
 
 /**

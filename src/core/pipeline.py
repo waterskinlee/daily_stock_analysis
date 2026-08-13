@@ -231,6 +231,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        flow_event_sink: Optional[Callable[[str, int, Dict[str, Any]], None]] = None,
     ):
         """
         初始化调度器
@@ -258,6 +259,9 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
+        self.flow_event_sink = flow_event_sink
+        self._flow_event_index = 0
+        self._flow_event_lock = threading.Lock()
         
         # 初始化各模块
         self.db = get_db()
@@ -361,6 +365,24 @@ class StockAnalysisPipeline:
                     "query_id": query_id,
                 },
             )
+
+    def _forward_scheduled_flow_event(self, stock_code: str, event: Dict[str, Any]) -> None:
+        """Forward one run-flow event to the background scheduled-batch sink."""
+        sink = getattr(self, "flow_event_sink", None)
+        if sink is None:
+            return
+        try:
+            with self._flow_event_lock:
+                self._flow_event_index += 1
+                event_index = self._flow_event_index
+            sink(stock_code, event_index, event)
+        except Exception as exc:
+            logger.warning(
+                "[pipeline] scheduled flow event sink failed: %s (stock=%s)",
+                exc,
+                stock_code,
+            )
+
 
     def fetch_and_save_stock_data(
         self, 
@@ -3968,6 +3990,7 @@ class StockAnalysisPipeline:
                 query_id=effective_query_id,
                 stock_code=code,
                 trigger_source=getattr(self, "query_source", None),
+                event_sink=lambda event: self._forward_scheduled_flow_event(code, event),
             )
         try:
             self._emit_progress(12, f"{code}：正在准备分析任务")

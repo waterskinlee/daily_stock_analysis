@@ -1503,3 +1503,55 @@ def _build_analysis_report(
         strategy=strategy,
         details=details
     )
+
+
+@router.get(
+    "/scheduled-runs",
+    summary="获取后台定时分析任务状态",
+    description="列出由 analyzer 定时任务写入的活跃批任务状态。",
+)
+def list_scheduled_runs() -> Dict[str, Any]:
+    """Return currently-running background scheduled analysis batches."""
+    from src.storage import get_db
+
+    try:
+        runs = get_db().list_active_scheduled_runs()
+    except Exception as exc:
+        logger.error(f"查询定时任务状态失败: {exc}", exc_info=True)
+        raise api_error(500, "internal_error", f"查询定时任务状态失败: {str(exc)}")
+    return {"runs": runs}
+
+
+@router.get(
+    "/scheduled-runs/{run_id}/flow",
+    summary="获取后台定时任务运行流",
+    description="返回 analyzer 定时任务实时写入的 run-flow 事件。",
+)
+def get_scheduled_run_flow(
+    run_id: str,
+    stock_code: Optional[str] = Query(None),
+    since_event_index: Optional[int] = Query(None),
+) -> Dict[str, Any]:
+    """Return live run-flow events for one background scheduled batch."""
+    from src.storage import get_db
+
+    try:
+        db = get_db()
+        status = db.get_scheduled_run_status(run_id)
+        if status is None:
+            raise api_error(404, "not_found", f"定时任务 {run_id} 不存在")
+        events = db.get_scheduled_run_events(
+            run_id,
+            stock_code=stock_code,
+            since_event_index=since_event_index,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"查询定时任务运行流失败: {exc}", exc_info=True)
+        raise api_error(500, "internal_error", f"查询定时任务运行流失败: {str(exc)}")
+    return {
+        "status": status,
+        "events": events,
+        "event_count": len(events),
+    }

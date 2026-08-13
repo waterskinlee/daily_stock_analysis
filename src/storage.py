@@ -325,6 +325,37 @@ class ScreeningRun(Base):
         Index('ix_screening_run_market_created', 'market', 'created_at'),
     )
 
+class ScheduledRunStatus(Base):
+    """Live status of a background scheduled analysis batch (CLI/analyzer path)."""
+
+    __tablename__ = 'scheduled_run_status'
+
+    run_id = Column(String(64), primary_key=True)
+    status = Column(String(16), nullable=False, index=True)
+    stock_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    started_at = Column(DateTime, nullable=False, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+
+
+class ScheduledRunEvent(Base):
+    """Real-time run-flow events emitted by a background scheduled analysis batch."""
+
+    __tablename__ = 'scheduled_run_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    stock_code = Column(String(16), nullable=True, index=True)
+    event_index = Column(Integer, nullable=False)
+    event_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False)
+
+    __table_args__ = (
+        Index('ix_scheduled_run_event_run_stock', 'run_id', 'stock_code', 'event_index'),
+    )
+
+
 
 class AnalysisHistory(Base):
     """
@@ -2294,6 +2325,168 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             if row is None:
                 return None
             return self._screening_run_to_dict(row, include_result=True)
+
+    def save_scheduled_run_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        stock_count: int = 0,
+        completed_count: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        """Upsert live status for a background scheduled analysis batch."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return False
+        normalized_status = str(status or "running").strip() or "running"
+        try:
+            def _write(session: Session) -> bool:
+                row = session.execute(
+                    select(ScheduledRunStatus).where(ScheduledRunStatus.run_id == normalized_run_id)
+                ).scalar_one_or_none()
+                if row is None:
+                    session.add(ScheduledRunStatus(
+                        run_id=normalized_run_id,
+                        status=normalized_status,
+                        stock_count=max(0, int(stock_count or 0)),
+                        completed_count=max(0, int(completed_count or 0)) if completed_count is not None else 0,
+                        started_at=utc_naive_now(),
+                        error=error,
+                    ))
+                else:
+                    row.status = normalized_status
+                    row.stock_count = max(0, int(stock_count or 0))
+                    if completed_count is not None:
+                        row.completed_count = max(0, int(completed_count))
+                    if error is not None:
+                        row.error = error
+                    if normalized_status in {"completed", "failed", "cancelled"}:
+                        row.finished_at = utc_naive_now()
+                return True
+
+            return self._run_write_transaction(
+                f"save_scheduled_run_status[{normalized_run_id}]",
+                _write,
+            )
+        except Exception as exc:
+            logger.warning("定时任务状态写入失败（fail-open）: run_id=%s err=%s", normalized_run_id, exc)
+            return False
+
+    def save_scheduled_run_event(
+        self,
+        run_id: str,
+        *,
+        stock_code: Optional[str],
+        event_index: int,
+        event: Dict[str, Any],
+    ) -> bool:
+        """Append one run-flow event to a background scheduled analysis batch."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return False
+        try:
+            def _write(session: Session) -> bool:
+                session.add(ScheduledRunEvent(
+                    run_id=normalized_run_id,
+                    stock_code=str(stock_code or "").strip() or None,
+                    event_index=max(0, int(event_index)),
+                    event_json=self._safe_json_dumps(event),
+                ))
+                return True
+
+            return self._run_write_transaction(
+                f"save_scheduled_run_event[{normalized_run_id}:{event_index}]",
+                _write,
+            )
+        except Exception as exc:
+            logger.warning("定时任务运行流事件写入失败（fail-open）: run_id=%s err=%s", normalized_run_id, exc)
+            return False
+
+    def get_scheduled_run_status(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Load one background scheduled batch status row."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return None
+        with self.get_session() as session:
+            row = session.execute(
+                select(ScheduledRunStatus).where(ScheduledRunStatus.run_id == normalized_run_id)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return self._scheduled_run_status_to_dict(row)
+
+    def list_active_scheduled_runs(self) -> List[Dict[str, Any]]:
+        """Return currently-running background scheduled batches (newest first)."""
+        with self.get_session() as session:
+            rows = session.execute(
+                select(ScheduledRunStatus)
+                .where(ScheduledRunStatus.status == "running")
+                .order_by(desc(ScheduledRunStatus.started_at))
+            ).scalars().all()
+            return [self._scheduled_run_status_to_dict(row) for row in rows]
+
+    def get_scheduled_run_events(
+        self,
+        run_id: str,
+        *,
+        stock_code: Optional[str] = None,
+        since_event_index: Optional[int] = None,
+        limit: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Return run-flow events for a background batch (optionally filtered)."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return []
+        normalized_limit = max(0, min(int(limit), 5000))
+        if normalized_limit <= 0:
+            return []
+        with self.get_session() as session:
+            statement = select(ScheduledRunEvent).where(
+                ScheduledRunEvent.run_id == normalized_run_id
+            )
+            if stock_code:
+                statement = statement.where(ScheduledRunEvent.stock_code == str(stock_code).strip())
+            if since_event_index is not None:
+                statement = statement.where(ScheduledRunEvent.event_index > int(since_event_index))
+            rows = session.execute(
+                statement.order_by(
+                    ScheduledRunEvent.event_index,
+                    ScheduledRunEvent.id,
+                ).limit(normalized_limit)
+            ).scalars().all()
+            return [self._scheduled_run_event_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _scheduled_run_status_to_dict(row: ScheduledRunStatus) -> Dict[str, Any]:
+        return {
+            "run_id": row.run_id,
+            "status": row.status,
+            "stock_count": row.stock_count,
+            "completed_count": row.completed_count,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "error": row.error,
+        }
+
+    @staticmethod
+    def _scheduled_run_event_to_dict(row: ScheduledRunEvent) -> Dict[str, Any]:
+        event = {}
+        if row.event_json:
+            try:
+                event = json.loads(row.event_json)
+            except Exception:
+                event = {}
+        if not isinstance(event, dict):
+            event = {}
+        return {
+            "run_id": row.run_id,
+            "stock_code": row.stock_code,
+            "event_index": row.event_index,
+            "event": event,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
 
     @staticmethod
     def _optional_int(value: Any) -> Optional[int]:

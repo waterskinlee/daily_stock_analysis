@@ -721,6 +721,7 @@ def run_full_analysis(
     stock_codes: Optional[List[str]] = None,
     *,
     raise_errors: bool = False,
+    is_scheduled_run: bool = False,
 ) -> bool:
     """
     执行完整的分析流程（个股 + 大盘复盘）
@@ -750,6 +751,22 @@ def run_full_analysis(
     from src.core.market_review import run_market_review
     from src.core.pipeline import StockAnalysisPipeline
 
+    query_id = uuid.uuid4().hex
+    scheduled_status_writer = None
+    flow_event_sink = None
+    if is_scheduled_run:
+        from src.storage import get_db
+
+        scheduled_db = get_db()
+        scheduled_status_writer = scheduled_db
+        flow_event_sink = (
+            lambda stock_code, event_index, event: scheduled_db.save_scheduled_run_event(
+                query_id,
+                stock_code=stock_code,
+                event_index=event_index,
+                event=event,
+            )
+        )
     try:
         _refresh_stock_index_cache_for_analysis(config)
         if portfolio_stock_codes is not None:
@@ -800,7 +817,6 @@ def run_full_analysis(
         save_context_snapshot = None
         if getattr(args, 'no_context_snapshot', False):
             save_context_snapshot = False
-        query_id = uuid.uuid4().hex
         market_review_region = (
             effective_region
             if effective_region is not None
@@ -834,6 +850,7 @@ def run_full_analysis(
             save_context_snapshot=save_context_snapshot,
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
+            flow_event_sink=flow_event_sink,
         )
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge
@@ -861,6 +878,12 @@ def run_full_analysis(
                 require_current_query_match=True,
             )
 
+        if scheduled_status_writer is not None:
+            scheduled_status_writer.save_scheduled_run_status(
+                query_id,
+                "running",
+                stock_count=len(stock_codes or []),
+            )
         # 1. 运行个股分析
         if skip_futu_stock_analysis:
             if portfolio_is_empty:
@@ -1066,10 +1089,25 @@ def run_full_analysis(
         # === Auto backtest ===
         _run_auto_backtest(config)
 
+        if scheduled_status_writer is not None:
+            scheduled_status_writer.save_scheduled_run_status(
+                query_id,
+                "completed",
+                stock_count=len(stock_codes or []),
+                completed_count=len(results or []),
+            )
+
         return True
 
     except Exception as e:
         logger.exception(f"分析流程执行失败: {e}")
+        if scheduled_status_writer is not None:
+            scheduled_status_writer.save_scheduled_run_status(
+                query_id,
+                "failed",
+                stock_count=len(stock_codes or []),
+                error=str(e),
+            )
         if raise_errors:
             raise
         return False
@@ -1081,7 +1119,7 @@ def run_scheduled_analysis(
     stock_codes: Optional[List[str]] = None,
 ) -> bool:
     """Run scheduled analysis with failures propagated to the scheduler."""
-    return run_full_analysis(config, args, stock_codes, raise_errors=True)
+    return run_full_analysis(config, args, stock_codes, raise_errors=True, is_scheduled_run=True)
 
 
 def _run_analysis_with_runtime_scheduler_lock(
@@ -1554,7 +1592,12 @@ def main() -> int:
 
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
-                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                run_full_analysis(
+                    runtime_config,
+                    args,
+                    scheduled_stock_codes,
+                    is_scheduled_run=True,
+                )
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):
