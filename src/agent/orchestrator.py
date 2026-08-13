@@ -438,6 +438,7 @@ class AgentOrchestrator:
             all_tool_calls.extend(
                 tc for tc in (result.meta.get("tool_calls_log") or [])
             )
+            models_used.extend(result.meta.get("models_used", []))
             if result.opinion is not None:
                 ctx.add_opinion(result.opinion)
             else:
@@ -450,6 +451,114 @@ class AgentOrchestrator:
             for key, value in isolated.data.items():
                 if key not in ctx.data and value is not None:
                     ctx.set_data(key, value)
+
+    def _merge_skill_batch_results(
+        self,
+        ctx: AgentContext,
+        specialist_agents: list,
+        batch: SkillBatchResult,
+        stats: AgentRunStats,
+        all_tool_calls: List[Dict[str, Any]],
+        models_used: List[str],
+    ) -> None:
+        """Merge a specialist skill batch's outputs back into the pipeline ctx."""
+        for stage_result in batch.stage_results:
+            stats.record_stage(stage_result)
+            all_tool_calls.extend(
+                tc for tc in (stage_result.meta.get("tool_calls_log") or [])
+            )
+            models_used.extend(stage_result.meta.get("models_used", []))
+            if stage_result.status == StageStatus.FAILED:
+                self._record_degraded_stage(ctx, stage_result.stage_name, stage_result)
+        ctx.opinions.extend(batch.opinions)
+        invalid_bucket = ctx.meta.get("invalid_opinions")
+        if not isinstance(invalid_bucket, list):
+            invalid_bucket = []
+        invalid_bucket.extend(batch.invalid_records)
+        ctx.meta["invalid_opinions"] = invalid_bucket
+        ctx.meta["skill_scheduler"] = {
+            "mode": "thread_pool",
+            "max_concurrency": batch.max_concurrency,
+            "timeout_per_skill": batch.timeout_per_skill,
+            "scheduled_skill_count": len(specialist_agents),
+            "completed_skill_count": sum(1 for item in batch.stage_results if item.success),
+            "invalid_skill_count": len(batch.invalid_records),
+        }
+
+    def _run_risk_and_skills_parallel(
+        self,
+        risk_agent,
+        specialist_agents: list,
+        ctx: AgentContext,
+        stats: AgentRunStats,
+        all_tool_calls: List[Dict[str, Any]],
+        models_used: List[str],
+        *,
+        progress_callback: Optional[Callable] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> None:
+        """Run risk and the specialist skill batch in the same DAG wave.
+
+        Both consume the merged technical+intel context and neither feeds the
+        other.  Each writes only its own isolated clone; outputs are merged
+        back into ``ctx`` deterministically after both settle.
+        """
+        risk_output: List[tuple] = []
+        batch_output: List[SkillBatchResult] = []
+
+        def _run_risk() -> None:
+            risk_output.extend(
+                self._run_parallel_stages(
+                    [risk_agent],
+                    ctx,
+                    progress_callback=progress_callback,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+
+        def _run_skills() -> None:
+            batch_output.append(
+                self._run_specialist_agent_batch(
+                    specialist_agents,
+                    ctx,
+                    progress_callback=progress_callback,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+
+        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-dag-w2")
+        try:
+            futures = [
+                executor.submit(copy_context().run, _run_risk),
+                executor.submit(copy_context().run, _run_skills),
+            ]
+            for future in as_completed(futures):
+                future.result()
+        finally:
+            executor.shutdown(wait=True)
+
+        # Merge risk first, then skills, so risk flags are visible to
+        # downstream decision assembly regardless of completion order.
+        if risk_output:
+            self._merge_parallel_stage_results(
+                ctx,
+                risk_output,
+                stats,
+                all_tool_calls,
+                models_used,
+            )
+            for _agent, _isolated, result in risk_output:
+                if result.status == StageStatus.FAILED:
+                    self._record_degraded_stage(ctx, result.stage_name, result)
+        if batch_output:
+            self._merge_skill_batch_results(
+                ctx,
+                specialist_agents,
+                batch_output[0],
+                stats,
+                all_tool_calls,
+                models_used,
+            )
 
     # -----------------------------------------------------------------
     # Public interface (mirrors AgentExecutor)
@@ -630,6 +739,38 @@ class AgentOrchestrator:
             )
             index = 2
 
+        # Wave-2 DAG: risk and specialist skill agents both consume the merged
+        # technical+intel wave and neither feeds the other, so run them together
+        # in specialist mode when the DAG feature is enabled.
+        if (
+            self.mode == "specialist"
+            and getattr(self.config, "agent_dag_parallel", True)
+            and index == 2
+            and len(agents) == 4
+            and agents[2].agent_name == "risk"
+            and agents[3].agent_name == "decision"
+        ):
+            specialist_agents = self._build_specialist_agents(ctx)
+            self._skill_agent_names = {a.agent_name for a in specialist_agents}
+            specialist_agents_inserted = True
+            if specialist_agents:
+                wave2_timeout = (
+                    max(0.0, timeout_s - (time.time() - t0))
+                    if timeout_s
+                    else None
+                )
+                self._run_risk_and_skills_parallel(
+                    agents[2],
+                    specialist_agents,
+                    ctx,
+                    stats,
+                    all_tool_calls,
+                    models_used,
+                    progress_callback=progress_callback,
+                    timeout_seconds=wave2_timeout,
+                )
+                index = 3
+
         # Minimum seconds required for a stage to do useful work.  Starting
         # a stage with less budget virtually guarantees a timeout that wastes
         # an LLM billing cycle.  Only enforced after at least one stage has
@@ -739,28 +880,14 @@ class AgentOrchestrator:
                         progress_callback=progress_callback,
                         timeout_seconds=remaining_budget,
                     )
-                    for stage_result in batch.stage_results:
-                        stats.record_stage(stage_result)
-                        all_tool_calls.extend(
-                            tc for tc in (stage_result.meta.get("tool_calls_log") or [])
-                        )
-                        models_used.extend(stage_result.meta.get("models_used", []))
-                        if stage_result.status == StageStatus.FAILED:
-                            self._record_degraded_stage(ctx, stage_result.stage_name, stage_result)
-                    ctx.opinions.extend(batch.opinions)
-                    invalid_bucket = ctx.meta.get("invalid_opinions")
-                    if not isinstance(invalid_bucket, list):
-                        invalid_bucket = []
-                    invalid_bucket.extend(batch.invalid_records)
-                    ctx.meta["invalid_opinions"] = invalid_bucket
-                    ctx.meta["skill_scheduler"] = {
-                        "mode": "thread_pool",
-                        "max_concurrency": batch.max_concurrency,
-                        "timeout_per_skill": batch.timeout_per_skill,
-                        "scheduled_skill_count": len(specialist_agents),
-                        "completed_skill_count": sum(1 for item in batch.stage_results if item.success),
-                        "invalid_skill_count": len(batch.invalid_records),
-                    }
+                    self._merge_skill_batch_results(
+                        ctx,
+                        specialist_agents,
+                        batch,
+                        stats,
+                        all_tool_calls,
+                        models_used,
+                    )
                     continue
 
             if agent.agent_name == "decision":

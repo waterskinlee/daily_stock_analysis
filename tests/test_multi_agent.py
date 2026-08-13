@@ -1320,6 +1320,65 @@ class TestOrchestratorExecution(unittest.TestCase):
         self.assertEqual([op.agent_name for op in ctx.opinions], ["technical", "intel"])
         self.assertEqual(ctx.get_data("intel_opinion"), {"signal": "hold"})
 
+    def test_run_risk_and_skills_parallel_merges_both_outputs(self):
+        from src.agent.agents.risk_agent import RiskAgent
+        from src.agent.protocols import StageResult, StageStatus
+        from src.agent.skills.scheduler import SkillBatchResult
+
+        orch = self._make_orchestrator(config=SimpleNamespace(agent_dag_parallel=True))
+        risk = RiskAgent(tool_registry=MagicMock(), llm_adapter=MagicMock())
+        skill = MagicMock()
+        skill.agent_name = "skill_value"
+        skill.skill_id = "value"
+        ctx = AgentContext(query="test", stock_code="600519", stock_name="贵州茅台")
+
+        risk_opinion = AgentOpinion(agent_name="risk", signal="hold", confidence=0.5, reasoning="risk")
+        skill_opinion = AgentOpinion(agent_name="skill_value", signal="buy", confidence=0.7, reasoning="skill")
+
+        def fake_parallel(agents, base_ctx, **kwargs):
+            isolated = orch._clone_context_for_stage(base_ctx)
+            isolated.add_opinion(risk_opinion)
+            isolated.add_risk_flag(category="valuation", description="high PE", severity="soft")
+            result = StageResult(stage_name=agents[0].agent_name, status=StageStatus.COMPLETED)
+            result.opinion = risk_opinion
+            result.meta["models_used"] = ["risk/model"]
+            return [(agents[0], isolated, result)]
+
+        skill_stage = StageResult(stage_name="skill_value", status=StageStatus.COMPLETED)
+        skill_stage.meta["models_used"] = ["skill/model"]
+        batch = SkillBatchResult(
+            stage_results=[skill_stage],
+            opinions=[skill_opinion],
+            invalid_records=[],
+            max_concurrency=2,
+            timeout_per_skill=0.0,
+        )
+
+        stats = AgentRunStats()
+        all_tool_calls = []
+        models_used = []
+
+        with patch.object(orch, "_run_parallel_stages", side_effect=fake_parallel):
+            with patch.object(orch, "_run_specialist_agent_batch", return_value=batch) as fake_batch:
+                orch._run_risk_and_skills_parallel(
+                    risk,
+                    [skill],
+                    ctx,
+                    stats,
+                    all_tool_calls,
+                    models_used,
+                    progress_callback=None,
+                    timeout_seconds=None,
+                )
+
+        self.assertIn(risk_opinion, ctx.opinions)
+        self.assertIn(skill_opinion, ctx.opinions)
+        self.assertTrue(any(flag["category"] == "valuation" for flag in ctx.risk_flags))
+        self.assertEqual(ctx.meta["skill_scheduler"]["scheduled_skill_count"], 1)
+        self.assertIn("risk/model", models_used)
+        self.assertIn("skill/model", models_used)
+        fake_batch.assert_called_once()
+
     class _OpinionStage:
         def __init__(
             self,
