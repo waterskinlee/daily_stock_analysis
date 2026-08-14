@@ -1509,6 +1509,29 @@ class TestOrchestratorExecution(unittest.TestCase):
         skill.run.assert_called_once()
         decision.run.assert_called_once()
 
+    def test_execute_pipeline_marks_non_critical_failure_as_degraded_result(self):
+        orch = self._make_orchestrator()
+        ctx = AgentContext(query="test", stock_code="600519")
+        ctx.add_opinion(AgentOpinion(agent_name="technical", signal="buy", confidence=0.8, reasoning="trend"))
+
+        intel = MagicMock(agent_name="intel")
+        intel.run.return_value = self._stage_result("intel", StageStatus.FAILED, error="news down")
+        decision = MagicMock(agent_name="decision")
+        decision.run.return_value = self._stage_result("decision")
+
+        with patch.object(orch, "_build_agent_chain", return_value=[intel, decision]):
+            result = orch._execute_pipeline(ctx, parse_dashboard=False)
+
+        self.assertTrue(result.success)
+        self.assertTrue(getattr(result, "degraded", False))
+        self.assertEqual(getattr(result, "status", None), "degraded")
+        self.assertEqual(result.runtime_facts.degraded_events[0].stage, "intel")
+        with patch.object(orch, "_execute_pipeline", return_value=result):
+            public_result = orch.run("test", {"stock_code": "600519"})
+        self.assertTrue(public_result.success)
+        self.assertTrue(public_result.degraded)
+        self.assertEqual(public_result.status, "degraded")
+
     def test_pipeline_summary_and_risk_override_share_disabled_override_contract(self):
         orch = self._make_orchestrator(config=SimpleNamespace(agent_risk_override=False))
         ctx = AgentContext(query="test", stock_code="600519")
@@ -1832,6 +1855,8 @@ class TestOrchestratorExecution(unittest.TestCase):
         self.assertIsNotNone(result.content)
         self.assertIn("insufficient budget", (result.error or "").lower())
         self.assertIn("[降级结果]", result.dashboard["analysis_summary"])
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.status, "degraded")
         technical.run.assert_called_once()
         intel.run.assert_not_called()
 
@@ -1953,6 +1978,8 @@ class TestOrchestratorExecution(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertIn("timed out", result.error)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.status, "degraded")
         self.assertEqual(result.dashboard["decision_type"], "buy")
         self.assertEqual(result.dashboard["operation_advice"], "买入")
         self.assertEqual(

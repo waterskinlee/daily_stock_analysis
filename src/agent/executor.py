@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 class AgentResult:
     """Result from an agent execution run."""
     success: bool = False
+    degraded: bool = False
+    status: str = "failed"
     content: str = ""                          # final text answer from agent
     dashboard: Optional[Dict[str, Any]] = None  # parsed dashboard JSON
     tool_calls_log: List[Dict[str, Any]] = field(default_factory=list)  # execution trace
@@ -59,6 +61,16 @@ class AgentResult:
     backend: str = ""
     error_code: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if not self.success:
+            self.degraded = False
+            self.status = "failed"
+        elif self.degraded or str(self.status or "").strip().lower() == "degraded":
+            self.degraded = True
+            self.status = "degraded"
+        else:
+            self.status = "success"
 
 
 # ============================================================

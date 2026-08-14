@@ -2529,6 +2529,8 @@ class AnalysisResult:
     data_sources: str = ""  # 数据来源说明
     success: bool = True
     error_message: Optional[str] = None
+    degraded: bool = False
+    status: str = "success"
 
     # ========== 价格数据（分析时快照）==========
     current_price: Optional[float] = None  # 分析时的股价
@@ -2539,6 +2541,7 @@ class AnalysisResult:
 
     # ========== 历史对比（Report Engine P0）==========
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
+    history_saved: Optional[bool] = None  # 本次报告历史是否成功落库（仅运行时/API 诊断）
 
     # ========== 基本面上下文（仅运行时，用于通知拼装；不持久化到 to_dict）==========
     fundamental_context: Optional[Dict[str, Any]] = None
@@ -2578,10 +2581,13 @@ class AnalysisResult:
             'market_snapshot': self.market_snapshot,
             'search_performed': self.search_performed,
             'success': self.success,
+            'degraded': self.degraded,
+            'status': self.status,
             'error_message': self.error_message,
             'current_price': self.current_price,
             'change_pct': self.change_pct,
             'model_used': self.model_used,
+            'history_saved': self.history_saved,
             'market_structure_context': self.market_structure_context,
         }
 

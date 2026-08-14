@@ -199,6 +199,138 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
         self.assertEqual(summary["components"]["news"]["status"], "unknown")
         self.assertEqual(summary["status"], "normal")
 
+    def test_agent_degraded_result_surfaces_as_degraded_component(self) -> None:
+        diagnostics = _diagnostic_snapshot()
+        summary = build_run_diagnostic_summary(
+            context_snapshot={"diagnostics": diagnostics},
+            raw_result={
+                "success": True,
+                "degraded": True,
+                "status": "degraded",
+                "data_sources": "agent:deepseek",
+                "model_used": "deepseek-chat",
+                "analysis_summary": "测试摘要",
+            },
+            report_saved=True,
+            query_id="query-p2",
+            stock_code="600519",
+        )
+
+        self.assertEqual(summary["components"]["agent"]["status"], "degraded")
+        self.assertEqual(summary["status"], "degraded")
+        self.assertIn("Agent", summary["reason"])
+
+    def test_history_failure_reason_precedes_agent_degradation(self) -> None:
+        diagnostics = _diagnostic_snapshot()
+        diagnostics["history_runs"] = [
+            {
+                "report_saved": False,
+                "metadata_saved": False,
+                "error_message_sanitized": "database unavailable",
+            }
+        ]
+
+        summary = build_run_diagnostic_summary(
+            context_snapshot={"diagnostics": diagnostics},
+            raw_result={
+                "success": True,
+                "degraded": True,
+                "status": "degraded",
+                "data_sources": "agent:deepseek",
+                "model_used": "deepseek-chat",
+                "analysis_summary": "测试摘要",
+            },
+            report_saved=False,
+            query_id="query-p2",
+            stock_code="600519",
+        )
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["components"]["history"]["status"], "failed")
+        self.assertIn("历史保存失败", summary["reason"])
+        self.assertNotIn("Agent 编排部分降级", summary["reason"])
+
+    def test_notification_failure_reason_precedes_agent_degradation(self) -> None:
+        diagnostics = _diagnostic_snapshot()
+        diagnostics["notification_runs"] = [
+            {
+                "channel": "wechat",
+                "status": "failed",
+                "success": False,
+                "error_message_sanitized": "send unavailable",
+            }
+        ]
+
+        summary = build_run_diagnostic_summary(
+            context_snapshot={"diagnostics": diagnostics},
+            raw_result={
+                "success": True,
+                "degraded": True,
+                "status": "degraded",
+                "data_sources": "agent:deepseek",
+                "model_used": "deepseek-chat",
+                "analysis_summary": "测试摘要",
+            },
+            report_saved=True,
+            query_id="query-p2",
+            stock_code="600519",
+        )
+
+        self.assertEqual(summary["status"], "degraded")
+        self.assertEqual(summary["components"]["notification"]["status"], "failed")
+        self.assertIn("通知失败", summary["reason"])
+        self.assertNotIn("Agent 编排部分降级", summary["reason"])
+
+    def test_agent_success_result_surfaces_as_ok_component(self) -> None:
+        diagnostics = _diagnostic_snapshot()
+        diagnostics["provider_runs"] = [
+            run
+            for run in diagnostics["provider_runs"]
+            if run.get("success") is True
+        ]
+        summary = build_run_diagnostic_summary(
+            context_snapshot={"diagnostics": diagnostics},
+            raw_result={
+                "success": True,
+                "degraded": False,
+                "status": "success",
+                "data_sources": "agent:deepseek",
+                "model_used": "deepseek-chat",
+                "analysis_summary": "测试摘要",
+            },
+            report_saved=True,
+            query_id="query-p2",
+            stock_code="600519",
+        )
+
+        self.assertEqual(summary["components"]["agent"]["status"], "ok")
+        self.assertEqual(summary["status"], "normal")
+
+    def test_non_agent_result_does_not_report_agent_success(self) -> None:
+        diagnostics = _diagnostic_snapshot()
+        diagnostics["provider_runs"] = [
+            run
+            for run in diagnostics["provider_runs"]
+            if run.get("success") is True
+        ]
+        summary = build_run_diagnostic_summary(
+            context_snapshot={"diagnostics": diagnostics},
+            raw_result={
+                "success": True,
+                "degraded": False,
+                "status": "success",
+                "data_sources": "litellm:deepseek",
+                "model_used": "deepseek-chat",
+                "analysis_summary": "测试摘要",
+            },
+            report_saved=True,
+            query_id="query-p2",
+            stock_code="600519",
+        )
+
+        self.assertEqual(summary["components"]["agent"]["status"], "unknown")
+        self.assertEqual(summary["status"], "normal")
+
     def test_news_summary_string_is_not_treated_as_retrieval_evidence(self) -> None:
         diagnostics = _diagnostic_snapshot()
 
@@ -517,6 +649,14 @@ class RunDiagnosticsP2TestCase(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertEqual(summary["status"], "unknown")
         self.assertIn("copy_text", summary)
+
+    def test_history_service_does_not_assume_legacy_record_save_state(self) -> None:
+        db = _FakeHistoryDb(_history_record(context_snapshot=None))
+
+        summary = HistoryService(db).resolve_and_get_diagnostics("1")
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["components"]["history"]["status"], "unknown")
 
     def test_history_diagnostics_endpoint_surfaces_lookup_errors(self) -> None:
         with self.assertRaises(HTTPException) as ctx:

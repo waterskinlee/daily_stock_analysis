@@ -1393,6 +1393,31 @@ def _llm_component(diagnostics: Dict[str, Any], raw_result: Dict[str, Any]) -> R
     return _component("llm", label, "unknown", "LLM 未记录诊断信息")
 
 
+def _agent_component(raw_result: Dict[str, Any]) -> RunDiagnosticComponent:
+    """Expose the persisted Agent pipeline outcome without raw stage details."""
+    label = "Agent 编排"
+    if not raw_result:
+        return _component("agent", label, "unknown", "Agent 运行状态未记录")
+    data_sources = str(raw_result.get("data_sources") or "").strip().lower()
+    if not data_sources.startswith("agent:"):
+        return _component("agent", label, "unknown", "Agent 运行状态未记录")
+
+    status = str(raw_result.get("status") or "").strip().lower()
+    degraded = raw_result.get("degraded") is True or status == "degraded"
+    if degraded:
+        return _component(
+            "agent",
+            label,
+            "degraded",
+            "Agent 编排部分降级，报告基于已完成阶段生成",
+        )
+    if raw_result.get("success") is False or status == "failed":
+        return _component("agent", label, "failed", "Agent 编排失败")
+    if raw_result.get("success") is True or status == "success":
+        return _component("agent", label, "ok", "Agent 编排成功")
+    return _component("agent", label, "unknown", "Agent 运行状态未记录")
+
+
 def _notification_component(diagnostics: Dict[str, Any]) -> RunDiagnosticComponent:
     label = "通知"
     runs = [
@@ -1513,6 +1538,7 @@ def build_run_diagnostic_summary(
         ),
         "news": _news_component(snapshot, raw),
         "llm": _llm_component(diagnostics, raw),
+        "agent": _agent_component(raw),
         "notification": _notification_component(diagnostics),
         "history": _history_component(diagnostics, report_saved),
     }
@@ -1534,6 +1560,12 @@ def build_run_diagnostic_summary(
 
     if status == "unknown":
         reason = "旧报告或诊断证据不足，无法判断本次运行状态"
+    elif (
+        status == "degraded"
+        and components["agent"].status == "degraded"
+        and not any(component.status == "failed" for component in components.values())
+    ):
+        reason = components["agent"].message
     else:
         reason = next(
             (
@@ -1593,6 +1625,7 @@ def format_copyable_diagnostics(summary: Dict[str, Any]) -> str:
         _component_line("daily_data"),
         _component_line("news"),
         _component_line("llm"),
+        _component_line("agent"),
         _component_line("notification"),
         _component_line("history"),
         f"reason: {sanitize_diagnostic_text(summary.get('reason'), max_length=160) or 'unknown'}",

@@ -413,6 +413,7 @@ export interface AnalysisResult {
   queryId: string;
   traceId?: string;
   stockCode: string;
+  historySaved?: boolean | null;
   stockName: string;
   report: AnalysisReport;
   diagnosticSummary?: RunDiagnosticSummary;

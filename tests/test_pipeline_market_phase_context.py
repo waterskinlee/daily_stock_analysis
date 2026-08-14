@@ -107,6 +107,52 @@ def _make_pipeline(*, agent_mode: bool = False, save_context_snapshot: bool = Tr
     pipeline._emit_progress = MagicMock()
     return pipeline
 
+class TestPipelineRequestPropagation(unittest.TestCase):
+    def test_process_single_stock_forwards_force_refresh_to_data_fetch(self):
+        pipeline = _make_pipeline()
+        pipeline._resolve_resume_target_date = MagicMock(return_value=date(2026, 3, 26))
+        pipeline.fetch_and_save_stock_data = MagicMock(return_value=(True, None))
+        pipeline.analyze_stock = MagicMock(return_value=_analysis_result())
+
+        result = pipeline.process_single_stock(
+            "600519",
+            force_refresh=True,
+            analysis_query_id="q-force",
+        )
+
+        self.assertIsNotNone(result)
+        pipeline.fetch_and_save_stock_data.assert_called_once_with(
+            "600519",
+            force_refresh=True,
+            current_time=None,
+        )
+
+    def test_process_single_stock_preserves_existing_diagnostic_context(self):
+        pipeline = _make_pipeline()
+        pipeline._resolve_resume_target_date = MagicMock(return_value=date(2026, 3, 26))
+        pipeline.fetch_and_save_stock_data = MagicMock(return_value=(True, None))
+        pipeline.analyze_stock = MagicMock(return_value=_analysis_result())
+        token = activate_run_diagnostic_context(
+            trace_id="outer-trace",
+            query_id="outer-query",
+            stock_code="600519",
+            trigger_source="api",
+        )
+        try:
+            result = pipeline.process_single_stock(
+                "600519",
+                analysis_query_id="inner-query",
+                analysis_trace_id="inner-trace",
+            )
+
+            self.assertIsNotNone(result)
+            snapshot = current_diagnostic_snapshot()
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot["trace_id"], "outer-trace")
+            self.assertEqual(snapshot["query_id"], "outer-query")
+        finally:
+            reset_run_diagnostic_context(token)
+
 
 class PipelineMarketPhaseContextTestCase(unittest.TestCase):
     def test_jp_kr_analysis_context_uses_daily_fetcher_when_db_context_missing(self):
@@ -808,6 +854,93 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
             self.assertEqual(current_snapshot["provider_runs"], diagnostics["provider_runs"])
         finally:
             reset_run_diagnostic_context(token)
+
+    def test_agent_history_save_persists_final_history_diagnostics(self):
+        pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)
+        pipeline._ensure_agent_history = MagicMock()
+        pipeline.db.save_analysis_history.return_value = 73
+        phase_payload = _phase_payload()
+        token = activate_run_diagnostic_context(
+            trace_id="trace-agent-save",
+            query_id="q-agent-save",
+            stock_code="600519",
+            trigger_source="api",
+        )
+        try:
+            from src.agent.executor import AgentResult
+
+            executor = MagicMock()
+            executor.run.return_value = AgentResult(
+                success=True,
+                content="{}",
+                dashboard={
+                    "stock_name": "贵州茅台",
+                    "sentiment_score": 70,
+                    "trend_prediction": "震荡",
+                    "operation_advice": "持有",
+                    "decision_type": "hold",
+                },
+                provider="test",
+            )
+
+            with patch("src.agent.factory.build_agent_executor", return_value=executor):
+                result = pipeline._analyze_with_agent(
+                    code="600519",
+                    report_type=ReportType.SIMPLE,
+                    query_id="q-agent-save",
+                    stock_name="贵州茅台",
+                    realtime_quote=None,
+                    chip_data=None,
+                    fundamental_context={"market": "cn"},
+                    trend_result=None,
+                    market_phase_context=phase_payload,
+                )
+
+            self.assertIsNotNone(result)
+            pipeline.db.update_analysis_history_diagnostics.assert_called_once()
+            kwargs = pipeline.db.update_analysis_history_diagnostics.call_args.kwargs
+            self.assertEqual(kwargs["query_id"], "q-agent-save")
+            self.assertEqual(kwargs["code"], "600519")
+            self.assertEqual(kwargs["diagnostics"]["history_runs"][-1]["analysis_history_id"], 73)
+            self.assertTrue(result.history_saved)
+        finally:
+            reset_run_diagnostic_context(token)
+
+    def test_agent_history_save_failure_is_exposed_on_result(self):
+        pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)
+        pipeline._ensure_agent_history = MagicMock()
+        pipeline.db.save_analysis_history.return_value = 0
+
+        from src.agent.executor import AgentResult
+
+        executor = MagicMock()
+        executor.run.return_value = AgentResult(
+            success=True,
+            content="{}",
+            dashboard={
+                "stock_name": "贵州茅台",
+                "sentiment_score": 70,
+                "trend_prediction": "震荡",
+                "operation_advice": "持有",
+                "decision_type": "hold",
+            },
+            provider="test",
+        )
+
+        with patch("src.agent.factory.build_agent_executor", return_value=executor):
+            result = pipeline._analyze_with_agent(
+                code="600519",
+                report_type=ReportType.SIMPLE,
+                query_id="q-agent-save-failed",
+                stock_name="贵州茅台",
+                realtime_quote=None,
+                chip_data=None,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result.history_saved)
+        pipeline.db.update_analysis_history_diagnostics.assert_not_called()
+
 
     def test_agent_history_snapshot_includes_diagnostic_summary(self):
         pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)

@@ -921,13 +921,19 @@ class StockAnalysisPipeline:
                         and not isinstance(saved_history_id, bool)
                         and saved_history_id > 0
                     )
+                    result.history_saved = valid_saved_history_id
                     record_history_run(
-                        report_saved=bool(saved_history_id),
-                        metadata_saved=bool(saved_history_id),
+                        report_saved=valid_saved_history_id,
+                        metadata_saved=valid_saved_history_id,
                         analysis_history_id=(
                             saved_history_id if valid_saved_history_id else None
                         ),
                     )
+                    if valid_saved_history_id:
+                        self._refresh_saved_diagnostic_snapshot(
+                            result=result,
+                            fallback_code=code,
+                        )
                     if valid_saved_history_id:
                         self._extract_decision_signal_after_history_save(
                             result=result,
@@ -938,6 +944,7 @@ class StockAnalysisPipeline:
                             portfolio_context=portfolio_context,
                         )
                 except Exception as e:
+                    result.history_saved = False
                     record_history_run(
                         report_saved=False,
                         metadata_saved=False,
@@ -1400,9 +1407,7 @@ class StockAnalysisPipeline:
             )
             # Build executor from shared factory (ToolRegistry and SkillManager prototype are cached)
             executor = build_agent_executor(self.config, requested_skills)
-            # Cache the executor's LLM adapter so the post-run integrity
-            # repair path can issue a stateless text completion.
-            self._last_agent_llm_adapter = getattr(executor, "llm_adapter", None)
+            repair_llm_adapter = getattr(executor, "llm_adapter", None)
 
             # Build initial context to avoid redundant tool calls
             initial_context = {
@@ -1710,6 +1715,7 @@ class StockAnalysisPipeline:
                             realtime_quote=realtime_quote,
                             report_language=report_language,
                             max_retries=max_retries,
+                            llm_adapter=repair_llm_adapter,
                             require_phase_decision=isinstance(
                                 market_phase_summary, dict
                             ),
@@ -1927,13 +1933,19 @@ class StockAnalysisPipeline:
                         and not isinstance(saved_history_id, bool)
                         and saved_history_id > 0
                     )
+                    result.history_saved = valid_saved_history_id
                     record_history_run(
-                        report_saved=bool(saved_history_id),
-                        metadata_saved=bool(saved_history_id),
+                        report_saved=valid_saved_history_id,
+                        metadata_saved=valid_saved_history_id,
                         analysis_history_id=(
                             saved_history_id if valid_saved_history_id else None
                         ),
                     )
+                    if valid_saved_history_id:
+                        self._refresh_saved_diagnostic_snapshot(
+                            result=result,
+                            fallback_code=code,
+                        )
                     if valid_saved_history_id:
                         self._persist_skill_opinion_samples_after_history_save(
                             runtime_facts=getattr(agent_result, "runtime_facts", None),
@@ -1954,6 +1966,7 @@ class StockAnalysisPipeline:
                         agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
                         result.diagnostic_context_snapshot = agent_context_snapshot
                 except Exception as e:
+                    result.history_saved = False
                     record_history_run(
                         report_saved=False,
                         metadata_saved=False,
@@ -2185,6 +2198,11 @@ class StockAnalysisPipeline:
             data_sources=f"agent:{agent_result.provider}",
             model_used=agent_result.model or None,
         )
+        result.degraded = bool(getattr(agent_result, "degraded", False))
+        result.status = str(
+            getattr(agent_result, "status", None)
+            or ("degraded" if result.degraded else "success" if result.success else "failed")
+        )
 
         if agent_result.success and agent_result.dashboard:
             dash = agent_result.dashboard
@@ -2346,6 +2364,9 @@ class StockAnalysisPipeline:
                     else "에이전트가 유효한 결정 대시보드를 생성하지 못했습니다" if report_language == "ko"
                     else "Agent 未能生成有效的决策仪表盘"
                 )
+
+        if result.degraded:
+            result.confidence_level = localize_confidence_level("low", report_language)
 
         explicit_action = dash.get("action") if isinstance(dash, dict) else None
         if explicit_action is None and isinstance(getattr(result, "dashboard", None), dict):
@@ -3321,6 +3342,7 @@ class StockAnalysisPipeline:
         report_language: str,
         max_retries: int,
         require_phase_decision: bool,
+        llm_adapter: Any = None,
     ) -> Tuple[bool, List[str]]:
         """Repair structural mandatory fields and return unresolved paths.
 
@@ -3337,7 +3359,8 @@ class StockAnalysisPipeline:
         attempt_limit = min(2, max(0, int(max_retries)))
         if attempt_limit == 0:
             return False, list(repairable_missing)
-        llm_adapter = self._resolve_repair_llm_adapter()
+        if llm_adapter is None:
+            llm_adapter = self._resolve_repair_llm_adapter()
         if llm_adapter is None:
             logger.warning(
                 "[LLM完整性] agent_repair skipped: no LLM adapter available"
@@ -3537,24 +3560,16 @@ class StockAnalysisPipeline:
         return False, remaining_missing
 
     def _resolve_repair_llm_adapter(self) -> Any:
-        """Resolve an LLM adapter for integrity repair.
+        """Build the configured fallback adapter for integrity repair.
 
-        Prefers the adapter used by the most recent Agent run (cached on
-        ``self`` by the agent branch); falls back to a fresh LLMToolAdapter
-        so the repair path still works when the legacy analyzer path drives
-        the pipeline.
+        Agent analyses pass their executor adapter directly through the current
+        call stack. This fallback is only for paths without an executor adapter.
         """
-        adapter = getattr(self, "_last_agent_llm_adapter", None)
-        try:
-            from src.config import get_effective_agent_role_model
-            repair_model = get_effective_agent_role_model(self.config, "repair")
-        except Exception:
-            repair_model = ""
-        if adapter is not None and not repair_model:
-            return adapter
         try:
             from src.agent.llm_adapter import LLMToolAdapter
+            from src.config import get_effective_agent_role_model
 
+            repair_model = get_effective_agent_role_model(self.config, "repair")
             return LLMToolAdapter(self.config, model_override=repair_model or None)
         except Exception as exc:
             logger.warning(
@@ -3953,6 +3968,8 @@ class StockAnalysisPipeline:
         single_stock_notify: bool = False,
         report_type: ReportType = ReportType.SIMPLE,
         analysis_query_id: Optional[str] = None,
+        analysis_trace_id: Optional[str] = None,
+        force_refresh: bool = False,
         current_time: Optional[datetime] = None,
     ) -> Optional[AnalysisResult]:
         """
@@ -3968,6 +3985,8 @@ class StockAnalysisPipeline:
 
         Args:
             analysis_query_id: 查询链路关联 id
+            analysis_trace_id: 单股执行链路 id；为空时兼容使用 pipeline trace id
+            force_refresh: 是否强制刷新行情数据（忽略本地缓存）
             code: 股票代码
             skip_analysis: 是否跳过 AI 分析
             single_stock_notify: 是否启用单股推送模式（每分析完一只立即推送）
@@ -3983,7 +4002,7 @@ class StockAnalysisPipeline:
         frozen_td = self._resolve_resume_target_date(code, current_time=current_time)
         token = set_frozen_target_date(frozen_td)
         effective_query_id = analysis_query_id or getattr(self, "query_id", None) or uuid.uuid4().hex
-        effective_trace_id = getattr(self, "trace_id", None) or effective_query_id
+        effective_trace_id = analysis_trace_id or getattr(self, "trace_id", None) or effective_query_id
         diag_token = None
         if get_current_diagnostic_context() is None:
             diag_token = activate_run_diagnostic_context(
@@ -3997,7 +4016,9 @@ class StockAnalysisPipeline:
             self._emit_progress(12, f"{code}：正在准备分析任务")
             # Step 1: 获取并保存数据
             success, error = self.fetch_and_save_stock_data(
-                code, current_time=current_time
+                code,
+                force_refresh=force_refresh,
+                current_time=current_time,
             )
             
             if not success:
@@ -4051,6 +4072,7 @@ class StockAnalysisPipeline:
         send_notification: bool = True,
         merge_notification: bool = False,
         current_time: Optional[datetime] = None,
+        stock_completion_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[AnalysisResult]:
         """
         运行完整的分析流程
@@ -4067,6 +4089,7 @@ class StockAnalysisPipeline:
             send_notification: 是否发送推送通知
             merge_notification: 是否合并推送（跳过本次推送，由 main 层合并个股+大盘后统一发送，Issue #190）
             current_time: 本轮运行冻结的参考时间；为空时在 run 内生成
+            stock_completion_callback: 每只股票 future 完成后的批次进度回调（完成数、总数）
 
         Returns:
             分析结果列表
@@ -4142,7 +4165,8 @@ class StockAnalysisPipeline:
                     skip_analysis=dry_run,
                     single_stock_notify=False,
                     report_type=report_type,  # Issue #119: 传递报告类型
-                    analysis_query_id=uuid.uuid4().hex,
+                    analysis_query_id=getattr(self, "query_id", None) or uuid.uuid4().hex,
+                    analysis_trace_id=uuid.uuid4().hex,
                     current_time=resume_reference_time,
                 ): code
                 for code in stock_codes
@@ -4151,6 +4175,7 @@ class StockAnalysisPipeline:
             # 收集结果
             for idx, future in enumerate(as_completed(future_to_code)):
                 code = future_to_code[future]
+                should_delay = True
                 try:
                     result = future.result()
                     if result and result.success:
@@ -4166,18 +4191,37 @@ class StockAnalysisPipeline:
                             f"[{code}] 分析结果标记为失败，不计入汇总: "
                             f"{result.error_message or '未知原因'}"
                         )
+                except Exception as exc:
+                    should_delay = False
+                    logger.error(f"[{code}] 任务执行失败: {exc}")
 
-                    # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
-                    if idx < len(stock_codes) - 1 and analysis_delay > 0:
-                        # 注意：此 sleep 发生在“主线程收集 future 的循环”中，
-                        # 并不会阻止线程池中的任务同时发起网络请求。
-                        # 因此它对降低并发请求峰值的效果有限；真正的峰值主要由 max_workers 决定。
-                        # 该行为目前保留（按需求不改逻辑）。
-                        logger.debug(f"等待 {analysis_delay} 秒后继续下一只股票...")
-                        time.sleep(analysis_delay)
+                completed_count = idx + 1
+                if stock_completion_callback is not None:
+                    try:
+                        stock_completion_callback(completed_count, len(stock_codes))
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] stock completion callback failed: %s "
+                            "(completed=%d, total=%d)",
+                            code,
+                            exc,
+                            completed_count,
+                            len(stock_codes),
+                        )
 
-                except Exception as e:
-                    logger.error(f"[{code}] 任务执行失败: {e}")
+                # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
+                if (
+                    should_delay
+                    and idx < len(stock_codes) - 1
+                    and analysis_delay > 0
+                ):
+                    # 注意：此 sleep 发生在“主线程收集 future 的循环”中，
+                    # 并不会阻止线程池中的任务同时发起网络请求。
+                    # 因此它对降低并发请求峰值的效果有限；真正的峰值主要由 max_workers 决定。
+                    # 该行为目前保留（按需求不改逻辑）。
+                    logger.debug(f"等待 {analysis_delay} 秒后继续下一只股票...")
+                    time.sleep(analysis_delay)
+
         
         # 统计
         elapsed_time = time.time() - start_time

@@ -180,6 +180,8 @@ def parse_prompt_cache_diagnostics_level(value: Optional[str]) -> str:
 
 AGENT_MAX_STEPS_DEFAULT = 10
 FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT = 8.0
+SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT = 360
+
 NEWS_STRATEGY_WINDOWS: Dict[str, int] = {
     "ultra_short": 1,
     "short": 3,
@@ -1262,6 +1264,8 @@ class Config:
     schedule_time: str = "18:00"              # 每日推送时间（HH:MM 格式）
     schedule_times: List[str] = field(default_factory=lambda: ["18:00"])
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
+    scheduled_run_max_age_minutes: int = SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT
+
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
@@ -2302,6 +2306,13 @@ class Config:
                 fallback_time=(schedule_time_value or '18:00').strip() or '18:00',
             ),
             schedule_run_immediately=schedule_run_immediately,
+            scheduled_run_max_age_minutes=parse_env_int(
+                os.getenv('SCHEDULED_RUN_MAX_AGE_MINUTES'),
+                SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT,
+                field_name='SCHEDULED_RUN_MAX_AGE_MINUTES',
+                minimum=1,
+            ),
+
             run_immediately=legacy_run_immediately,
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             daily_market_context_enabled=os.getenv('DAILY_MARKET_CONTEXT_ENABLED', 'true').lower() == 'true',

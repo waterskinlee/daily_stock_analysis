@@ -449,16 +449,20 @@ class HistoryService:
         if not record:
             return None
 
+        context_snapshot = self._parse_diagnostic_json_field(
+            getattr(record, "context_snapshot", None),
+            "context_snapshot",
+        )
+        raw_result = self._parse_diagnostic_json_field(
+            getattr(record, "raw_result", None),
+            "raw_result",
+        )
+        report_saved = None
+
         return build_run_diagnostic_summary(
-            context_snapshot=self._parse_diagnostic_json_field(
-                getattr(record, "context_snapshot", None),
-                "context_snapshot",
-            ),
-            raw_result=self._parse_diagnostic_json_field(
-                getattr(record, "raw_result", None),
-                "raw_result",
-            ),
-            report_saved=True,
+            context_snapshot=context_snapshot,
+            raw_result=raw_result,
+            report_saved=report_saved,
             query_id=getattr(record, "query_id", None),
             stock_code=getattr(record, "code", None),
         )

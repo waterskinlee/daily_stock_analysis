@@ -325,6 +325,29 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
 
         self.assertEqual(calls, ["run"])
 
+    def test_start_reconciles_stale_scheduled_runs_once_per_service(self) -> None:
+        fake_schedule = _FakeScheduleModule()
+        config = SimpleNamespace(
+            schedule_enabled=True,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+            scheduled_run_max_age_minutes=90,
+        )
+        service = RuntimeSchedulerService(config_provider=lambda: config)
+
+        with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+            "src.services.runtime_scheduler.threading.Thread",
+            _NoopThread,
+        ), patch(
+            "src.services.runtime_scheduler.reconcile_stale_scheduled_runs",
+            create=True,
+        ) as reconcile:
+            service.start()
+            service.start()
+
+        reconcile.assert_called_once_with(config)
+
+
     def test_start_registers_event_monitor_background_task(self) -> None:
         class _FakeScheduler:
             def __init__(self, **kwargs):

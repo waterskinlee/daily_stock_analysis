@@ -11,7 +11,12 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from src.config import Config, get_config
+from src.config import (
+    Config,
+    SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT,
+    get_config,
+)
+
 from src.scheduler import Scheduler, normalize_schedule_times
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,23 @@ def run_with_global_analysis_lock(
     finally:
         _RUNTIME_ANALYSIS_LOCK.release()
     return True
+
+
+def reconcile_stale_scheduled_runs(config: Config) -> int:
+    """Best-effort cleanup for running rows owned by a previous scheduler process."""
+    try:
+        from src.storage import get_db
+
+        return get_db().reconcile_stale_scheduled_runs(
+            max_age_minutes=getattr(
+                config,
+                "scheduled_run_max_age_minutes",
+                SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive startup isolation
+        logger.warning("Failed to reconcile stale scheduled runs: %s", exc, exc_info=True)
+        return 0
 
 
 def _agent_event_monitor_interval_seconds(config: Config) -> int:
@@ -141,6 +163,7 @@ class RuntimeSchedulerService:
         self._last_error: Optional[str] = None
         self._last_skipped_at: Optional[str] = None
         self._last_skip_reason: Optional[str] = None
+        self._stale_scheduled_runs_reconciled = False
 
     def _make_schedule_args(self) -> SimpleNamespace:
         defaults = {
@@ -272,6 +295,10 @@ class RuntimeSchedulerService:
             if not self._is_schedule_enabled(config):
                 self.stop()
                 return
+            if not self._stale_scheduled_runs_reconciled:
+                reconcile_stale_scheduled_runs(config)
+                self._stale_scheduled_runs_reconciled = True
+
             background_tasks = self._current_background_tasks(config)
             self.stop()
             times = normalize_schedule_times(

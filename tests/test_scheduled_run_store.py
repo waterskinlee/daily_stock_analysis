@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta
 
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, ScheduledRunStatus
+
 
 
 class ScheduledRunStoreTestCase(unittest.TestCase):
@@ -42,6 +44,61 @@ class ScheduledRunStoreTestCase(unittest.TestCase):
 
         active = self.db.list_active_scheduled_runs()
         self.assertEqual([row["run_id"] for row in active], ["run-2"])
+
+    def test_reconcile_stale_running_rows_preserves_fresh_boundary_and_terminal_rows(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, 0)
+        for run_id in ("stale", "boundary", "fresh", "completed"):
+            self.assertTrue(
+                self.db.save_scheduled_run_status(run_id, "running", stock_count=4)
+            )
+
+        with self.db.get_session() as session:
+            stale = session.get(ScheduledRunStatus, "stale")
+            boundary = session.get(ScheduledRunStatus, "boundary")
+            fresh = session.get(ScheduledRunStatus, "fresh")
+            completed = session.get(ScheduledRunStatus, "completed")
+            assert stale is not None
+            assert boundary is not None
+            assert fresh is not None
+            assert completed is not None
+            stale.started_at = now - timedelta(minutes=121)
+            boundary.started_at = now - timedelta(minutes=120)
+            fresh.started_at = now - timedelta(minutes=30)
+            completed.status = "completed"
+            completed.started_at = now - timedelta(minutes=300)
+            completed.finished_at = now - timedelta(minutes=299)
+            session.commit()
+
+        reconciled = self.db.reconcile_stale_scheduled_runs(
+            max_age_minutes=120,
+            now=now,
+        )
+
+        self.assertEqual(reconciled, 1)
+        stale_status = self.db.get_scheduled_run_status("stale")
+        boundary_status = self.db.get_scheduled_run_status("boundary")
+        fresh_status = self.db.get_scheduled_run_status("fresh")
+        completed_status = self.db.get_scheduled_run_status("completed")
+        assert stale_status is not None
+        assert boundary_status is not None
+        assert fresh_status is not None
+        assert completed_status is not None
+        self.assertEqual(stale_status["status"], "failed")
+        self.assertEqual(stale_status["finished_at"], now.isoformat())
+        self.assertEqual(
+            stale_status["error"],
+            "Scheduled run exceeded the 120-minute maximum age and was reconciled at scheduler startup.",
+        )
+        self.assertEqual(boundary_status["status"], "running")
+        self.assertIsNone(boundary_status["finished_at"])
+        self.assertEqual(fresh_status["status"], "running")
+        self.assertIsNone(fresh_status["finished_at"])
+        self.assertEqual(completed_status["status"], "completed")
+        self.assertEqual(
+            completed_status["finished_at"],
+            (now - timedelta(minutes=299)).isoformat(),
+        )
+
 
     def test_events_roundtrip_and_since_filter(self) -> None:
         self.db.save_scheduled_run_status("run-1", "running", stock_count=1)

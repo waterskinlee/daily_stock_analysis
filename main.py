@@ -754,6 +754,9 @@ def run_full_analysis(
     query_id = uuid.uuid4().hex
     scheduled_status_writer = None
     flow_event_sink = None
+    scheduled_completed_count = 0
+    stock_completion_callback: Optional[Callable[[int, int], None]] = None
+
     if is_scheduled_run:
         from src.storage import get_db
 
@@ -884,6 +887,19 @@ def run_full_analysis(
                 "running",
                 stock_count=len(stock_codes or []),
             )
+
+            def persist_stock_completion(completed_count: int, total_count: int) -> None:
+                nonlocal scheduled_completed_count
+                scheduled_completed_count = completed_count
+                scheduled_status_writer.save_scheduled_run_status(
+                    query_id,
+                    "running",
+                    stock_count=total_count,
+                    completed_count=completed_count,
+                )
+
+            stock_completion_callback = persist_stock_completion
+
         # 1. 运行个股分析
         if skip_futu_stock_analysis:
             if portfolio_is_empty:
@@ -892,14 +908,16 @@ def run_full_analysis(
                 logger.info("Futu 持仓经交易日过滤后无可分析股票，跳过个股分析。")
             results = []
         else:
-            results = pipeline.run(
-                stock_codes=stock_codes,
-                dry_run=args.dry_run,
-                send_notification=not args.no_notify,
-                merge_notification=merge_notification,
-                current_time=analysis_reference_time,
-            )
-
+            pipeline_run_kwargs = {
+                "stock_codes": stock_codes,
+                "dry_run": args.dry_run,
+                "send_notification": not args.no_notify,
+                "merge_notification": merge_notification,
+                "current_time": analysis_reference_time,
+            }
+            if stock_completion_callback is not None:
+                pipeline_run_kwargs["stock_completion_callback"] = stock_completion_callback
+            results = pipeline.run(**pipeline_run_kwargs)
         if should_use_daily_market_context and not market_context_summary:
             (
                 market_context_summary,
@@ -1094,7 +1112,7 @@ def run_full_analysis(
                 query_id,
                 "completed",
                 stock_count=len(stock_codes or []),
-                completed_count=len(results or []),
+                completed_count=scheduled_completed_count,
             )
 
         return True
@@ -1586,6 +1604,8 @@ def main() -> int:
             logger.info(f"启动时立即执行: {should_run_immediately}")
 
             from src.scheduler import run_with_schedule
+            from src.services.runtime_scheduler import reconcile_stale_scheduled_runs
+
             scheduled_stock_codes = _resolve_scheduled_stock_codes(stock_codes)
             schedule_time_provider = _build_schedule_time_provider(config.schedule_time)
             schedule_times_provider = _build_schedule_times_provider(config.schedule_time)
@@ -1629,6 +1649,8 @@ def main() -> int:
             if hasattr(config, "schedule_times"):
                 schedule_kwargs["schedule_times"] = config.schedule_times
                 schedule_kwargs["schedule_times_provider"] = schedule_times_provider
+            reconcile_stale_scheduled_runs(config)
+
             run_with_schedule(**schedule_kwargs)
             return 0
 

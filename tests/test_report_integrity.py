@@ -1112,6 +1112,41 @@ class TestAgentIntegrityRepair(unittest.TestCase):
         self.assertFalse(repaired)
         self.assertEqual(remaining, ["sentiment_score"])
 
+    def test_repair_uses_explicit_adapter_instead_of_shared_pipeline_state(self) -> None:
+        """Concurrent stock repairs must use the adapter owned by that analysis."""
+        pipe = self._make_pipeline()
+        explicit_adapter = object()
+        pipe._last_agent_llm_adapter = object()
+        captured = {}
+
+        def _call(adapter, messages, **kwargs):
+            captured["adapter"] = adapter
+            return type(
+                "R",
+                (),
+                {"content": '{"sentiment_score": 72}', "provider": "ok"},
+            )()
+
+        pipe._call_repair_llm_with_deadline = _call
+        result = self._base_result(sentiment_score=None)
+        _, missing = check_content_integrity(result)
+
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_phase_decision=False,
+            llm_adapter=explicit_adapter,
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+        self.assertIs(captured["adapter"], explicit_adapter)
+        self.assertEqual(result.sentiment_score, 72)
+
     def test_empty_response_returns_false(self) -> None:
         """Empty/error LLM response → False."""
         pipe = self._make_pipeline()

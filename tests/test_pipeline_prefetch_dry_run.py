@@ -37,6 +37,26 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
         )
         return pipeline
 
+    def test_run_preserves_batch_query_id_and_assigns_unique_stock_traces(self):
+        pipeline = self._build_pipeline(process_result=None)
+        pipeline.query_id = "batch-query"
+        pipeline.trace_id = "batch-query"
+
+        pipeline.run(
+            stock_codes=["600519", "000001"],
+            dry_run=True,
+            send_notification=False,
+        )
+
+        calls = pipeline.process_single_stock.call_args_list
+        self.assertEqual(
+            [item.kwargs["analysis_query_id"] for item in calls],
+            ["batch-query", "batch-query"],
+        )
+        trace_ids = [item.kwargs["analysis_trace_id"] for item in calls]
+        self.assertEqual(len(set(trace_ids)), 2)
+        self.assertNotIn("batch-query", trace_ids)
+
     def test_run_dry_run_skips_stock_name_prefetch(self):
         pipeline = self._build_pipeline(process_result=None)
 

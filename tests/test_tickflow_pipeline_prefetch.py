@@ -62,7 +62,7 @@ class TestTickFlowPipelinePrefetch(unittest.TestCase):
             analysis_delay=0,
         )
 
-        def _process(code, skip_analysis=False, single_stock_notify=False, report_type=None, analysis_query_id=None, current_time=None):
+        def _process(code, skip_analysis=False, single_stock_notify=False, report_type=None, analysis_query_id=None, analysis_trace_id=None, current_time=None):
             events.append(("process", code))
             return _make_result(code)
 

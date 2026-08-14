@@ -127,6 +127,7 @@ class AnalysisService:
                 skip_analysis=False,
                 single_stock_notify=send_notification,
                 report_type=rt,
+                force_refresh=force_refresh,
             )
             
             if result is None:
@@ -197,10 +198,11 @@ class AnalysisService:
             context_snapshot = {"diagnostics": diagnostic_snapshot}
         else:
             context_snapshot = None
+        history_saved = getattr(result, "history_saved", None)
         diagnostic_summary = build_run_diagnostic_summary(
             context_snapshot=context_snapshot,
             raw_result=result.to_dict() if hasattr(result, "to_dict") else None,
-            report_saved=True,
+            report_saved=history_saved,
             query_id=query_id,
             stock_code=result.code,
         )
@@ -248,6 +250,7 @@ class AnalysisService:
 
         return {
             "query_id": query_id,
+            "history_saved": history_saved,
             "trace_id": trace_id,
             "stock_code": result.code,
             "stock_name": stock_name,

@@ -173,6 +173,10 @@ class AnalysisResultResponse(BaseModel):
     
     query_id: str = Field(..., description="分析记录唯一标识")
     trace_id: Optional[str] = Field(None, description="诊断 trace ID")
+    history_saved: Optional[bool] = Field(
+        None,
+        description="报告历史是否成功保存；旧记录可能为 null",
+    )
     stock_code: str = Field(..., description="股票代码")
     stock_name: Optional[str] = Field(None, description="股票名称")
     report: Optional[Any] = Field(None, description="分析报告")

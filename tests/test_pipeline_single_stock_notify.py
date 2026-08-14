@@ -103,7 +103,7 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
         pipeline = self._build_batch_pipeline()
         worker_calls = []
 
-        def _process(code, skip_analysis=False, single_stock_notify=False, report_type=None, analysis_query_id=None, current_time=None):
+        def _process(code, skip_analysis=False, single_stock_notify=False, report_type=None, analysis_query_id=None, analysis_trace_id=None, current_time=None):
             worker_calls.append((code, single_stock_notify, threading.current_thread().name))
             if single_stock_notify:
                 pipeline.notifier.send(f"worker:{code}", email_stock_codes=[code])
@@ -130,6 +130,46 @@ class TestPipelineSingleStockNotify(unittest.TestCase):
         pipeline._send_notifications.assert_called_once()
         _, kwargs = pipeline._send_notifications.call_args
         self.assertTrue(kwargs["skip_push"])
+
+    def test_run_reports_every_completed_future_including_failures(self):
+        pipeline = self._build_batch_pipeline()
+        pipeline.max_workers = 1
+        completion_callback = MagicMock()
+
+        def _process(
+            code,
+            skip_analysis=False,
+            single_stock_notify=False,
+            report_type=None,
+            analysis_query_id=None,
+            analysis_trace_id=None,
+            current_time=None,
+        ):
+            if code == "failed":
+                return _make_result(code, success=False)
+            if code == "error":
+                raise RuntimeError("worker failed")
+            return _make_result(code)
+
+        pipeline.process_single_stock = MagicMock(side_effect=_process)
+
+        results = pipeline.run(
+            stock_codes=["ok", "failed", "error"],
+            dry_run=False,
+            send_notification=False,
+            stock_completion_callback=completion_callback,
+        )
+
+        self.assertEqual([result.code for result in results], ["ok"])
+        self.assertEqual(
+            completion_callback.call_args_list,
+            [
+                unittest.mock.call(1, 3),
+                unittest.mock.call(2, 3),
+                unittest.mock.call(3, 3),
+            ],
+        )
+
 
     def test_process_single_stock_direct_path_keeps_notify_compatibility(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)

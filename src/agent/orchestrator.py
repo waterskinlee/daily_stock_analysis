@@ -86,6 +86,8 @@ class OrchestratorResult:
     """Unified result from a multi-agent pipeline run."""
 
     success: bool = False
+    degraded: bool = False
+    status: str = "failed"
     content: str = ""
     dashboard: Optional[Dict[str, Any]] = None
     tool_calls_log: List[Dict[str, Any]] = field(default_factory=list)
@@ -204,8 +206,11 @@ class AgentOrchestrator:
                 ctx.set_data("final_dashboard", dashboard)
                 content = json.dumps(dashboard, ensure_ascii=False, indent=2)
 
+        succeeded = bool(content) if (not parse_dashboard or dashboard is not None) else False
         return OrchestratorResult(
-            success=bool(content) if (not parse_dashboard or dashboard is not None) else False,
+            success=succeeded,
+            degraded=succeeded,
+            status="degraded" if succeeded else "failed",
             content=content,
             dashboard=dashboard,
             error=error,
@@ -246,8 +251,11 @@ class AgentOrchestrator:
                 ctx.set_data("final_dashboard", dashboard)
                 content = json.dumps(dashboard, ensure_ascii=False, indent=2)
 
+        succeeded = bool(content) if (not parse_dashboard or dashboard is not None) else False
         return OrchestratorResult(
-            success=bool(content) if (not parse_dashboard or dashboard is not None) else False,
+            success=succeeded,
+            degraded=succeeded,
+            status="degraded" if succeeded else "failed",
             content=content,
             dashboard=dashboard,
             error=(
@@ -581,6 +589,8 @@ class AgentOrchestrator:
 
         return AgentResult(
             success=orch_result.success,
+            degraded=orch_result.degraded,
+            status=orch_result.status,
             content=orch_result.content,
             dashboard=orch_result.dashboard,
             tool_calls_log=orch_result.tool_calls_log,
@@ -680,6 +690,8 @@ class AgentOrchestrator:
 
         return AgentResult(
             success=orch_result.success,
+            degraded=orch_result.degraded,
+            status=orch_result.status,
             content=orch_result.content,
             dashboard=orch_result.dashboard,
             tool_calls_log=orch_result.tool_calls_log,
@@ -1016,8 +1028,19 @@ class AgentOrchestrator:
                 runtime_facts=build_agent_runtime_facts(ctx),
             )
 
+        runtime_facts = build_agent_runtime_facts(ctx)
+        succeeded = bool(content)
+        degraded = bool(
+            succeeded
+            and (
+                runtime_facts.degraded_events
+                or runtime_facts.pipeline_termination is not None
+            )
+        )
         return OrchestratorResult(
-            success=bool(content),
+            success=succeeded,
+            degraded=degraded,
+            status="degraded" if degraded else "success" if succeeded else "failed",
             content=content,
             dashboard=dashboard,
             tool_calls_log=all_tool_calls,
@@ -1026,7 +1049,7 @@ class AgentOrchestrator:
             provider=provider,
             model=model_str,
             stats=stats,
-            runtime_facts=build_agent_runtime_facts(ctx),
+            runtime_facts=runtime_facts,
         )
 
     # -----------------------------------------------------------------

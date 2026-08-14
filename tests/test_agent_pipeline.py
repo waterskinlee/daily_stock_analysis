@@ -650,6 +650,8 @@ class TestAgentResultConversion(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(result.success)
+        self.assertEqual(agent_result.status, "success")
+        self.assertEqual(result.status, "success")
         self.assertEqual(result.code, "600519")
         self.assertEqual(result.name, "贵州茅台")
         self.assertEqual(result.sentiment_score, 80)
@@ -657,6 +659,44 @@ class TestAgentResultConversion(unittest.TestCase):
         self.assertEqual(result.decision_type, "hold")
         self.assertIn("agent:gemini", result.data_sources)
         self.assertIsNotNone(result.dashboard)
+
+    def test_convert_degraded_agent_result_caps_confidence_and_serializes_status(self):
+        """Successful degraded Agent output must remain visible and conservative."""
+        pipeline = self._make_pipeline()
+
+        from src.agent.executor import AgentResult
+        from src.enums import ReportType
+
+        dashboard = {
+            "stock_name": "贵州茅台",
+            "sentiment_score": 80,
+            "trend_prediction": "看多",
+            "operation_advice": "持有",
+            "decision_type": "hold",
+            "confidence_level": "高",
+            "dashboard": {"core_conclusion": {"one_sentence": "看好"}},
+            "analysis_summary": "Testing",
+        }
+        agent_result = AgentResult(
+            success=True,
+            degraded=True,
+            status="degraded",
+            content=json.dumps(dashboard),
+            dashboard=dashboard,
+            provider="gemini",
+        )
+
+        result = pipeline._agent_result_to_analysis_result(
+            agent_result, "600519", "贵州茅台", ReportType.SIMPLE, "q-degraded"
+        )
+        raw_result = result.to_dict()
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.status, "degraded")
+        self.assertEqual(result.confidence_level, "低")
+        self.assertTrue(raw_result["degraded"])
+        self.assertEqual(raw_result["status"], "degraded")
 
     def test_convert_preserves_top_level_phase_decision_with_nested_dashboard(self):
         """Agent top-level phase_decision should survive nested dashboard unwrapping."""
@@ -2282,6 +2322,105 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             self.assertEqual(phase_decision["next_check_time"], "模型未提供下一次检查点")
             self.assertEqual(phase_decision["confidence_reason"], "模型未提供阶段化置信度理由")
             pipeline._attempt_integrity_repair.assert_not_called()
+
+    def test_analyze_with_agent_passes_executor_adapter_to_integrity_repair(self):
+        """Each stock repair must retain the adapter from its own executor."""
+        with patch('src.core.pipeline.get_config') as mock_config, \
+             patch('src.core.pipeline.get_db'), \
+             patch('src.core.pipeline.DataFetcherManager'), \
+             patch('src.core.pipeline.GeminiAnalyzer'), \
+             patch('src.core.pipeline.NotificationService'), \
+             patch('src.core.pipeline.SearchService'), \
+             patch('src.agent.factory.build_agent_executor') as mock_build_executor:
+
+            mock_cfg = MagicMock()
+            mock_cfg.max_workers = 2
+            mock_cfg.agent_mode = True
+            mock_cfg.agent_max_steps = 10
+            mock_cfg.agent_skills = []
+            mock_cfg.bocha_api_keys = []
+            mock_cfg.tavily_api_keys = []
+            mock_cfg.brave_api_keys = []
+            mock_cfg.serpapi_keys = []
+            mock_cfg.searxng_base_urls = []
+            mock_cfg.searxng_public_instances_enabled = False
+            mock_cfg.news_max_age_days = 7
+            mock_cfg.enable_realtime_quote = True
+            mock_cfg.enable_chip_distribution = True
+            mock_cfg.realtime_source_priority = []
+            mock_cfg.save_context_snapshot = False
+            mock_cfg.report_language = "zh"
+            mock_cfg.report_integrity_enabled = True
+            mock_cfg.report_integrity_agent_repair_enabled = True
+            mock_cfg.report_integrity_retry = 1
+            mock_cfg.agent_orchestrator_timeout_s = 600
+            mock_config.return_value = mock_cfg
+
+            from src.agent.executor import AgentResult
+            from src.core.pipeline import StockAnalysisPipeline
+            from src.enums import ReportType
+
+            pipeline = StockAnalysisPipeline(config=mock_cfg)
+            pipeline.search_service.is_available = False
+            pipeline._ensure_agent_history = MagicMock()
+            pipeline._build_analysis_context_pack_outputs = MagicMock(
+                return_value=("", {"blocks": [], "data_quality": {"limitations": []}})
+            )
+            pipeline._attempt_integrity_repair = MagicMock(
+                return_value=(False, ["sentiment_score"])
+            )
+            pipeline._agent_result_to_analysis_result = MagicMock()
+            pipeline._agent_result_to_analysis_result.return_value = __import__(
+                "src.analyzer", fromlist=["AnalysisResult"]
+            ).AnalysisResult(
+                code="600519",
+                name="贵州茅台",
+                sentiment_score=None,
+                trend_prediction="震荡",
+                operation_advice="持有",
+                analysis_summary="测试摘要",
+                decision_type="hold",
+                dashboard={
+                    "core_conclusion": {"one_sentence": "测试摘要"},
+                    "intelligence": {"risk_alerts": ["风险"]},
+                    "battle_plan": {"sniper_points": {"stop_loss": "10"}},
+                },
+            )
+
+            executor_adapter = object()
+            mock_executor = MagicMock()
+            mock_executor.llm_adapter = executor_adapter
+            mock_executor.run.return_value = AgentResult(
+                success=True,
+                content="{}",
+                dashboard={
+                    "trend_prediction": "震荡",
+                    "operation_advice": "持有",
+                    "decision_type": "hold",
+                    "analysis_summary": "测试摘要",
+                    "dashboard": {
+                        "core_conclusion": {"one_sentence": "测试摘要"},
+                        "intelligence": {"risk_alerts": ["风险"]},
+                        "battle_plan": {"sniper_points": {"stop_loss": "10"}},
+                    },
+                },
+                provider="gemini",
+            )
+            mock_build_executor.return_value = mock_executor
+
+            pipeline._analyze_with_agent(
+                code="600519",
+                report_type=ReportType.SIMPLE,
+                query_id="q-agent-adapter",
+                stock_name="贵州茅台",
+                realtime_quote=None,
+                chip_data=None,
+            )
+
+            self.assertIs(
+                pipeline._attempt_integrity_repair.call_args.kwargs["llm_adapter"],
+                executor_adapter,
+            )
 
     def test_analyze_with_agent_explains_daily_market_softening_before_risk(self):
         """A partial result produced before risk must retain its Pipeline start signal."""

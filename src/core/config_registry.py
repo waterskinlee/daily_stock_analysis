@@ -3609,6 +3609,32 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": ["restart_required"],
     },
+    "SCHEDULED_RUN_MAX_AGE_MINUTES": {
+        "title": "Scheduled Run Maximum Age",
+        "description": "Mark persisted running scheduled batches older than this many minutes as failed when the scheduler starts.",
+        "category": "system",
+        "data_type": "integer",
+        "ui_control": "number",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "360",
+        "options": [],
+        "validation": {"min": 1},
+        "display_order": 13,
+        "help_key": "settings.system.schedule",
+        "examples": [
+            "SCHEDULED_RUN_MAX_AGE_MINUTES=360",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：其他配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#其他配置",
+            },
+        ],
+        "warning_codes": ["restart_required"],
+    },
+
     "TRADING_DAY_CHECK_ENABLED": {
         "title": "Trading Day Check",
         "description": "Skip analysis on non-trading days. Set to false or use --force-run to override.",

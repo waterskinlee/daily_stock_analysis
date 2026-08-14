@@ -340,6 +340,35 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_scheduled_run_max_age_minutes_parses_and_clamps_env(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "SCHEDULED_RUN_MAX_AGE_MINUTES": "45",
+            },
+            clear=True,
+        ):
+            configured = Config._load_from_env()
+
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "SCHEDULED_RUN_MAX_AGE_MINUTES": "0",
+            },
+            clear=True,
+        ):
+            clamped = Config._load_from_env()
+
+        self.assertEqual(configured.scheduled_run_max_age_minutes, 45)
+        self.assertEqual(clamped.scheduled_run_max_age_minutes, 1)
+
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_news_intel_envs_do_not_change_llm_runtime_contract(
         self,
         _mock_parse_litellm_yaml,

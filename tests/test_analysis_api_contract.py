@@ -1444,6 +1444,27 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             ReportType.FULL,
 
         )
+    def test_analysis_service_forwards_force_refresh_to_pipeline(self) -> None:
+        service = object.__new__(AnalysisService)
+        pipeline_instance = MagicMock()
+        pipeline_instance.process_single_stock.return_value = object()
+
+        with patch("src.config.get_config", return_value=SimpleNamespace()), \
+             patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline_instance), \
+             patch.object(AnalysisService, "_build_analysis_response", return_value={"stock_code": "600519"}):
+            result = AnalysisService.analyze_stock(
+                service,
+                "600519",
+                report_type="full",
+                force_refresh=True,
+                query_id="q-force",
+            )
+
+        self.assertEqual(result, {"stock_code": "600519"})
+        self.assertTrue(
+            pipeline_instance.process_single_stock.call_args.kwargs["force_refresh"]
+        )
+
 
     def test_analysis_service_passes_request_skills_to_pipeline(self) -> None:
         service = object.__new__(AnalysisService)
@@ -1766,6 +1787,45 @@ class AnalysisApiContractTestCase(unittest.TestCase):
 
         news_component = result["diagnostic_summary"]["components"]["news"]
         self.assertEqual(news_component["status"], "unknown")
+
+    def test_build_analysis_response_uses_truthful_history_save_state(self) -> None:
+        service = AnalysisService()
+        result = service._build_analysis_response(
+            SimpleNamespace(
+                code="600519",
+                name="贵州茅台",
+                current_price=1234.56,
+                change_pct=1.23,
+                model_used="test-model",
+                analysis_summary="summary",
+                operation_advice="hold",
+                trend_prediction="up",
+                sentiment_score=80,
+                news_summary="news",
+                technical_analysis="tech",
+                fundamental_analysis="fundamental",
+                risk_warning="risk",
+                history_saved=False,
+                diagnostic_context_snapshot={
+                    "diagnostics": {
+                        "trace_id": "trace-save-failed",
+                        "query_id": "q-save-failed",
+                        "provider_runs": [],
+                        "llm_runs": [{"success": True, "model": "test-model"}],
+                        "history_runs": [{"report_saved": False}],
+                    }
+                },
+                get_sniper_points=lambda: {},
+            ),
+            "q-save-failed",
+            report_type="full",
+        )
+
+        self.assertFalse(result["history_saved"])
+        self.assertEqual(
+            result["diagnostic_summary"]["components"]["history"]["status"],
+            "failed",
+        )
 
     def test_build_analysis_response_includes_market_phase_summary_from_result_snapshot(self) -> None:
         service = AnalysisService()

@@ -406,9 +406,116 @@ class MainScheduleModeTestCase(unittest.TestCase):
                 "resolved_schedule_time": "18:00",
             },
         )
-        run_full_analysis.assert_called_once_with(config, args, None)
+        run_full_analysis.assert_called_once_with(
+            config,
+            args,
+            None,
+            is_scheduled_run=True,
+        )
         warning_log.assert_any_call(
             "定时模式下检测到 --stocks 参数；计划执行将忽略启动时股票快照，并在每次运行前重新读取最新的 STOCK_LIST。"
+        )
+    def test_cli_schedule_reconciles_stale_runs_before_scheduler_start(self) -> None:
+        args = self._make_args(schedule=True)
+        config = self._make_config(
+            schedule_enabled=False,
+            scheduled_run_max_age_minutes=90,
+        )
+        call_order = []
+
+        with patch("main.parse_arguments", return_value=args), \
+             patch("main.get_config", return_value=config), \
+             patch("main.setup_logging"), \
+             patch(
+                 "src.services.runtime_scheduler.reconcile_stale_scheduled_runs",
+                 side_effect=lambda current_config: call_order.append(
+                     ("reconcile", current_config)
+                 ),
+                 create=True,
+             ), \
+             patch(
+                 "src.scheduler.run_with_schedule",
+                 side_effect=lambda **_kwargs: call_order.append(("start", config)),
+             ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(call_order, [("reconcile", config), ("start", config)])
+
+
+    def test_scheduled_run_persists_each_completed_stock_and_terminal_count(self) -> None:
+        args = self._make_args()
+        config = self._make_config(
+            trading_day_check_enabled=False,
+            market_review_enabled=False,
+            daily_market_context_enabled=False,
+            single_stock_notify=False,
+            merge_email_notification=False,
+            analysis_delay=0,
+            report_type="simple",
+        )
+        pipeline = MagicMock()
+        scheduled_db = MagicMock()
+
+        def run_pipeline(**kwargs):
+            callback = kwargs["stock_completion_callback"]
+            callback(1, 3)
+            callback(2, 3)
+            callback(3, 3)
+            return []
+
+        pipeline.run.side_effect = run_pipeline
+
+        with patch.object(main, "_refresh_stock_index_cache_for_analysis"), \
+             patch(
+                 "main._compute_trading_day_filter",
+                 return_value=(["000001", "600519", "AAPL"], "cn", False),
+             ), \
+             patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \
+             patch("src.storage.get_db", return_value=scheduled_db), \
+             patch("main._run_auto_backtest"), \
+             patch("src.feishu_doc.FeishuDocManager") as feishu_doc_manager:
+            feishu_doc_manager.return_value.is_configured.return_value = False
+            result = main.run_full_analysis(
+                config,
+                args,
+                ["000001", "600519", "AAPL"],
+                is_scheduled_run=True,
+            )
+
+        self.assertTrue(result)
+        status_calls = scheduled_db.save_scheduled_run_status.call_args_list
+        self.assertEqual(len(status_calls), 5)
+        run_id = status_calls[0].args[0]
+        self.assertEqual(
+            status_calls,
+            [
+                unittest.mock.call(run_id, "running", stock_count=3),
+                unittest.mock.call(
+                    run_id,
+                    "running",
+                    stock_count=3,
+                    completed_count=1,
+                ),
+                unittest.mock.call(
+                    run_id,
+                    "running",
+                    stock_count=3,
+                    completed_count=2,
+                ),
+                unittest.mock.call(
+                    run_id,
+                    "running",
+                    stock_count=3,
+                    completed_count=3,
+                ),
+                unittest.mock.call(
+                    run_id,
+                    "completed",
+                    stock_count=3,
+                    completed_count=3,
+                ),
+            ],
         )
 
     def test_standalone_run_resolves_stocks_before_run_full_analysis(self) -> None:
@@ -525,7 +632,12 @@ class MainScheduleModeTestCase(unittest.TestCase):
             scheduled_call,
             {"schedule_time": "18:00", "resolved_schedule_time": "09:30"},
         )
-        run_full_analysis.assert_called_once_with(runtime_config, args, None)
+        run_full_analysis.assert_called_once_with(
+            runtime_config,
+            args,
+            None,
+            is_scheduled_run=True,
+        )
 
     def test_schedule_mode_registers_event_monitor_background_task(self) -> None:
         args = self._make_args(schedule=True)
@@ -733,7 +845,12 @@ class MainScheduleModeTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         start_bots.assert_not_called()
-        run_full_analysis.assert_called_once_with(config, args, None)
+        run_full_analysis.assert_called_once_with(
+            config,
+            args,
+            None,
+            is_scheduled_run=True,
+        )
         self.assertEqual(scheduled_call["schedule_time"], "18:00")
         self.assertEqual(scheduled_call["run_immediately"], True)
         self.assertEqual(scheduled_call["background_tasks"], [])

@@ -27,6 +27,7 @@ const COMPONENT_ORDER = [
   'realtime_quote',
   'daily_data',
   'news',
+  'agent',
   'llm',
   'notification',
   'history',

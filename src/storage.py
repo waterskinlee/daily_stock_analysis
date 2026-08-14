@@ -2373,6 +2373,51 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             logger.warning("定时任务状态写入失败（fail-open）: run_id=%s err=%s", normalized_run_id, exc)
             return False
 
+    def reconcile_stale_scheduled_runs(
+        self,
+        *,
+        max_age_minutes: int,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Fail stale running batches left behind by a previous scheduler process."""
+        try:
+            normalized_max_age = max(1, int(max_age_minutes))
+            reconciled_at = to_utc_naive_datetime(now or utc_naive_now())
+            cutoff = reconciled_at - timedelta(minutes=normalized_max_age)
+            error = (
+                f"Scheduled run exceeded the {normalized_max_age}-minute maximum age "
+                "and was reconciled at scheduler startup."
+            )
+
+            def _write(session: Session) -> int:
+                rows = session.execute(
+                    select(ScheduledRunStatus).where(
+                        ScheduledRunStatus.status == "running",
+                        ScheduledRunStatus.started_at < cutoff,
+                    )
+                ).scalars().all()
+                for row in rows:
+                    row.status = "failed"
+                    row.finished_at = reconciled_at
+                    row.error = error
+                return len(rows)
+
+            reconciled_count = self._run_write_transaction(
+                "reconcile_stale_scheduled_runs",
+                _write,
+            )
+            if reconciled_count:
+                logger.warning(
+                    "已将 %d 条超过 %d 分钟的遗留定时任务标记为失败",
+                    reconciled_count,
+                    normalized_max_age,
+                )
+            return reconciled_count
+        except Exception as exc:
+            logger.warning("遗留定时任务状态对账失败（fail-open）: %s", exc)
+            return 0
+
+
     def save_scheduled_run_event(
         self,
         run_id: str,
