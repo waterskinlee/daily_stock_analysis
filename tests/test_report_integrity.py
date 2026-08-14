@@ -1552,21 +1552,109 @@ class TestAgentIntegrityRepair(unittest.TestCase):
 
         repairable, evidence = StockAnalysisPipeline._partition_integrity_missing_fields(
             [
+                "dashboard.phase_decision.watch_conditions",
                 "dashboard.phase_decision.data_limitations",
                 "dashboard.phase_decision.phase_context",
                 "dashboard.previous_watch_verification",
                 "dashboard.previous_watch_verification.items[0].evidence",
             ]
         )
-        self.assertEqual(repairable, ["dashboard.phase_decision.data_limitations"])
+        self.assertEqual(repairable, [])
         self.assertEqual(
             evidence,
             [
+                "dashboard.phase_decision.watch_conditions",
+                "dashboard.phase_decision.data_limitations",
                 "dashboard.phase_decision.phase_context",
                 "dashboard.previous_watch_verification",
                 "dashboard.previous_watch_verification.items[0].evidence",
             ],
         )
+
+    def test_watch_conditions_and_data_limitations_are_excluded_from_repair(self) -> None:
+        """Derived phase fields never enter the repair LLM."""
+        from src.core.pipeline import StockAnalysisPipeline
+
+        repairable, evidence = StockAnalysisPipeline._partition_integrity_missing_fields(
+            [
+                "dashboard.phase_decision.watch_conditions",
+                "dashboard.phase_decision.data_limitations",
+                "dashboard.phase_decision.action_window",
+                "dashboard.phase_decision.phase_context",
+            ]
+        )
+        self.assertEqual(repairable, ["dashboard.phase_decision.action_window"])
+        self.assertEqual(
+            evidence,
+            [
+                "dashboard.phase_decision.watch_conditions",
+                "dashboard.phase_decision.data_limitations",
+                "dashboard.phase_decision.phase_context",
+            ],
+        )
+
+    def test_repair_skips_llm_when_only_deterministic_fields_missing(self) -> None:
+        """watch_conditions/data_limitations must not trigger a repair call."""
+        pipe = self._make_pipeline()
+        pipe._resolve_repair_llm_adapter = lambda: object()  # would fail if called
+        result = self._base_result()
+        result.dashboard["phase_decision"] = {}
+
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=[
+                "dashboard.phase_decision.watch_conditions",
+                "dashboard.phase_decision.data_limitations",
+                "dashboard.phase_decision.phase_context",
+            ],
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_phase_decision=True,
+        )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
+
+    def test_repair_completes_when_only_deterministic_fields_remain(self) -> None:
+        """A repair must not record incomplete_repair for derived field gaps."""
+        pipe = self._make_pipeline()
+
+        class _Adapter:
+            def call_text(self, messages, **kwargs):
+                delta = {
+                    "analysis_summary": "补全摘要",
+                    "dashboard": {
+                        "phase_decision": {
+                            "action_window": "盘后",
+                            "immediate_action": "观察",
+                            "next_check_time": "次日",
+                            "confidence_reason": "数据有限",
+                        }
+                    },
+                }
+                return type(
+                    "R",
+                    (),
+                    {"content": json.dumps(delta), "provider": "ok"},
+                )()
+
+        pipe._resolve_repair_llm_adapter = lambda: _Adapter()
+        result = self._base_result(analysis_summary="")
+        result.dashboard["phase_decision"] = {}
+        _, missing = check_content_integrity(result, require_phase_decision=True)
+
+        repaired, remaining = pipe._attempt_integrity_repair(
+            result,
+            missing_fields=missing,
+            initial_context=self._make_context(),
+            trend_result=None,
+            report_language="zh",
+            max_retries=1,
+            require_phase_decision=True,
+        )
+        self.assertTrue(repaired)
+        self.assertEqual(remaining, [])
 
     def test_partial_repair_returns_remaining_without_losing_filled_score(self) -> None:
         """A partial repair must not let placeholder fill erase real values."""

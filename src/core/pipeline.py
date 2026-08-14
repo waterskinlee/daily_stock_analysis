@@ -3251,7 +3251,7 @@ class StockAnalysisPipeline:
     ) -> Tuple[List[str], List[str]]:
         """Split structural gaps from evidence-bearing / system-derived gaps.
 
-        Two path families never enter the repair LLM:
+        Four path families never enter the repair LLM:
 
         - ``dashboard.previous_watch_verification*`` — evidence-bearing; must
           come from the main analysis model or remain an honest placeholder.
@@ -3262,9 +3262,24 @@ class StockAnalysisPipeline:
           from the authoritative ``market_phase_summary`` by
           ``apply_phase_decision_guardrails()`` right after the fill step, so
           the placeholder only needs to guarantee a valid dict.
+        - ``dashboard.phase_decision.watch_conditions`` — model-authored list;
+          when absent, ``apply_placeholder_fill()`` restores an honest empty
+          list and the guardrail normalizes its shape. Regenerating it in a
+          repair call risks fabrication and was the truncation hot spot in
+          production (reports 267/271 ended with ``completion_tokens=4096``
+          precisely on this field).
+        - ``dashboard.phase_decision.data_limitations`` — derived from
+          deterministic context: ``apply_phase_decision_guardrails()``
+          recomputes it from objective data-quality limitations, phase
+          warnings, and filtered model claims. A repair value would be merged
+          or overwritten by that pass anyway.
 
         Everything else is structural and may be repaired by a bounded LLM call.
         """
+        system_derived_exact = {
+            "dashboard.phase_decision.watch_conditions",
+            "dashboard.phase_decision.data_limitations",
+        }
         system_derived_prefixes = (
             "dashboard.previous_watch_verification",
             "dashboard.phase_decision.phase_context",
@@ -3272,8 +3287,9 @@ class StockAnalysisPipeline:
         repairable: List[str] = []
         evidence: List[str] = []
         for field in missing_fields:
-            if field in system_derived_prefixes or field.startswith(
-                system_derived_prefixes
+            if (
+                field in system_derived_exact
+                or field.startswith(system_derived_prefixes)
             ):
                 evidence.append(field)
             else:
@@ -3514,15 +3530,9 @@ class StockAnalysisPipeline:
                 require_phase_decision=require_phase_decision,
                 require_previous_watch_verification=False,
             )
-            remaining_missing = [
-                field
-                for field in still_missing
-                if not (
-                    field.startswith("dashboard.previous_watch_verification")
-                    or field == "dashboard.phase_decision.phase_context"
-                    or field.startswith("dashboard.phase_decision.phase_context.")
-                )
-            ]
+            remaining_missing = self._partition_integrity_missing_fields(
+                still_missing
+            )[0]
             elapsed = time.monotonic() - started
             complete = still_pass or not remaining_missing
             record_llm_run(
