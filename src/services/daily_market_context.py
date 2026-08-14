@@ -12,6 +12,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+from src.core.trading_calendar import (
+    MARKET_TIMEZONE,
+    get_effective_trading_date,
+    infer_market_phase,
+)
 
 from src.core.market_review_lock import (
     release_market_review_lock,
@@ -826,22 +833,56 @@ def _record_matches_target_date(
     require_query_id_match: bool = False,
     report_language: str = "zh",
 ) -> bool:
-    payload_date = _payload_trade_date(payload, region)
     language_matches = _record_report_language_matches(record, report_language)
-    if payload_date is not None:
-        if require_query_id_match:
-            return _record_matches_query_id(record, current_query_id) and language_matches
-        return language_matches and (
-            payload_date == target_date
-            or _record_matches_query_id(record, current_query_id)
-        )
-
-    created_date = _coerce_date(getattr(record, "created_at", None))
+    query_id_matches = _record_matches_query_id(record, current_query_id)
     if require_query_id_match:
-        return _record_matches_query_id(record, current_query_id) and language_matches
+        return query_id_matches and language_matches
+
+    # Complete-only reuse: intraday/premarket/lunch-break/closing-auction market
+    # snapshots are partial and must never back a stock-analysis market context.
+    # Only postmarket (completed session) history is a valid reuse source.
+    if not _is_postmarket_market_record(region, record):
+        return False
+
+    record_session = _market_record_session(region, record)
     return language_matches and (
-        created_date == target_date or _record_matches_query_id(record, current_query_id)
+        record_session == target_date or query_id_matches
     )
+
+
+def _market_record_session(region: str, record: Any) -> Optional[date]:
+    created_at = _market_record_local_time(region, record)
+    if created_at is None:
+        return None
+    return get_effective_trading_date(region, current_time=created_at)
+
+
+def _is_postmarket_market_record(region: str, record: Any) -> bool:
+    created_at = _market_record_local_time(region, record)
+    if created_at is None:
+        return False
+    return infer_market_phase(region, current_time=created_at) == "postmarket"
+
+
+def _market_record_local_time(region: str, record: Any) -> Optional[datetime]:
+    created_at = getattr(record, "created_at", None)
+    if created_at is None:
+        return None
+    if isinstance(created_at, datetime):
+        value = created_at
+    else:
+        try:
+            value = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            return None
+    tz_name = MARKET_TIMEZONE.get(region or "")
+    if not tz_name:
+        return value
+    if value.tzinfo is None:
+        # Analysis history stores naive container-local time (Asia/Shanghai);
+        # re-base it to the target market timezone before phase inference.
+        return value.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(ZoneInfo(tz_name))
+    return value.astimezone(ZoneInfo(tz_name))
 
 
 def _record_report_language_matches(record: Any, report_language: str) -> bool:

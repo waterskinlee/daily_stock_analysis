@@ -614,15 +614,6 @@ def _prime_daily_market_context(
     return summary
 
 
-def _can_reuse_market_context_for_review(summary: str, region: str) -> bool:
-    if not summary:
-        return False
-    normalized = str(region or "").strip().lower()
-    if normalized == "both":
-        return False
-    parts = {item.strip() for item in normalized.split(",") if item.strip()}
-    return len(parts) <= 1
-
 
 def _resolve_daily_market_context_market(market: str, normalized_region: str) -> str:
     if "," not in normalized_region:
@@ -655,39 +646,6 @@ def _market_review_report_text(review_result: Any) -> str:
     if isinstance(report, str):
         return report
     return review_result if isinstance(review_result, str) else ""
-
-
-def _save_reused_market_review_report(
-    notifier: Any,
-    market_report: str,
-    *,
-    config: Config,
-    trigger_source: str,
-    region: str,
-) -> None:
-    body = str(market_report or "").strip()
-    if not body:
-        return
-    title = (
-        "# 🎯 Market Review"
-        if str(getattr(config, "report_language", "zh")).strip().lower() == "en"
-        else "# 🎯 大盘复盘"
-    )
-    if not any(body.startswith(item) for item in ("# 🎯 大盘复盘", "# 🎯 Market Review")):
-        body = f"{title}\n\n{body}"
-    try:
-        date_str = datetime.now().strftime('%Y%m%d')
-        report_filename = f"market_review_{date_str}.md"
-        filepath = notifier.save_report_to_file(body, report_filename)
-        logger.info(
-            "[MarketReview] component=market_review action=save_reused_report "
-            "trigger_source=%s region=%s path=%s",
-            trigger_source,
-            region,
-            filepath,
-        )
-    except Exception as exc:
-        logger.warning("复用大盘上下文保存大盘复盘报告失败: %s", exc)
 
 
 def _run_auto_backtest(config: Config) -> None:
@@ -843,9 +801,6 @@ def run_full_analysis(
                 analysis_reference_time,
             )
         market_report = ""
-        market_context_summary = ""
-        market_context_full_report = ""
-        market_context_generated_during_stock = False
         pipeline = StockAnalysisPipeline(
             config=config,
             max_workers=args.workers,
@@ -868,10 +823,7 @@ def run_full_analysis(
                 target_date=daily_market_context_target_date,
                 return_full_report=False,
             )
-            (
-                market_context_summary,
-                market_context_full_report,
-            ) = _prime_daily_market_context(
+            _prime_daily_market_context(
                 config,
                 pipeline=pipeline,
                 region=market_review_region,
@@ -901,7 +853,34 @@ def run_full_analysis(
 
             stock_completion_callback = persist_stock_completion
 
-        # 1. 运行个股分析
+        # 1. 运行大盘复盘（提前，让本轮个股复用完整上下文）
+        analysis_delay = getattr(config, 'analysis_delay', 0)
+        review_result = None
+        if should_run_market_review:
+            schedule_mode = bool(
+                getattr(args, 'schedule', False)
+                or getattr(config, 'schedule_enabled', False)
+            )
+            review_trigger_source = "schedule" if schedule_mode else "cli"
+            if analysis_delay > 0:
+                logger.info(f"等待 {analysis_delay} 秒后执行大盘复盘（避免API限流）...")
+                time.sleep(analysis_delay)
+            review_result = _run_market_review_with_shared_lock(
+                config,
+                run_market_review,
+                notifier=pipeline.notifier,
+                analyzer=pipeline.analyzer,
+                search_service=pipeline.search_service,
+                send_notification=not args.no_notify,
+                merge_notification=merge_notification,
+                override_region=market_review_region,
+                query_id=query_id,
+                trigger_source=review_trigger_source,
+            )
+            if review_result:
+                market_report = _market_review_report_text(review_result)
+
+        # 2. 运行个股分析
         if skip_futu_stock_analysis:
             if portfolio_is_empty:
                 logger.info("真实账户中无符合条件的 Futu 持仓，跳过个股分析。")
@@ -919,118 +898,6 @@ def run_full_analysis(
             if stock_completion_callback is not None:
                 pipeline_run_kwargs["stock_completion_callback"] = stock_completion_callback
             results = pipeline.run(**pipeline_run_kwargs)
-        if should_use_daily_market_context and not market_context_summary:
-            (
-                market_context_summary,
-                market_context_full_report,
-            ) = _prime_daily_market_context(
-                config,
-                pipeline=pipeline,
-                region=market_review_region,
-                no_market_review=args.no_market_review,
-                allow_generate=False,
-                target_date=daily_market_context_target_date,
-                return_full_report=True,
-                require_current_query_match=True,
-            )
-            market_context_generated_during_stock = bool(market_context_summary)
-
-        # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
-        analysis_delay = getattr(config, 'analysis_delay', 0)
-
-        # 2. 运行大盘复盘（如果启用且不是仅个股模式）
-        if should_run_market_review:
-            schedule_mode = bool(
-                getattr(args, 'schedule', False)
-                or getattr(config, 'schedule_enabled', False)
-            )
-            review_trigger_source = "schedule" if schedule_mode else "cli"
-            can_reuse_market_context = (
-                _can_reuse_market_context_for_review(
-                    market_context_summary,
-                    market_review_region,
-                )
-                if should_use_daily_market_context
-                else False
-            )
-
-            can_skip_market_review = (
-                (merge_notification or market_context_generated_during_stock)
-                and can_reuse_market_context
-                and bool(market_context_full_report or market_context_summary)
-            )
-            if can_skip_market_review:
-                market_report = market_context_full_report or market_context_summary
-                logger.info(
-                    "复盘上下文可复用，跳过重复大盘复盘并复用上下文内容。"
-                )
-                _save_reused_market_review_report(
-                    pipeline.notifier,
-                    market_report,
-                    config=config,
-                    trigger_source=review_trigger_source,
-                    region=market_review_region,
-                )
-                if (
-                    market_context_generated_during_stock
-                    and not merge_notification
-                    and not args.no_notify
-                    and pipeline.notifier.is_available()
-                ):
-                    if pipeline.notifier.send(
-                        f"# 📈 大盘复盘\n\n{market_report}",
-                        email_send_to_all=True,
-                        route_type="report",
-                    ):
-                        logger.info("复用本轮大盘上下文推送大盘复盘成功")
-                    else:
-                        logger.warning("复用本轮大盘上下文推送大盘复盘失败")
-
-            review_result = None
-            if not can_skip_market_review:
-                if analysis_delay > 0:
-                    logger.info(f"等待 {analysis_delay} 秒后执行大盘复盘（避免API限流）...")
-                    time.sleep(analysis_delay)
-
-                review_result = _run_market_review_with_shared_lock(
-                    config,
-                    run_market_review,
-                    notifier=pipeline.notifier,
-                    analyzer=pipeline.analyzer,
-                    search_service=pipeline.search_service,
-                    send_notification=not args.no_notify,
-                    merge_notification=merge_notification,
-                    override_region=market_review_region,
-                    query_id=query_id,
-                    trigger_source=review_trigger_source,
-                )
-                # 如果复盘仍未执行成功，再做一次复用历史/缓存读取（防止与并发运行竞态）。
-                if not review_result and should_use_daily_market_context:
-                    (
-                        market_context_summary,
-                        market_context_full_report,
-                    ) = _prime_daily_market_context(
-                        config,
-                        pipeline=pipeline,
-                        region=market_review_region,
-                        no_market_review=args.no_market_review,
-                        allow_generate=False,
-                        target_date=daily_market_context_target_date,
-                        return_full_report=True,
-                        require_current_query_match=True,
-                    )
-                    can_reuse_market_context = _can_reuse_market_context_for_review(
-                        market_context_summary,
-                        market_review_region,
-                    )
-                elif not review_result:
-                    can_reuse_market_context = False
-
-            # 如果有结果，赋值给 market_report 用于后续飞书文档生成
-            if review_result:
-                market_report = _market_review_report_text(review_result)
-            elif can_reuse_market_context:
-                market_report = market_context_full_report or market_context_summary
 
         # Issue #190: 合并推送（个股+大盘复盘）
         if merge_notification and (results or market_report) and not args.no_notify:

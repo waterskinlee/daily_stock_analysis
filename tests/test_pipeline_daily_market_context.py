@@ -124,7 +124,7 @@ def test_pipeline_loads_daily_market_context_when_market_review_enabled() -> Non
         analyzer=pipeline.analyzer,
         search_service=pipeline.search_service,
         force_refresh=False,
-        allow_generate=True,
+        allow_generate=False,
         target_date=target_date,
         current_query_id="pipeline-query",
     )

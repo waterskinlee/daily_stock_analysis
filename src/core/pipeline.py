@@ -2116,7 +2116,7 @@ class StockAnalysisPipeline:
                 "analyzer": self.analyzer,
                 "search_service": self.search_service,
                 "force_refresh": force_refresh,
-                "allow_generate": getattr(self, "daily_market_context_allow_generate", True),
+                "allow_generate": False,
                 "target_date": target_date,
             }
             current_query_id = getattr(self, "query_id", None)

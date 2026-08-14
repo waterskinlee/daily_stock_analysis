@@ -63,10 +63,10 @@ def _history_record(
 def test_query_scoped_cache_can_skip_stale_analysis_history_context() -> None:
     db = MagicMock()
     db.get_analysis_history.side_effect = [
-        [_history_record(created_at=datetime(2026, 6, 6, 9, 30), query_id="old-q", summary="旧复盘")],
+        [_history_record(created_at=datetime(2026, 6, 5, 16, 0), query_id="old-q", summary="旧复盘")],
         [
             _history_record(
-                created_at=datetime(2026, 6, 6, 9, 45),
+                created_at=datetime(2026, 6, 5, 15, 30),
                 query_id="new-q",
                 summary="新复盘",
             )
@@ -74,7 +74,7 @@ def test_query_scoped_cache_can_skip_stale_analysis_history_context() -> None:
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -111,11 +111,11 @@ def test_query_scoped_cache_can_skip_stale_analysis_history_context() -> None:
 def test_reuses_same_day_market_review_history_without_running_review() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
-        _history_record(created_at=datetime(2026, 6, 6, 9, 30))
+        _history_record(created_at=datetime(2026, 6, 5, 16, 0))
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -140,14 +140,14 @@ def test_reuses_jp_market_review_history_without_normalizing_to_cn() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             region="jp",
             summary="日股退潮，高风险，建议观望，仓位上限30%。",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -172,14 +172,14 @@ def test_jp_kr_request_does_not_reuse_legacy_both_history() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             region="both",
             summary="旧三市场复盘，高风险，建议观望，仓位上限30%。",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     for region in ("jp", "kr"):
@@ -200,11 +200,11 @@ def test_jp_kr_request_does_not_reuse_legacy_both_history() -> None:
 def test_multi_market_region_does_not_fallback_to_cn_history() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
-        _history_record(created_at=datetime(2026, 6, 6, 9, 30), region="cn")
+        _history_record(created_at=datetime(2026, 6, 5, 16, 0), region="cn")
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -226,14 +226,14 @@ def test_does_not_reuse_same_day_history_on_report_language_mismatch() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             report_language="en",
             summary="Market in risk-off retreat, suggest waiting.",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="大盘退潮，高风险，建议观望，仓位上限30%。",
@@ -273,7 +273,7 @@ def test_query_scoped_fallback_reuses_current_run_runtime_cache() -> None:
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="高风险退潮，仓位上限20%，等待确认。",
@@ -327,7 +327,7 @@ def test_query_scoped_runtime_cache_is_reused_without_key_scope_match() -> None:
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="高风险退潮，仓位上限20%，等待确认。",
@@ -383,14 +383,14 @@ def test_force_refresh_reads_latest_same_day_history_after_stale_cache() -> None
     db.get_analysis_history.side_effect = [
         [
             _history_record(
-                created_at=datetime(2026, 6, 6, 9, 30),
+                created_at=datetime(2026, 6, 5, 16, 0),
                 summary="旧复盘",
                 query_id="old-q",
             )
         ],
         [
             _history_record(
-                created_at=datetime(2026, 6, 6, 10, 30),
+                created_at=datetime(2026, 6, 5, 16, 0),
                 summary="新复盘",
                 query_id="new-q",
             )
@@ -398,7 +398,7 @@ def test_force_refresh_reads_latest_same_day_history_after_stale_cache() -> None
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -433,13 +433,13 @@ def test_force_refresh_reads_latest_same_day_history_after_stale_cache() -> None
 def test_reuses_same_day_market_review_history_with_full_report_payload() -> None:
     db = MagicMock()
     record = _history_record(
-        created_at=datetime(2026, 6, 6, 9, 30),
+        created_at=datetime(2026, 6, 5, 16, 0),
         region="cn",
     )
     db.get_analysis_history.return_value = [record]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -490,13 +490,13 @@ def test_reuses_history_by_payload_trade_date_when_created_at_is_wall_clock_date
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             payload_date="2026-06-05",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -520,14 +520,14 @@ def test_reuses_same_run_history_when_saved_under_different_wall_clock_date() ->
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             payload_date="2026-06-06",
             query_id="same-run-q",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -554,7 +554,7 @@ def test_get_context_uses_isolated_market_context_query_id_when_generating() -> 
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="高风险退潮，仓位上限20%，等待确认。",
@@ -601,14 +601,14 @@ def test_does_not_reuse_history_for_different_query_when_query_match_required() 
     db = MagicMock()
     db.get_analysis_history.return_value = [
         _history_record(
-            created_at=datetime(2026, 6, 6, 9, 30),
+            created_at=datetime(2026, 6, 5, 16, 0),
             payload_date="2026-06-05",
             query_id="other-run-q",
         )
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -633,7 +633,7 @@ def test_get_context_acquires_market_review_lock_before_generating() -> None:
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     config = SimpleNamespace(report_language="zh")
     lock_token = object()
@@ -681,7 +681,7 @@ def test_get_context_skips_generation_when_market_review_lock_is_held() -> None:
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch(
@@ -719,11 +719,11 @@ def test_get_context_waits_for_market_review_generation_when_lock_is_held() -> N
         [],
         [],
         [],
-        [_history_record(created_at=datetime(2026, 6, 6, 9, 30))],
+        [_history_record(created_at=datetime(2026, 6, 5, 16, 0))],
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch(
@@ -759,7 +759,7 @@ def test_get_context_generates_context_when_lock_is_released_without_matching_hi
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     released_lock = object()
 
@@ -804,11 +804,11 @@ def test_get_context_generates_context_when_lock_is_released_without_matching_hi
 def test_readonly_mode_can_still_use_cached_history_without_generation() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
-        _history_record(created_at=datetime(2026, 6, 6, 9, 30))
+        _history_record(created_at=datetime(2026, 6, 5, 16, 0))
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     with patch("src.services.daily_market_context.run_market_review") as run_review:
@@ -832,7 +832,7 @@ def test_prewarm_generation_does_not_persist_market_review_history() -> None:
     db.get_analysis_history.return_value = []
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="高风险退潮，仓位上限20%，等待确认。",
@@ -876,11 +876,11 @@ def test_prewarm_generation_does_not_persist_market_review_history() -> None:
 def test_force_refresh_runs_market_review_without_notification() -> None:
     db = MagicMock()
     db.get_analysis_history.return_value = [
-        _history_record(created_at=datetime(2026, 6, 6, 9, 30))
+        _history_record(created_at=datetime(2026, 6, 5, 16, 0))
     ]
     service = DailyMarketContextService(
         db_manager=db,
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
     result = MarketReviewRunResult(
         report="高风险退潮，仓位上限20%，等待确认。",
@@ -932,7 +932,7 @@ def test_force_refresh_runs_market_review_without_notification() -> None:
 def test_prompt_section_is_low_sensitivity_and_region_scoped() -> None:
     context = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )._build_context_from_payload(
         region="cn",
         trade_date=date(2026, 6, 6),
@@ -965,13 +965,13 @@ def test_prompt_section_is_low_sensitivity_and_region_scoped() -> None:
 def test_safe_dict_excludes_internal_history_identifiers() -> None:
     context = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )._build_context_from_payload(
         region="cn",
         trade_date=date(2026, 6, 6),
         payload={"summary": "市场震荡，结构分化。"},
         source="analysis_history",
-        created_at=datetime(2026, 6, 6, 9, 30),
+        created_at=datetime(2026, 6, 5, 16, 0),
         history_id=123,
         query_id="internal-query-id",
     )
@@ -1056,7 +1056,7 @@ def test_prompt_section_labels_jp_kr_regions_without_cn_fallback() -> None:
 def test_extract_summary_prefers_region_scoped_section_over_generic_fallback_title() -> None:
     context = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )._build_context_from_payload(
         region="cn",
         trade_date=date(2026, 6, 6),
@@ -1088,7 +1088,7 @@ def test_extract_summary_prefers_region_scoped_section_over_generic_fallback_tit
 def test_region_scoped_market_light_risk_signals_survive_neutral_summary() -> None:
     context = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )._build_context_from_payload(
         region="cn",
         trade_date=date(2026, 6, 6),
@@ -1124,7 +1124,7 @@ def test_region_scoped_market_light_risk_signals_survive_neutral_summary() -> No
 def test_yellow_market_light_status_marks_context_conservative() -> None:
     context = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )._build_context_from_payload(
         region="us",
         trade_date=date(2026, 6, 6),
@@ -1145,7 +1145,7 @@ def test_yellow_market_light_status_marks_context_conservative() -> None:
 def test_daily_market_context_keeps_jp_kr_regions_and_labels() -> None:
     service = DailyMarketContextService(
         db_manager=MagicMock(),
-        today_fn=lambda: date(2026, 6, 6),
+        today_fn=lambda: date(2026, 6, 5),
     )
 
     jp_context = service._build_context_from_payload(
@@ -1177,3 +1177,122 @@ def test_daily_market_context_keeps_jp_kr_regions_and_labels() -> None:
 
     assert "市场：日股（jp）" in jp_section
     assert "Region: Korea (kr)" in kr_section
+
+
+def _generated_context(*, report: str = "大盘退潮，高风险，建议观望，仓位上限30%。") -> MarketReviewRunResult:
+    return MarketReviewRunResult(
+        report=report,
+        market_review_payload={
+            "kind": "market_review",
+            "region": "cn",
+            "sections": [
+                {"key": "overview", "title": "概览", "markdown": report}
+            ],
+        },
+    )
+
+
+def test_intraday_history_not_reused_for_postmarket_query() -> None:
+    db = MagicMock()
+    db.get_analysis_history.return_value = [
+        _history_record(created_at=datetime(2026, 6, 5, 10, 0))
+    ]
+    service = DailyMarketContextService(
+        db_manager=db,
+        today_fn=lambda: date(2026, 6, 5),
+    )
+
+    with patch(
+        "src.services.daily_market_context.run_market_review",
+        return_value=_generated_context(),
+    ) as run_review:
+        context = service.get_context(
+            region="cn",
+            config=SimpleNamespace(report_language="zh"),
+            notifier=MagicMock(),
+            analyzer=MagicMock(),
+            search_service=MagicMock(),
+            target_date=date(2026, 6, 5),
+        )
+
+    assert context is not None
+    assert context.source == "market_review_runtime"
+    run_review.assert_called_once()
+
+
+def test_intraday_history_not_reused_even_for_matching_session() -> None:
+    db = MagicMock()
+    db.get_analysis_history.return_value = [
+        _history_record(created_at=datetime(2026, 6, 5, 10, 0))
+    ]
+    service = DailyMarketContextService(
+        db_manager=db,
+        today_fn=lambda: date(2026, 6, 5),
+    )
+
+    with patch(
+        "src.services.daily_market_context.run_market_review",
+        return_value=_generated_context(),
+    ) as run_review:
+        context = service.get_context(
+            region="cn",
+            config=SimpleNamespace(report_language="zh"),
+            notifier=MagicMock(),
+            analyzer=MagicMock(),
+            search_service=MagicMock(),
+            target_date=date(2026, 6, 4),
+        )
+
+    assert context is not None
+    assert context.source == "market_review_runtime"
+    run_review.assert_called_once()
+
+
+def test_previous_session_postmarket_reused_for_intraday_query() -> None:
+    db = MagicMock()
+    db.get_analysis_history.return_value = [
+        _history_record(created_at=datetime(2026, 6, 4, 16, 0))
+    ]
+    service = DailyMarketContextService(
+        db_manager=db,
+        today_fn=lambda: date(2026, 6, 5),
+    )
+
+    with patch("src.services.daily_market_context.run_market_review") as run_review:
+        context = service.get_context(
+            region="cn",
+            config=SimpleNamespace(report_language="zh"),
+            notifier=MagicMock(),
+            analyzer=MagicMock(),
+            search_service=MagicMock(),
+            target_date=date(2026, 6, 4),
+        )
+
+    assert context is not None
+    assert context.source == "analysis_history"
+    run_review.assert_not_called()
+
+
+def test_today_postmarket_reused_for_postmarket_query() -> None:
+    db = MagicMock()
+    db.get_analysis_history.return_value = [
+        _history_record(created_at=datetime(2026, 6, 5, 16, 0))
+    ]
+    service = DailyMarketContextService(
+        db_manager=db,
+        today_fn=lambda: date(2026, 6, 5),
+    )
+
+    with patch("src.services.daily_market_context.run_market_review") as run_review:
+        context = service.get_context(
+            region="cn",
+            config=SimpleNamespace(report_language="zh"),
+            notifier=MagicMock(),
+            analyzer=MagicMock(),
+            search_service=MagicMock(),
+            target_date=date(2026, 6, 5),
+        )
+
+    assert context is not None
+    assert context.source == "analysis_history"
+    run_review.assert_not_called()
