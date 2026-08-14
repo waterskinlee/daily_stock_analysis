@@ -397,14 +397,12 @@ class MainScheduleModeTestCase(unittest.TestCase):
             exit_code = main.main()
 
         self.assertEqual(exit_code, 0)
+        self.assertEqual(scheduled_call["schedule_time"], "18:00")
+        self.assertEqual(scheduled_call["run_immediately"], True)
+        self.assertEqual(scheduled_call["resolved_schedule_time"], "18:00")
         self.assertEqual(
-            scheduled_call,
-            {
-                "schedule_time": "18:00",
-                "run_immediately": True,
-                "background_tasks": [],
-                "resolved_schedule_time": "18:00",
-            },
+            [entry["name"] for entry in scheduled_call["background_tasks"]],
+            ["scheduled_run_reconcile"],
         )
         run_full_analysis.assert_called_once_with(
             config,
@@ -428,7 +426,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
              patch("main.setup_logging"), \
              patch(
                  "src.services.runtime_scheduler.reconcile_stale_scheduled_runs",
-                 side_effect=lambda current_config: call_order.append(
+                 side_effect=lambda current_config, started_before=None: call_order.append(
                      ("reconcile", current_config)
                  ),
                  create=True,
@@ -681,11 +679,12 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(scheduled_call["schedule_time"], "18:00")
         self.assertEqual(scheduled_call["run_immediately"], True)
         self.assertEqual(scheduled_call["resolved_schedule_time"], "18:00")
-        self.assertEqual(len(scheduled_call["background_tasks"]), 1)
+        self.assertEqual(len(scheduled_call["background_tasks"]), 2)
         background_task = scheduled_call["background_tasks"][0]
         self.assertEqual(background_task["name"], "agent_event_monitor")
         self.assertEqual(background_task["interval_seconds"], 7 * 60)
         self.assertEqual(background_task["run_immediately"], True)
+        self.assertEqual(scheduled_call["background_tasks"][1]["name"], "scheduled_run_reconcile")
 
         with patch("main.logger.info") as info_log:
             background_task["task"]()
@@ -726,8 +725,9 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         worker_cls.assert_called_once()
         run_full_analysis.assert_not_called()
-        self.assertEqual(len(scheduled_call["background_tasks"]), 1)
+        self.assertEqual(len(scheduled_call["background_tasks"]), 2)
         self.assertEqual(scheduled_call["background_tasks"][0]["name"], "agent_event_monitor")
+        self.assertEqual(scheduled_call["background_tasks"][1]["name"], "scheduled_run_reconcile")
 
     def test_check_notify_returns_before_other_modes(self) -> None:
         args = self._make_args(check_notify=True, serve=True, schedule=True, market_review=True)
@@ -853,7 +853,10 @@ class MainScheduleModeTestCase(unittest.TestCase):
         )
         self.assertEqual(scheduled_call["schedule_time"], "18:00")
         self.assertEqual(scheduled_call["run_immediately"], True)
-        self.assertEqual(scheduled_call["background_tasks"], [])
+        self.assertEqual(
+            [entry["name"] for entry in scheduled_call["background_tasks"]],
+            ["scheduled_run_reconcile"],
+        )
         error_log.assert_called_once()
 
     def test_serve_with_enabled_schedule_uses_api_runtime_scheduler(self) -> None:

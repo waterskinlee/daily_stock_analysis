@@ -345,7 +345,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             service.start()
             service.start()
 
-        reconcile.assert_called_once_with(config)
+        reconcile.assert_called_once_with(config, started_before=unittest.mock.ANY)
 
 
     def test_start_registers_event_monitor_background_task(self) -> None:
@@ -419,11 +419,15 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
 
         scheduler = service._scheduler
         self.assertIsNotNone(scheduler)
-        self.assertEqual(len(scheduler.background_tasks), 1)  # type: ignore[attr-defined]
-        self.assertEqual(scheduler.background_tasks[0]["name"], "agent_event_monitor")  # type: ignore[index]
-        self.assertEqual(scheduler.background_tasks[0]["interval_seconds"], 7 * 60)  # type: ignore[index]
-        self.assertEqual(scheduler.background_tasks[0]["run_immediately"], True)  # type: ignore[index]
-        scheduler.background_tasks[0]["task"]()  # type: ignore[index]
+        self.assertEqual(len(scheduler.background_tasks), 2)  # type: ignore[attr-defined]
+        event_task = scheduler.background_tasks[0]  # type: ignore[index]
+        reconcile_task = scheduler.background_tasks[1]  # type: ignore[index]
+        self.assertEqual(event_task["name"], "agent_event_monitor")
+        self.assertEqual(event_task["interval_seconds"], 7 * 60)
+        self.assertEqual(event_task["run_immediately"], True)
+        self.assertEqual(reconcile_task["name"], "scheduled_run_reconcile")
+        self.assertFalse(reconcile_task["run_immediately"])
+        event_task["task"]()  # type: ignore[index]
         fake_worker.run_once.assert_called_once()
 
     def test_rebuild_reuses_event_monitor_without_immediate_rerun(self) -> None:

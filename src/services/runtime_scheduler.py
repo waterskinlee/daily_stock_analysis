@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import _thread
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -26,6 +26,7 @@ RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV = "DSA_RUNTIME_SCHEDULER_RUN_IMMEDIATELY"
 RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
+_SCHEDULER_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
     "no_market_review",
@@ -55,8 +56,11 @@ def run_with_global_analysis_lock(
         _RUNTIME_ANALYSIS_LOCK.release()
     return True
 
-
-def reconcile_stale_scheduled_runs(config: Config) -> int:
+def reconcile_stale_scheduled_runs(
+    config: Config,
+    *,
+    started_before: Optional[datetime] = None,
+) -> int:
     """Best-effort cleanup for running rows owned by a previous scheduler process."""
     try:
         from src.storage import get_db
@@ -66,7 +70,8 @@ def reconcile_stale_scheduled_runs(config: Config) -> int:
                 config,
                 "scheduled_run_max_age_minutes",
                 SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT,
-            )
+            ),
+            started_before=started_before,
         )
     except Exception as exc:  # pragma: no cover - defensive startup isolation
         logger.warning("Failed to reconcile stale scheduled runs: %s", exc, exc_info=True)
@@ -235,8 +240,11 @@ class RuntimeSchedulerService:
 
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         if self._background_tasks_provider is not None:
-            return self._background_tasks_provider(config)
-        return self._current_agent_event_monitor_background_tasks(config)
+            tasks = list(self._background_tasks_provider(config))
+        else:
+            tasks = self._current_agent_event_monitor_background_tasks(config)
+        tasks.extend(self._current_scheduled_run_reconcile_background_tasks(config))
+        return tasks
 
     def _current_agent_event_monitor_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         name = "agent_event_monitor"
@@ -274,6 +282,32 @@ class RuntimeSchedulerService:
             "name": name,
         }]
 
+    def _current_scheduled_run_reconcile_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
+        """Return a periodic task that re-reconciles orphaned scheduled rows."""
+        interval_minutes = getattr(
+            config,
+            "scheduled_run_max_age_minutes",
+            SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT,
+        )
+        try:
+            interval_minutes = max(1, int(interval_minutes))
+        except (TypeError, ValueError):  # pragma: no cover - defensive branch
+            interval_minutes = SCHEDULED_RUN_MAX_AGE_MINUTES_DEFAULT
+        interval_seconds = max(30, (interval_minutes * 60) // 2)
+
+        def reconcile_task() -> None:
+            reconcile_stale_scheduled_runs(
+                self._reload_config(),
+                started_before=_SCHEDULER_PROCESS_STARTED_AT,
+            )
+
+        return [{
+            "task": reconcile_task,
+            "interval_seconds": interval_seconds,
+            "run_immediately": False,
+            "name": "scheduled_run_reconcile",
+        }]
+
     @staticmethod
     def _run_in_background_thread(target: Callable[[], None]) -> None:
         """Run a callback in a background thread without blocking startup."""
@@ -296,7 +330,10 @@ class RuntimeSchedulerService:
                 self.stop()
                 return
             if not self._stale_scheduled_runs_reconciled:
-                reconcile_stale_scheduled_runs(config)
+                reconcile_stale_scheduled_runs(
+                    config,
+                    started_before=_SCHEDULER_PROCESS_STARTED_AT,
+                )
                 self._stale_scheduled_runs_reconciled = True
 
             background_tasks = self._current_background_tasks(config)

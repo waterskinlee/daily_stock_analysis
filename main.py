@@ -81,6 +81,7 @@ from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 logger = logging.getLogger(__name__)
 _RUNTIME_ENV_FILE_KEYS = set()
 _PUBLIC_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]", "*"})
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 
 def _get_active_env_path() -> Path:
@@ -1639,6 +1640,23 @@ def main() -> int:
                     "name": "agent_event_monitor",
                 })
 
+            reconcile_interval_minutes = max(
+                1,
+                int(getattr(config, 'scheduled_run_max_age_minutes', 360)),
+            )
+            def scheduled_run_reconcile_task():
+                reconcile_stale_scheduled_runs(
+                    _reload_runtime_config(),
+                    started_before=_PROCESS_STARTED_AT,
+                )
+
+            background_tasks.append({
+                "task": scheduled_run_reconcile_task,
+                "interval_seconds": max(30, (reconcile_interval_minutes * 60) // 2),
+                "run_immediately": False,
+                "name": "scheduled_run_reconcile",
+            })
+
             schedule_kwargs = {
                 "task": scheduled_task,
                 "schedule_time": config.schedule_time,
@@ -1649,7 +1667,7 @@ def main() -> int:
             if hasattr(config, "schedule_times"):
                 schedule_kwargs["schedule_times"] = config.schedule_times
                 schedule_kwargs["schedule_times_provider"] = schedule_times_provider
-            reconcile_stale_scheduled_runs(config)
+            reconcile_stale_scheduled_runs(config, started_before=_PROCESS_STARTED_AT)
 
             run_with_schedule(**schedule_kwargs)
             return 0

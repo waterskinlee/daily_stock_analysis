@@ -336,6 +336,7 @@ class ScheduledRunStatus(Base):
     completed_count = Column(Integer, nullable=False, default=0)
     started_at = Column(DateTime, nullable=False, index=True)
     finished_at = Column(DateTime, nullable=True)
+    last_activity_at = Column(DateTime, nullable=True)
     error = Column(Text, nullable=True)
 
 
@@ -1402,6 +1403,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             # 创建所有表
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
+            self._ensure_scheduled_run_activity_column()
             self._ensure_decision_signal_profile_schema()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
@@ -1784,6 +1786,51 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                             time.sleep(delay)
                         continue
                     raise
+
+    def _ensure_scheduled_run_activity_column(self) -> None:
+        """Add nullable last_activity_at to existing SQLite scheduled_run_status DBs."""
+        if not self._is_sqlite_engine:
+            return
+        column = "last_activity_at"
+        try:
+            existing = {
+                item["name"]
+                for item in inspect(self._engine).get_columns(ScheduledRunStatus.__tablename__)
+            }
+        except Exception as exc:
+            logger.warning(
+                "[Scheduled run] failed to inspect activity column; "
+                "skipping best-effort backfill: %s",
+                exc,
+            )
+            return
+        if column in existing:
+            return
+        for attempt in range(self._sqlite_write_retry_max + 1):
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {ScheduledRunStatus.__tablename__} "
+                        f"ADD COLUMN {column} DATETIME"
+                    )
+                return
+            except OperationalError as exc:
+                if self._is_sqlite_duplicate_column_error(exc, column):
+                    return
+                if self._is_sqlite_locked_error(exc) and attempt < self._sqlite_write_retry_max:
+                    delay = self._sqlite_write_retry_base_delay * (2 ** attempt)
+                    logger.warning(
+                        "[Scheduled run] SQLite activity column backfill locked, "
+                        "retrying: %s (%s/%s, %.2fs)",
+                        column,
+                        attempt + 1,
+                        self._sqlite_write_retry_max,
+                        delay,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+                raise
 
     def _ensure_intelligence_item_scope_values(self) -> None:
         """Backfill nullable intelligence item scopes so SQLite unique keys work."""
@@ -2345,13 +2392,15 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 row = session.execute(
                     select(ScheduledRunStatus).where(ScheduledRunStatus.run_id == normalized_run_id)
                 ).scalar_one_or_none()
+                now_value = utc_naive_now()
                 if row is None:
                     session.add(ScheduledRunStatus(
                         run_id=normalized_run_id,
                         status=normalized_status,
                         stock_count=max(0, int(stock_count or 0)),
                         completed_count=max(0, int(completed_count or 0)) if completed_count is not None else 0,
-                        started_at=utc_naive_now(),
+                        started_at=now_value,
+                        last_activity_at=now_value,
                         error=error,
                     ))
                 else:
@@ -2361,8 +2410,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         row.completed_count = max(0, int(completed_count))
                     if error is not None:
                         row.error = error
+                    row.last_activity_at = now_value
                     if normalized_status in {"completed", "failed", "cancelled"}:
-                        row.finished_at = utc_naive_now()
+                        row.finished_at = now_value
                 return True
 
             return self._run_write_transaction(
@@ -2378,29 +2428,45 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         *,
         max_age_minutes: int,
         now: Optional[datetime] = None,
+        started_before: Optional[datetime] = None,
     ) -> int:
-        """Fail stale running batches left behind by a previous scheduler process."""
+        """Fail running batches left behind by a previous scheduler process.
+
+        A running row is reconciled when either its heartbeat is older than
+        ``max_age_minutes``, or its start time precedes the current process
+        boundary (``started_before``) and no other process can still own it.
+        """
         try:
             normalized_max_age = max(1, int(max_age_minutes))
             reconciled_at = to_utc_naive_datetime(now or utc_naive_now())
             cutoff = reconciled_at - timedelta(minutes=normalized_max_age)
-            error = (
-                f"Scheduled run exceeded the {normalized_max_age}-minute maximum age "
-                "and was reconciled at scheduler startup."
-            )
+            boundary = to_utc_naive_datetime(started_before) if started_before is not None else None
 
             def _write(session: Session) -> int:
                 rows = session.execute(
                     select(ScheduledRunStatus).where(
                         ScheduledRunStatus.status == "running",
-                        ScheduledRunStatus.started_at < cutoff,
                     )
                 ).scalars().all()
+                reconciled = []
                 for row in rows:
+                    heartbeat = row.last_activity_at or row.started_at
+                    if heartbeat is not None and heartbeat < cutoff:
+                        row.error = (
+                            f"Scheduled run exceeded the {normalized_max_age}-minute maximum age "
+                            "and was reconciled at scheduler startup."
+                        )
+                        reconciled.append(row)
+                    elif boundary is not None and row.started_at is not None and row.started_at < boundary:
+                        row.error = (
+                            "Scheduled run was orphaned by a scheduler process restart "
+                            "and was reconciled at scheduler startup."
+                        )
+                        reconciled.append(row)
+                for row in reconciled:
                     row.status = "failed"
                     row.finished_at = reconciled_at
-                    row.error = error
-                return len(rows)
+                return len(reconciled)
 
             reconciled_count = self._run_write_transaction(
                 "reconcile_stale_scheduled_runs",
@@ -2408,9 +2474,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             )
             if reconciled_count:
                 logger.warning(
-                    "已将 %d 条超过 %d 分钟的遗留定时任务标记为失败",
+                    "已将 %d 条遗留定时任务标记为失败",
                     reconciled_count,
-                    normalized_max_age,
                 )
             return reconciled_count
         except Exception as exc:
@@ -2438,6 +2503,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                     event_index=max(0, int(event_index)),
                     event_json=self._safe_json_dumps(event),
                 ))
+                status_row = session.execute(
+                    select(ScheduledRunStatus).where(ScheduledRunStatus.run_id == normalized_run_id)
+                ).scalar_one_or_none()
+                if status_row is not None:
+                    status_row.last_activity_at = utc_naive_now()
                 return True
 
             return self._run_write_transaction(
@@ -2511,6 +2581,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             "completed_count": row.completed_count,
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "last_activity_at": row.last_activity_at.isoformat() if row.last_activity_at else None,
             "error": row.error,
         }
 

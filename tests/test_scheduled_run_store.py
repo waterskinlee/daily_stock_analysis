@@ -62,10 +62,14 @@ class ScheduledRunStoreTestCase(unittest.TestCase):
             assert fresh is not None
             assert completed is not None
             stale.started_at = now - timedelta(minutes=121)
+            stale.last_activity_at = now - timedelta(minutes=121)
             boundary.started_at = now - timedelta(minutes=120)
+            boundary.last_activity_at = now - timedelta(minutes=120)
             fresh.started_at = now - timedelta(minutes=30)
+            fresh.last_activity_at = now - timedelta(minutes=30)
             completed.status = "completed"
             completed.started_at = now - timedelta(minutes=300)
+            completed.last_activity_at = now - timedelta(minutes=300)
             completed.finished_at = now - timedelta(minutes=299)
             session.commit()
 
@@ -99,6 +103,60 @@ class ScheduledRunStoreTestCase(unittest.TestCase):
             (now - timedelta(minutes=299)).isoformat(),
         )
 
+    def test_reconcile_orphaned_run_started_before_process_boundary(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, 0)
+        process_boundary = now - timedelta(minutes=5)
+        for run_id in ("orphan", "current"):
+            self.assertTrue(
+                self.db.save_scheduled_run_status(run_id, "running", stock_count=4)
+            )
+
+        with self.db.get_session() as session:
+            orphan = session.get(ScheduledRunStatus, "orphan")
+            current = session.get(ScheduledRunStatus, "current")
+            assert orphan is not None
+            assert current is not None
+            orphan.started_at = now - timedelta(minutes=10)
+            orphan.last_activity_at = now - timedelta(minutes=1)
+            current.started_at = now - timedelta(minutes=1)
+            current.last_activity_at = now - timedelta(minutes=1)
+            session.commit()
+
+        reconciled = self.db.reconcile_stale_scheduled_runs(
+            max_age_minutes=120,
+            now=now,
+            started_before=process_boundary,
+        )
+
+        self.assertEqual(reconciled, 1)
+        orphan_status = self.db.get_scheduled_run_status("orphan")
+        current_status = self.db.get_scheduled_run_status("current")
+        assert orphan_status is not None
+        assert current_status is not None
+        self.assertEqual(orphan_status["status"], "failed")
+        self.assertIn("orphaned", orphan_status["error"])
+        self.assertEqual(current_status["status"], "running")
+        self.assertIsNone(current_status["finished_at"])
+
+    def test_status_and_event_writes_bump_heartbeat(self) -> None:
+        self.assertTrue(
+            self.db.save_scheduled_run_status("run-1", "running", stock_count=1)
+        )
+        row = self.db.get_scheduled_run_status("run-1")
+        assert row is not None
+        self.assertIsNotNone(row["last_activity_at"])
+        initial_heartbeat = row["last_activity_at"]
+
+        self.assertTrue(
+            self.db.save_scheduled_run_event(
+                "run-1", stock_code="600519", event_index=1, event={"kind": "provider"}
+            )
+        )
+        row = self.db.get_scheduled_run_status("run-1")
+        assert row is not None
+        self.assertIsNotNone(row["last_activity_at"])
+        assert initial_heartbeat is not None
+        self.assertGreaterEqual(row["last_activity_at"], initial_heartbeat)
 
     def test_events_roundtrip_and_since_filter(self) -> None:
         self.db.save_scheduled_run_status("run-1", "running", stock_count=1)
