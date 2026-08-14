@@ -145,10 +145,18 @@ def apply_phase_decision_guardrails(
     if phase_summary:
         phase_decision["phase_context"] = _phase_context_from_summary(phase_summary)
 
-    merged_limitations = _merge_limitations(
+    objective_limitations = _overview_limitations(overview)
+    model_limitations = _filter_model_limitations(
         _list_strings(phase_decision.get("data_limitations")),
+        phase_summary=phase_summary,
+        overview=overview,
+        objective_limitations=objective_limitations,
+        language=language,
+    )
+    merged_limitations = _merge_limitations(
+        objective_limitations,
         _phase_warning_limitations(phase_summary, language=language),
-        _overview_limitations(overview),
+        model_limitations,
     )
     phase_decision["data_limitations"] = merged_limitations
 
@@ -249,6 +257,141 @@ def _overview_limitations(overview: Optional[Mapping[str, Any]]) -> List[str]:
     if not isinstance(data_quality, Mapping):
         return []
     return _list_strings(data_quality.get("limitations"))
+
+
+_MISSING_DATA_MARKERS = (
+    "未包含",
+    "未提供",
+    "未获取",
+    "无法获取",
+    "无法获得",
+    "数据缺失",
+    "缺少",
+    "缺失",
+    "缺乏",
+    "不足",
+    "没有",
+    "missing",
+    "not available",
+    "unavailable",
+    "not provided",
+    "could not obtain",
+    "누락",
+    "없음",
+    "제공되지",
+)
+_LIMITATION_BLOCK_KEYWORDS = {
+    "quote": ("实时行情", "实时报价", "实时价格", "当前价格", "盘口", "成交额", "量比", "换手率", "振幅"),
+    "daily_bars": ("日线", "日 K", "日K", "收盘价", "开高低收", "OHLC", "daily bar"),
+    "technical": ("技术指标", "均线", "MACD", "RSI", "KDJ", "布林", "technical indicator"),
+    "news": ("新闻", "舆情", "资讯", "news", "sentiment"),
+    "fundamentals": (
+        "主力资金",
+        "资金净流",
+        "融资融券",
+        "基本面",
+        "财务",
+        "估值",
+        "机构持仓",
+        "大宗交易",
+        "股东行为",
+        "capital flow",
+        "margin balance",
+        "fundamental",
+    ),
+    "chip": ("筹码", "chip distribution"),
+}
+_POSTMARKET_FALSE_LIMITATION_MARKERS = (
+    "尚未收盘",
+    "市场未收盘",
+    "当日未收盘",
+    "收盘数据尚未",
+    "market has not closed",
+    "before market close",
+    "장 마감 전",
+)
+_INTRADAY_DETAIL_MARKERS = (
+    "分时",
+    "逐笔",
+    "分钟级",
+    "intraday series",
+    "tick data",
+    "minute bars",
+    "분봉",
+    "체결",
+)
+
+
+def _filter_model_limitations(
+    limitations: List[str],
+    *,
+    phase_summary: Optional[Mapping[str, Any]],
+    overview: Optional[Mapping[str, Any]],
+    objective_limitations: List[str],
+    language: str,
+) -> List[str]:
+    """Drop model claims contradicted by deterministic phase/context metadata."""
+    phase = _safe_text(phase_summary.get("phase")) if isinstance(phase_summary, Mapping) else ""
+    block_statuses = _overview_block_statuses(overview)
+    objective_keys = {
+        item.split(":", 1)[0].strip()
+        for item in objective_limitations
+        if ":" in item
+    }
+    filtered: List[str] = []
+    for limitation in limitations:
+        lowered = limitation.lower()
+        if phase == "postmarket" and any(
+            marker.lower() in lowered for marker in _POSTMARKET_FALSE_LIMITATION_MARKERS
+        ):
+            continue
+        claims_missing = any(marker.lower() in lowered for marker in _MISSING_DATA_MARKERS)
+        if claims_missing and any(
+            marker.lower() in lowered for marker in _INTRADAY_DETAIL_MARKERS
+        ):
+            canonical = _reason_text(
+                language,
+                en="Minute/tick-level intraday series are unavailable; intraday path and persistence cannot be verified.",
+                zh="未提供分钟级分时/逐笔成交序列，无法核验盘中路径与持续性",
+                ko="분봉/체결 단위 장중 시계열이 없어 장중 경로와 지속성을 확인할 수 없습니다.",
+            )
+            if canonical not in filtered:
+                filtered.append(canonical)
+            continue
+        if claims_missing:
+            contradicted = False
+            for key, keywords in _LIMITATION_BLOCK_KEYWORDS.items():
+                if not any(keyword.lower() in lowered for keyword in keywords):
+                    continue
+                status = block_statuses.get(key)
+                if status == "available" or (
+                    status == "partial" and key in objective_keys
+                ):
+                    contradicted = True
+                    break
+            if contradicted:
+                continue
+        filtered.append(limitation)
+    return filtered
+
+
+def _overview_block_statuses(
+    overview: Optional[Mapping[str, Any]],
+) -> Dict[str, str]:
+    if not isinstance(overview, Mapping):
+        return {}
+    blocks = overview.get("blocks")
+    if not isinstance(blocks, list):
+        return {}
+    statuses: Dict[str, str] = {}
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        key = _safe_text(block.get("key"))
+        status = _safe_text(block.get("status"))
+        if key and status:
+            statuses[key] = status
+    return statuses
 
 
 def _phase_warning_limitations(summary: Optional[Mapping[str, Any]], *, language: str) -> List[str]:

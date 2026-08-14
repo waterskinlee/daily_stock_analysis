@@ -323,3 +323,47 @@ def test_guardrail_creates_dashboard_for_agent_compatible_result_object() -> Non
     assert adjustments == []
     assert result.dashboard["phase_decision"]["phase_context"]["phase"] == "intraday"
     assert result.dashboard["phase_decision"]["watch_conditions"] == []
+
+
+def test_guardrail_replaces_contradicted_model_limitations_with_context_facts() -> None:
+    result = _result(
+        operation_advice="持有",
+        decision_type="hold",
+        dashboard={
+            "phase_decision": {
+                "data_limitations": [
+                    "未包含主力资金净流入/流出及融资融券余额数据",
+                    "未提供分钟级分时成交数据，无法验证盘中持续性",
+                    "尚未收盘，无法获得完整日线",
+                ]
+            }
+        },
+    )
+    overview = _overview("available")
+    overview["blocks"].append(
+        {
+            "key": "fundamentals",
+            "label": "基本面",
+            "status": "partial",
+            "source": "market_structure",
+            "warnings": [],
+            "missing_reasons": [],
+        }
+    )
+    overview["data_quality"]["limitations"] = [
+        "fundamentals: partial (institution)"
+    ]
+
+    apply_phase_decision_guardrails(
+        result,
+        market_phase_summary=_phase("postmarket"),
+        analysis_context_pack_overview=overview,
+        report_language="zh",
+    )
+
+    limitations = result.dashboard["phase_decision"]["data_limitations"]
+    assert "fundamentals: partial (institution)" in limitations
+    assert "未包含主力资金净流入/流出及融资融券余额数据" not in limitations
+    assert "尚未收盘，无法获得完整日线" not in limitations
+    assert "未提供分钟级分时/逐笔成交序列，无法核验盘中路径与持续性" in limitations
+    assert "未提供分钟级分时成交数据，无法验证盘中持续性" not in limitations

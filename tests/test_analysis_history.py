@@ -1775,6 +1775,53 @@ class AnalysisHistoryTestCase(unittest.TestCase):
 
         self.assertIn("**🟡 Avoid** | Bullish", markdown)
         self.assertNotIn("Strong Buy", markdown)
+    def test_history_markdown_renders_phase_and_previous_watch_sections(self) -> None:
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=52,
+            trend_prediction="震荡",
+            operation_advice="持有观察",
+            analysis_summary="等待确认",
+            report_language="zh",
+            dashboard={
+                "core_conclusion": {"one_sentence": "等待确认"},
+                "phase_decision": {
+                    "action_window": "盘后复盘",
+                    "immediate_action": "保持观望",
+                    "watch_conditions": ["放量突破 100"],
+                    "next_check_time": "下一交易日收盘",
+                    "confidence_reason": "趋势尚未确认",
+                    "data_limitations": ["资金流数据截至前一交易日"],
+                },
+                "previous_watch_verification": {
+                    "has_previous": True,
+                    "previous_analysis_time": "2026-08-12 18:00",
+                    "items": [
+                        {
+                            "condition": "跌破 95 止损",
+                            "status": "not_fulfilled",
+                            "evidence": "当日最低价 96.2，未跌破 95",
+                            "impact": "止损未触发，维持观察",
+                        }
+                    ],
+                    "summary": "上次止损条件未触发",
+                },
+            },
+        )
+
+        markdown = HistoryService(self.db)._generate_single_stock_markdown(
+            result,
+            MagicMock(created_at=datetime(2026, 8, 13, 18, 0)),
+        )
+
+        self.assertIn("盘中决策护栏", markdown)
+        self.assertIn("资金流数据截至前一交易日", markdown)
+        self.assertIn("上次观察点核对", markdown)
+        self.assertIn("上次分析时间", markdown)
+        self.assertIn("2026-08-12 18:00", markdown)
+        self.assertIn("❌ 未兑现", markdown)
+        self.assertIn("当日最低价 96.2，未跌破 95", markdown)
 
     def test_history_markdown_handles_legacy_strategy_synthesis_shapes(self) -> None:
         service = HistoryService(self.db)

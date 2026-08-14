@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from src.schemas.analysis_context_pack import (
     AnalysisContextBlock,
@@ -51,6 +51,7 @@ _AUX_LIMITATION_STATUSES = {
     ContextFieldStatus.FETCH_FAILED,
     ContextFieldStatus.FALLBACK,
     ContextFieldStatus.STALE,
+    ContextFieldStatus.PARTIAL,
 }
 
 
@@ -540,7 +541,7 @@ def _quality_block_status(
         return ContextFieldStatus.MISSING
 
 
-def _quality_level(score: int) -> str:
+def _quality_level(score: int) -> Literal["good", "usable", "limited", "poor"]:
     if score >= 85:
         return "good"
     if score >= 70:
@@ -560,7 +561,19 @@ def _quality_limitations(blocks: Dict[str, AnalysisContextBlock]) -> List[str]:
     for key in ("news", "fundamentals", "chip"):
         status = _quality_block_status(blocks, key)
         if status in _AUX_LIMITATION_STATUSES:
-            limitations.append(f"{key}: {status.value}")
+            limitation = f"{key}: {status.value}"
+            if key == "fundamentals" and status == ContextFieldStatus.PARTIAL:
+                block = blocks.get(key)
+                coverage = block.metadata.get("coverage") if block is not None else None
+                if isinstance(coverage, Mapping):
+                    partial_keys = [
+                        str(name)
+                        for name, value in coverage.items()
+                        if str(value or "").strip().lower() not in {"ok", "empty", "not_supported"}
+                    ]
+                    if partial_keys:
+                        limitation = f"{limitation} ({', '.join(partial_keys[:3])})"
+            limitations.append(limitation)
 
     return limitations[:5]
 

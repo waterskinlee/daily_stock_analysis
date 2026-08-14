@@ -12,7 +12,7 @@ markdown report paths show the same decision context.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping
 
 from src.report_language import (
     get_report_labels,
@@ -39,6 +39,116 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return {str(key): val for key, val in value.items()}
 
 
+def _list_strings(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _escape_table_cell(value: Any, fallback: str = "N/A") -> str:
+    text = str(value or "").strip() or fallback
+    return text.replace("|", "\\|")
+
+
+def render_phase_decision_section(
+    dashboard: Any,
+    report_language: str = "zh",
+) -> List[str]:
+    """Render the phase-aware action block shared by report surfaces."""
+    dashboard = _mapping(dashboard)
+    phase_decision = _mapping(dashboard.get("phase_decision"))
+    watch_conditions = _list_strings(phase_decision.get("watch_conditions"))
+    data_limitations = _list_strings(phase_decision.get("data_limitations"))
+    text_keys = ("action_window", "immediate_action", "next_check_time", "confidence_reason")
+    if not any(str(phase_decision.get(key) or "").strip() for key in text_keys) and not (
+        watch_conditions or data_limitations
+    ):
+        return []
+
+    labels = get_report_labels(normalize_report_language(report_language))
+    lines = [
+        f"### 🛡️ {labels['phase_decision_heading']}",
+        "",
+        f"| {labels['action_window_label']} | {labels['immediate_action_label']} | {labels['next_check_time_label']} |",
+        "|---------|---------|---------|",
+        f"| {_escape_table_cell(phase_decision.get('action_window'))} | "
+        f"{_escape_table_cell(phase_decision.get('immediate_action'))} | "
+        f"{_escape_table_cell(phase_decision.get('next_check_time'))} |",
+        "",
+    ]
+    if watch_conditions:
+        lines.append(f"**{labels['watch_conditions_label']}**:")
+        lines.extend(f"- {condition}" for condition in watch_conditions)
+        lines.append("")
+    confidence_reason = str(phase_decision.get("confidence_reason") or "").strip()
+    if confidence_reason:
+        lines.extend([f"**{labels['confidence_reason_label']}**: {confidence_reason}", ""])
+    if data_limitations:
+        lines.append(f"**{labels['data_limitations_label']}**:")
+        lines.extend(f"- {limitation}" for limitation in data_limitations)
+        lines.append("")
+    return lines
+
+
+def render_previous_watch_verification_section(
+    dashboard: Any,
+    report_language: str = "zh",
+) -> List[str]:
+    """Render itemized previous-watch conclusions shared by report surfaces."""
+    dashboard = _mapping(dashboard)
+    verification = _mapping(dashboard.get("previous_watch_verification"))
+    if not verification:
+        return []
+    labels = get_report_labels(normalize_report_language(report_language))
+    has_previous = verification.get("has_previous")
+    if has_previous is False:
+        return [
+            f"### ⏮️ {labels['previous_watch_heading']}",
+            "",
+            f"**{labels['previous_watch_no_previous']}**",
+            "",
+        ]
+
+    items = [item for item in verification.get("items") or [] if isinstance(item, Mapping)]
+    summary = str(verification.get("summary") or "").strip()
+    if not items and not summary:
+        return []
+    status_map = {
+        "fulfilled": f"✅ {labels['previous_watch_fulfilled']}",
+        "not_fulfilled": f"❌ {labels['previous_watch_not_fulfilled']}",
+        "partially_fulfilled": f"⚠️ {labels['previous_watch_partially_fulfilled']}",
+        "stale": f"⏳ {labels['previous_watch_stale']}",
+    }
+    lines = [f"### ⏮️ {labels['previous_watch_heading']}", ""]
+    previous_analysis_time = str(verification.get("previous_analysis_time") or "").strip()
+    if previous_analysis_time:
+        time_label = {"en": "Previous analysis", "ko": "이전 분석", "zh": "上次分析时间"}.get(
+            normalize_report_language(report_language),
+            "上次分析时间",
+        )
+        lines.extend([f"**{time_label}**: {previous_analysis_time}", ""])
+    if items:
+        lines.extend(
+            [
+                f"| {labels['previous_watch_condition_label']} | {labels['previous_watch_status_label']} | "
+                f"{labels['previous_watch_evidence_label']} | {labels['previous_watch_impact_label']} |",
+                "|---------|---------|---------|---------|",
+            ]
+        )
+        for item in items:
+            raw_status = str(item.get("status") or "").strip()
+            lines.append(
+                f"| {_escape_table_cell(item.get('condition'))} | "
+                f"{_escape_table_cell(status_map.get(raw_status, raw_status))} | "
+                f"{_escape_table_cell(item.get('evidence'))} | "
+                f"{_escape_table_cell(item.get('impact'))} |"
+            )
+        lines.append("")
+    if summary:
+        lines.extend([f"**{labels['previous_watch_summary_label']}**: {summary}", ""])
+    return lines
+
+
 def render_decision_context_section(
     dashboard: Any,
     report_language: str = "zh",
@@ -63,8 +173,9 @@ def render_decision_context_section(
     conflict_count = synthesis.get("conflict_count")
     supporting = synthesis.get("supporting_skills")
     opposing = synthesis.get("opposing_skills")
-    decision_path = explanation.get("decision_path")
-    has_decision_path = isinstance(decision_path, str) and bool(decision_path)
+    decision_path_value = explanation.get("decision_path")
+    decision_path = decision_path_value if isinstance(decision_path_value, str) else ""
+    has_decision_path = bool(decision_path)
     has_synthesis = bool(
         final_signal
         and str(final_signal) not in ("", "N/A", "None")
@@ -121,7 +232,6 @@ def render_decision_context_section(
         lines.append(f"- **{labels.get('degraded_synthesis_label', '降级合成')}**: {labels.get('degraded_synthesis_warning', '本次分析存在数据降级或阶段异常，结论稳健性下降。')}")
         lines.append("")
 
-    decision_path = explanation.get("decision_path")
     if has_decision_path:
         label_key = _DECISION_PATH_LABELS.get(decision_path, "decision_path_label")
         path_label = labels.get(label_key) or decision_path

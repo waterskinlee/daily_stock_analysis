@@ -1104,133 +1104,29 @@ class NotificationService(
                 return value[len(prefix):]
         return value
 
-    @staticmethod
-    def _phase_decision_list(value: Any) -> List[str]:
-        if not isinstance(value, list):
-            return []
-        return [str(item).strip() for item in value if str(item).strip()]
-
-    @classmethod
-    def _phase_decision_has_content(cls, phase_decision: Dict[str, Any]) -> bool:
-        text_keys = (
-            "action_window",
-            "immediate_action",
-            "next_check_time",
-            "confidence_reason",
-        )
-        if any(str(phase_decision.get(key) or "").strip() for key in text_keys):
-            return True
-        return bool(
-            cls._phase_decision_list(phase_decision.get("watch_conditions"))
-            or cls._phase_decision_list(phase_decision.get("data_limitations"))
-        )
-
     def _append_phase_decision_block(
         self,
         report_lines: List[str],
         dashboard: Dict[str, Any],
-        labels: Dict[str, str],
+        report_language: str,
     ) -> None:
-        phase_decision = dashboard.get("phase_decision") if dashboard else None
-        if not isinstance(phase_decision, dict):
-            return
-        if not self._phase_decision_has_content(phase_decision):
-            return
+        from src.decision_context import render_phase_decision_section
 
-        watch_conditions = self._phase_decision_list(phase_decision.get("watch_conditions"))
-        data_limitations = self._phase_decision_list(phase_decision.get("data_limitations"))
-
-        report_lines.extend([
-            f"### 🛡️ {labels['phase_decision_heading']}",
-            "",
-            f"| {labels['action_window_label']} | {labels['immediate_action_label']} | {labels['next_check_time_label']} |",
-            "|---------|---------|---------|",
-            f"| {phase_decision.get('action_window') or 'N/A'} | "
-            f"{phase_decision.get('immediate_action') or 'N/A'} | "
-            f"{phase_decision.get('next_check_time') or 'N/A'} |",
-            "",
-        ])
-
-        if watch_conditions:
-            report_lines.append(f"**{labels['watch_conditions_label']}**:")
-            for condition in watch_conditions:
-                report_lines.append(f"- {condition}")
-            report_lines.append("")
-
-        confidence_reason = str(phase_decision.get("confidence_reason") or "").strip()
-        if confidence_reason:
-            report_lines.extend([
-                f"**{labels['confidence_reason_label']}**: {confidence_reason}",
-                "",
-            ])
-
-        if data_limitations:
-            report_lines.append(f"**{labels['data_limitations_label']}**:")
-            for limitation in data_limitations:
-                report_lines.append(f"- {limitation}")
-            report_lines.append("")
-
-    @staticmethod
-    def _pwv_items(value: Any) -> List[Dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        return [item for item in value if isinstance(item, dict)]
+        report_lines.extend(
+            render_phase_decision_section(dashboard, report_language)
+        )
 
     def _append_previous_watch_verification_block(
         self,
         report_lines: List[str],
         dashboard: Dict[str, Any],
-        labels: Dict[str, str],
+        report_language: str,
     ) -> None:
-        pwv = dashboard.get("previous_watch_verification") if dashboard else None
-        if not isinstance(pwv, dict):
-            return
-        has_previous = pwv.get("has_previous")
-        if has_previous is False:
-            report_lines.extend([
-                f"### ⏮️ {labels['previous_watch_heading']}",
-                "",
-                f"**{labels['previous_watch_no_previous']}**",
-                "",
-            ])
-            return
-        items = self._pwv_items(pwv.get("items"))
-        summary = str(pwv.get("summary") or "").strip()
-        if not items and not summary:
-            return
+        from src.decision_context import render_previous_watch_verification_section
 
-        status_map = {
-            "fulfilled": f"✅ {labels['previous_watch_fulfilled']}",
-            "not_fulfilled": f"❌ {labels['previous_watch_not_fulfilled']}",
-            "partially_fulfilled": f"⚠️ {labels['previous_watch_partially_fulfilled']}",
-            "stale": f"⏳ {labels['previous_watch_stale']}",
-        }
-
-        report_lines.extend([
-            f"### ⏮️ {labels['previous_watch_heading']}",
-            "",
-            f"| {labels['previous_watch_condition_label']} | {labels['previous_watch_status_label']} | {labels['previous_watch_evidence_label']} | {labels['previous_watch_impact_label']} |",
-            "|---------|---------|---------|---------|",
-        ])
-        for item in items:
-            condition = str(item.get("condition") or "").strip() or "N/A"
-            status_raw = str(item.get("status") or "").strip()
-            status = status_map.get(status_raw, status_raw or "N/A")
-            evidence = str(item.get("evidence") or "").strip() or "N/A"
-            impact = str(item.get("impact") or "").strip() or "N/A"
-            condition = condition.replace("|", "\\|")
-            evidence = evidence.replace("|", "\\|")
-            impact = impact.replace("|", "\\|")
-            report_lines.append(
-                f"| {condition} | {status} | {evidence} | {impact} |"
-            )
-        report_lines.append("")
-
-        if summary:
-            report_lines.extend([
-                f"**{labels['previous_watch_summary_label']}**: {summary}",
-                "",
-            ])
+        report_lines.extend(
+            render_previous_watch_verification_section(dashboard, report_language)
+        )
 
     def _get_display_operation_advice(
         self,
@@ -1515,8 +1411,8 @@ class NotificationService(
                                 "",
                             ])
 
-                self._append_phase_decision_block(report_lines, dashboard, labels)
-                self._append_previous_watch_verification_block(report_lines, dashboard, labels)
+                self._append_phase_decision_block(report_lines, dashboard, report_language)
+                self._append_previous_watch_verification_block(report_lines, dashboard, report_language)
 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}

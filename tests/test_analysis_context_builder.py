@@ -447,6 +447,23 @@ def test_data_quality_scores_fixed_blocks_and_limits_auxiliary_missing() -> None
     assert failed_fundamentals.data_quality.overall_score == 92
     assert failed_fundamentals.data_quality.level == "good"
     assert failed_fundamentals.data_quality.limitations == ["fundamentals: fetch_failed"]
+    partial_fundamentals = AnalysisContextBuilder.build(
+        _artifacts(
+            fundamental_context={
+                "status": "partial",
+                "coverage": {
+                    "valuation": "ok",
+                    "institution": "partial",
+                    "capital_flow": "ok",
+                },
+                "source_chain": [
+                    {"provider": "fundamental_pipeline", "result": "partial"}
+                ],
+            }
+        )
+    )
+    self_limitation = partial_fundamentals.data_quality.limitations
+    assert self_limitation == ["fundamentals: partial (institution)"]
 
     blank_news = AnalysisContextBuilder.build(
         _artifacts(news_context="  ", news_result_count=0)

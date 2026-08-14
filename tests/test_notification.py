@@ -915,6 +915,45 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("quote: stale", out)
 
     @mock.patch("src.notification.get_config")
+    def test_generate_dashboard_report_shows_previous_watch_details(
+        self, mock_get_config: mock.MagicMock
+    ):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="等待确认",
+            dashboard={
+                "core_conclusion": {"one_sentence": "等待确认"},
+                "previous_watch_verification": {
+                    "has_previous": True,
+                    "previous_analysis_time": "2026-08-12 18:00",
+                    "items": [
+                        {
+                            "condition": "量比回升至1以上",
+                            "status": "not_fulfilled",
+                            "evidence": "量比 0.89；阈值 1（要求>=），未满足",
+                            "impact": "不触发对应交易动作。",
+                        }
+                    ],
+                    "summary": "1 个未兑现。",
+                },
+            },
+        )
+
+        out = service.generate_dashboard_report([result], report_date="2026-08-13")
+
+        self.assertIn("上次观察点核对", out)
+        self.assertIn("上次分析时间", out)
+        self.assertIn("2026-08-12 18:00", out)
+        self.assertIn("量比 0.89", out)
+        self.assertIn("❌ 未兑现", out)
+
+    @mock.patch("src.notification.get_config")
     def test_generate_dashboard_report_skips_context_only_phase_decision_default_renderer(
         self, mock_get_config: mock.MagicMock
     ):

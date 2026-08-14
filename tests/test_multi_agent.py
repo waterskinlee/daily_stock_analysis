@@ -1203,6 +1203,20 @@ class TestOrchestratorModes(unittest.TestCase):
         self.assertNotIn("analysis_context_pack_summary", ctx.data)
         self.assertNotIn("market_structure_context", ctx.data)
 
+    def test_build_context_propagates_previous_analysis_context_to_meta(self):
+        orch = self._make_orchestrator()
+        previous_section = "## ⏮️ 上次分析观察点\n- 上次观察条件：跌破 100 止损"
+
+        ctx = orch._build_context(
+            "Analyze 600519",
+            context={
+                "stock_code": "600519",
+                "previous_analysis_context": previous_section,
+            },
+        )
+
+        self.assertEqual(ctx.meta["previous_analysis_context"], previous_section)
+
     def test_build_context_extracts_code_from_query(self):
         orch = self._make_orchestrator()
         ctx = orch._build_context("分析600519的走势")
@@ -2416,6 +2430,27 @@ class TestDecisionAgentChatMode(unittest.TestCase):
         self.assertIn("watch_conditions", prompt)
         self.assertIn("data_limitations", prompt)
         self.assertIn("confidence_level", prompt)
+
+    def test_decision_agent_messages_include_previous_watch_section(self):
+        from src.agent.agents.decision_agent import DecisionAgent
+
+        ctx = AgentContext(query="分析 600519", stock_code="600519")
+        ctx.meta["report_language"] = "zh"
+        ctx.meta["previous_analysis_context"] = (
+            "## ⏮️ 上次分析观察点（请核对兑现情况）\n"
+            "- 上次观察条件：跌破 100 止损\n"
+            "> 必须输出 dashboard.previous_watch_verification"
+        )
+
+        messages = DecisionAgent(
+            tool_registry=MagicMock(),
+            llm_adapter=MagicMock(),
+        )._build_messages(ctx)
+        combined = "\n".join(str(message.get("content", "")) for message in messages)
+
+        self.assertEqual(combined.count("上次分析观察点"), 1)
+        self.assertIn("跌破 100 止损", combined)
+        self.assertIn("previous_watch_verification", combined)
 
 
 class TestTechnicalAgentSkillPolicy(unittest.TestCase):

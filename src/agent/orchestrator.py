@@ -1449,7 +1449,9 @@ class AgentOrchestrator:
             analysis_context_pack_summary = context.get("analysis_context_pack_summary")
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 ctx.meta["analysis_context_pack_summary"] = analysis_context_pack_summary
-
+            previous_analysis_context = context.get("previous_analysis_context")
+            if isinstance(previous_analysis_context, str) and previous_analysis_context.strip():
+                ctx.meta["previous_analysis_context"] = previous_analysis_context
             # Pre-populate data fields that the caller already has
             for data_key in (
                 "realtime_quote",

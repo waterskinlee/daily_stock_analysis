@@ -168,6 +168,12 @@ should sum to 100; all-zero means no effective signal and must not be faked.
 - `decision_type` 必须保持为 `buy|hold|sell`。
 - 所有面向用户的人类可读文本值必须使用中文。
 """
+    def _build_messages(self, ctx: AgentContext) -> List[dict]:
+        messages = super()._build_messages(ctx)
+        previous_section = ctx.meta.get("previous_analysis_context")
+        if isinstance(previous_section, str) and previous_section.strip():
+            messages.insert(-1, {"role": "user", "content": previous_section})
+        return messages
 
     def build_user_message(self, ctx: AgentContext) -> str:
         if self._is_chat_mode(ctx):

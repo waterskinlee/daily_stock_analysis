@@ -504,17 +504,473 @@ def check_content_integrity(
     return len(missing) == 0, missing
 
 
+_PRICE_WATCH_PATTERN = re.compile(
+    r"(不跌破|未跌破|不破|跌破|低于|站稳|站上|突破|高于|达到|收复|回到)"
+    r"\s*(?:MA\d+\s*(?:[=:：]\s*|\(\s*)?)?([0-9]+(?:\.[0-9]+)?)"
+)
+_LABELED_PRICE_WATCH_PATTERN = re.compile(
+    r"(?:上次)?(止损位|止盈位|理想买点|次优买点)\s*[:：=]?\s*([0-9]+(?:\.[0-9]+)?)"
+)
+_VOLUME_RATIO_COMPARE_PATTERN = re.compile(
+    r"(?:量比|量能)[^0-9]{0,12}?(不低于|不少于|不高于|不超过|高于|大于|低于|小于|达到|"
+    r">=|<=|>|<|≥|≤)\s*([0-9]+(?:\.[0-9]+)?)"
+)
+_VOLUME_RATIO_SUFFIX_PATTERN = re.compile(
+    r"量比[^0-9]{0,12}?([0-9]+(?:\.[0-9]+)?)\s*(以上|以下)"
+)
+_RANGE_POSITION_PATTERN = re.compile(
+    r"(?:振幅|日内区间)(?:上方|上部|高位)\s*([0-9]+(?:\.[0-9]+)?)\s*%"
+)
+_WATCH_PRICE_HINTS = (
+    "跌破",
+    "不破",
+    "站稳",
+    "站上",
+    "突破",
+    "高于",
+    "低于",
+    "收复",
+    "止损",
+    "止盈",
+    "支撑",
+    "压力",
+    "阻力",
+    "箱底",
+    "箱顶",
+)
+_WATCH_UNRESOLVED_HINTS = (
+    "连续",
+    "分钟",
+    "回踩",
+    "反抽",
+    "反弹",
+    "企稳",
+    "收出阳线",
+    "反包",
+    "跳空缺口",
+    "MACD",
+    "均线转",
+    "融资盘",
+    "融资资金",
+    "筹码",
+    "业绩",
+    "订单",
+    "公告",
+    "板块",
+    "大单",
+)
+
+
+def _coerce_price(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(str(value).replace(",", "").replace("元", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _first_watch_number(*values: Any) -> Optional[float]:
+    for value in values:
+        parsed = _coerce_price(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_watch_thresholds(condition: str) -> List[Tuple[str, float]]:
+    """Extract conservative price predicates from a previous watch condition."""
+    matches: List[Tuple[str, float]] = []
+    for match in _PRICE_WATCH_PATTERN.finditer(condition):
+        prefix = condition[:match.start()]
+        clause_prefix = re.split(r"(?:并且|同时|且|并|或)|[，,。；;]", prefix)[-1]
+        if any(hint in clause_prefix for hint in ("量比", "量能", "换手")):
+            continue
+        try:
+            matches.append((match.group(1), float(match.group(2))))
+        except (TypeError, ValueError):
+            continue
+    for match in _LABELED_PRICE_WATCH_PATTERN.finditer(condition):
+        operator = {
+            "止损位": "触及止损",
+            "止盈位": "触及止盈",
+            "理想买点": "触及买点",
+            "次优买点": "触及买点",
+        }[match.group(1)]
+        try:
+            candidate = (operator, float(match.group(2)))
+        except (TypeError, ValueError):
+            continue
+        if candidate not in matches:
+            matches.append(candidate)
+    return matches[:4]
+
+
+def _extract_volume_ratio_predicate(condition: str) -> Optional[Tuple[str, float]]:
+    normalized = (
+        condition.replace("＞", ">")
+        .replace("＜", "<")
+        .replace("＝", "=")
+    )
+    match = _VOLUME_RATIO_COMPARE_PATTERN.search(normalized)
+    if match:
+        operator = match.group(1)
+        target = float(match.group(2))
+        if operator in {"不低于", "不少于", "高于", "大于", "达到", ">=", ">", "≥"}:
+            return ">=", target
+        return "<=", target
+    match = _VOLUME_RATIO_SUFFIX_PATTERN.search(normalized)
+    if match:
+        return (">=" if match.group(2) == "以上" else "<="), float(match.group(1))
+    if "量比" in normalized:
+        number_match = re.search(r"量比[^0-9]{0,12}?([0-9]+(?:\.[0-9]+)?)", normalized)
+        if number_match:
+            return ">=", float(number_match.group(1))
+    if "放量" in normalized or re.search(r"量能.{0,4}(?:放大|回升)", normalized):
+        return ">=", 1.0
+    if "缩量" in normalized or re.search(r"量能.{0,4}(?:萎缩|下降)", normalized):
+        return "<=", 1.0
+    return None
+
+
+def _watch_context_facts(
+    result: "AnalysisResult",
+    current_analysis_context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    context = current_analysis_context if isinstance(current_analysis_context, dict) else {}
+    nested = context.get("enhanced_context")
+    nested = nested if isinstance(nested, dict) else {}
+    quote_candidates = (
+        context.get("realtime_quote"),
+        context.get("realtime"),
+        nested.get("realtime_quote"),
+        nested.get("realtime"),
+    )
+    quote = next((value for value in quote_candidates if isinstance(value, dict)), {})
+
+    dashboard = getattr(result, "dashboard", None)
+    dashboard = dashboard if isinstance(dashboard, dict) else {}
+    data_perspective = dashboard.get("data_perspective")
+    data_perspective = data_perspective if isinstance(data_perspective, dict) else {}
+    price_position = data_perspective.get("price_position")
+    price_position = price_position if isinstance(price_position, dict) else {}
+    volume_analysis = data_perspective.get("volume_analysis")
+    volume_analysis = volume_analysis if isinstance(volume_analysis, dict) else {}
+    snapshot = getattr(result, "market_snapshot", None)
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    today = context.get("today")
+    today = today if isinstance(today, dict) else {}
+
+    fundamental_candidates = (
+        context.get("fundamental_context"),
+        nested.get("fundamental_context"),
+        getattr(result, "fundamental_context", None),
+    )
+    fundamental = next(
+        (value for value in fundamental_candidates if isinstance(value, dict)),
+        {},
+    )
+    capital_flow = fundamental.get("capital_flow")
+    capital_flow = capital_flow if isinstance(capital_flow, dict) else {}
+    capital_data = capital_flow.get("data")
+    capital_data = capital_data if isinstance(capital_data, dict) else capital_flow
+    stock_flow = capital_data.get("stock_flow")
+    stock_flow = stock_flow if isinstance(stock_flow, dict) else {}
+
+    return {
+        "current_price": _first_watch_number(
+            quote.get("price"),
+            getattr(result, "current_price", None),
+            price_position.get("current_price"),
+            today.get("close"),
+            snapshot.get("price"),
+            snapshot.get("close"),
+        ),
+        "high": _first_watch_number(quote.get("high"), today.get("high"), snapshot.get("high")),
+        "low": _first_watch_number(quote.get("low"), today.get("low"), snapshot.get("low")),
+        "volume_ratio": _first_watch_number(
+            quote.get("volume_ratio"),
+            volume_analysis.get("volume_ratio"),
+            snapshot.get("volume_ratio"),
+        ),
+        "main_net_inflow": _first_watch_number(stock_flow.get("main_net_inflow")),
+        "inflow_5d": _first_watch_number(stock_flow.get("inflow_5d")),
+        "inflow_10d": _first_watch_number(stock_flow.get("inflow_10d")),
+    }
+
+
+def _format_watch_flow(value: Optional[float], *, period: str, report_language: str) -> str:
+    if value is None:
+        return ""
+    direction = "inflow" if value > 0 else "outflow" if value < 0 else "flat"
+    if report_language == "en":
+        label = {"inflow": "net inflow", "outflow": "net outflow", "flat": "flat"}[direction]
+        period_label = {"当日": "Today", "5日": "5-day", "10日": "10-day"}.get(period, period)
+        return f"{period_label} main-force {label} CNY {abs(value) / 1_000_000_000:.2f}bn"
+    amount = abs(value) / 100_000_000
+    if report_language == "ko":
+        label = {"inflow": "순유입", "outflow": "순유출", "flat": "보합"}[direction]
+        period_label = {"当日": "당일", "5日": "5일", "10日": "10일"}.get(period, period)
+        return f"{period_label} 주력 {label} {amount:.2f}억 위안"
+    label = {"inflow": "净流入", "outflow": "净流出", "flat": "持平"}[direction]
+    prefix = "当日主力" if period == "当日" else period
+    return f"{prefix}{label} {amount:.2f} 亿元"
+
+
+def _price_observation_value(
+    operator: str,
+    *,
+    current_price: Optional[float],
+    high: Optional[float],
+    low: Optional[float],
+    condition: str,
+) -> Optional[float]:
+    if operator in {"跌破", "低于", "不跌破", "未跌破", "不破", "触及止损", "触及买点"}:
+        if "收盘" not in condition and low is not None:
+            return low
+    if operator == "触及止盈" and high is not None:
+        return high
+    return current_price
+
+
+def _build_watch_verification_observation(
+    condition: str,
+    *,
+    facts: Dict[str, Any],
+    phase: str,
+    report_language: str,
+) -> Tuple[str, str, str]:
+    """Return a conservative status/evidence/impact triple from runtime facts."""
+    current_price = _coerce_price(facts.get("current_price"))
+    high = _coerce_price(facts.get("high"))
+    low = _coerce_price(facts.get("low"))
+    volume_ratio = _coerce_price(facts.get("volume_ratio"))
+    thresholds = _extract_watch_thresholds(condition)
+    known_results: List[bool] = []
+    unresolved: List[str] = []
+    evidence_parts: List[str] = []
+
+    price_results: List[bool] = []
+    price_labels: List[str] = []
+    for operator, target in thresholds:
+        observed = _price_observation_value(
+            operator,
+            current_price=current_price,
+            high=high,
+            low=low,
+            condition=condition,
+        )
+        if observed is None:
+            unresolved.append("price")
+            continue
+        if operator in {"跌破", "低于", "触及止损", "触及买点"}:
+            matched = observed <= target
+        elif operator in {"不跌破", "未跌破", "不破"}:
+            matched = observed >= target
+        else:
+            matched = observed >= target
+        price_results.append(matched)
+        observed_label = _localized_text(
+            report_language,
+            en=f"observed {observed:g}",
+            zh=f"观测 {observed:g}",
+            ko=f"관측 {observed:g}",
+        )
+        price_labels.append(f"{operator}{target:g}（{observed_label}）")
+    if price_results:
+        if all(price_results):
+            known_results.append(True)
+            price_state = _localized_text(
+                report_language,
+                en="price condition met",
+                zh="价格条件已满足",
+                ko="가격 조건 충족",
+            )
+        elif not any(price_results):
+            known_results.append(False)
+            price_state = _localized_text(
+                report_language,
+                en="price condition not met",
+                zh="价格条件未满足",
+                ko="가격 조건 미충족",
+            )
+        else:
+            unresolved.append("mixed_price_conditions")
+            price_state = _localized_text(
+                report_language,
+                en="price conditions are mixed",
+                zh="多个价格条件结果不一致",
+                ko="가격 조건 결과 혼재",
+            )
+        separator = ": " if report_language == "en" else "："
+        evidence_parts.append(f"{price_state}{separator}{', '.join(price_labels)}")
+    elif any(hint in condition for hint in _WATCH_PRICE_HINTS):
+        unresolved.append("unparsed_price_condition")
+
+    volume_predicate = _extract_volume_ratio_predicate(condition)
+    requires_volume = volume_predicate is not None or any(
+        hint in condition for hint in ("量比", "放量", "缩量", "量能")
+    )
+    if requires_volume:
+        if volume_predicate is None:
+            unresolved.append("unparsed_volume_condition")
+        elif volume_ratio is None:
+            unresolved.append("volume_ratio_missing")
+            evidence_parts.append(
+                _localized_text(
+                    report_language,
+                    en="volume ratio missing; volume condition cannot be verified",
+                    zh="量比缺失，无法核验放量条件",
+                    ko="거래량 비율 누락으로 거래량 조건을 확인할 수 없음",
+                )
+            )
+        else:
+            operator, target = volume_predicate
+            matched = volume_ratio >= target if operator == ">=" else volume_ratio <= target
+            known_results.append(matched)
+            state = _localized_text(
+                report_language,
+                en="met" if matched else "not met",
+                zh="已满足" if matched else "未满足",
+                ko="충족" if matched else "미충족",
+            )
+            evidence_parts.append(
+                _localized_text(
+                    report_language,
+                    en=f"volume ratio {volume_ratio:g}; threshold {target:g} ({operator}), {state}",
+                    zh=f"量比 {volume_ratio:g}；阈值 {target:g}（要求{operator}），{state}",
+                    ko=f"거래량 비율 {volume_ratio:g}; 기준 {target:g} ({operator}), {state}",
+                )
+            )
+
+    flow_required = "主力" in condition and any(
+        hint in condition for hint in ("资金", "净流入", "净流出", "回流")
+    )
+    if flow_required:
+        main_flow = _coerce_price(facts.get("main_net_inflow"))
+        inflow_5d = _coerce_price(facts.get("inflow_5d"))
+        inflow_10d = _coerce_price(facts.get("inflow_10d"))
+        flow_parts = [
+            _format_watch_flow(main_flow, period="当日", report_language=report_language),
+            _format_watch_flow(inflow_5d, period="5日", report_language=report_language),
+            _format_watch_flow(inflow_10d, period="10日", report_language=report_language),
+        ]
+        flow_text = [item for item in flow_parts if item]
+        if flow_text:
+            evidence_parts.extend(flow_text)
+        if main_flow is None:
+            unresolved.append("main_flow_missing")
+        else:
+            wants_outflow = (
+                "净流出" in condition
+                and "结束净流出" not in condition
+                and "转为净流入" not in condition
+                and "由净流出转" not in condition
+            )
+            flow_results = [main_flow < 0 if wants_outflow else main_flow > 0]
+            if "5日" in condition and any(token in condition for token in ("转正", "净流入")):
+                if inflow_5d is None:
+                    unresolved.append("five_day_flow_missing")
+                else:
+                    flow_results.append(inflow_5d > 0)
+            known_results.append(all(flow_results))
+
+    range_match = _RANGE_POSITION_PATTERN.search(condition)
+    if range_match:
+        if current_price is None or high is None or low is None or high <= low:
+            unresolved.append("intraday_range_missing")
+        else:
+            top_fraction = float(range_match.group(1)) / 100
+            position = (current_price - low) / (high - low)
+            target = 1 - top_fraction
+            matched = position >= target
+            known_results.append(matched)
+            evidence_parts.append(
+                _localized_text(
+                    report_language,
+                    en=f"close at {position:.0%} of the daily range; required top {top_fraction:.0%}",
+                    zh=f"收盘位于日内区间 {position:.0%} 位置；要求进入上方 {top_fraction:.0%}",
+                    ko=f"종가가 일중 범위 {position:.0%} 위치; 상단 {top_fraction:.0%} 필요",
+                )
+            )
+
+    for hint in _WATCH_UNRESOLVED_HINTS:
+        if hint in condition and hint not in unresolved:
+            unresolved.append(hint)
+    if "持续" in condition or "有效" in condition:
+        unresolved.append("duration_confirmation")
+    if "收盘" in condition and phase not in {"postmarket", "non_trading"}:
+        unresolved.append("close_not_available")
+
+    if any(value is False for value in known_results):
+        status = "not_fulfilled"
+    elif known_results and all(known_results) and not unresolved:
+        status = "fulfilled"
+    else:
+        status = "partially_fulfilled"
+
+    if current_price is not None:
+        evidence_parts.insert(
+            0,
+            _localized_text(
+                report_language,
+                en=f"reference price {current_price:g}",
+                zh=f"参考价 {current_price:g}",
+                ko=f"기준가 {current_price:g}",
+            ),
+        )
+    if unresolved:
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en="remaining condition components require non-price evidence",
+                zh="该条件仍有量能、资金、持续时间或形态等非价格证据未完成核验",
+                ko="거래량·자금·지속 시간·패턴 등 비가격 근거의 추가 확인 필요",
+            )
+        )
+    if not evidence_parts:
+        evidence_parts.append(
+            _localized_text(
+                report_language,
+                en="no runtime facts can safely resolve this condition",
+                zh="当前运行时数据无法安全判定该条件",
+                ko="현재 런타임 데이터로 이 조건을 안전하게 판정할 수 없음",
+            )
+        )
+    separator = "; " if report_language == "en" else "；"
+    evidence = separator.join(evidence_parts)[:240]
+    impact = _localized_text(
+        report_language,
+        en={
+            "fulfilled": "Condition confirmed by available facts; include it in this decision.",
+            "not_fulfilled": "Condition is not met; do not trigger its corresponding action.",
+            "partially_fulfilled": "Only part of the condition is verifiable; keep watching and do not treat it as confirmed.",
+        }[status],
+        zh={
+            "fulfilled": "当前可用数据已确认该条件，纳入本次决策依据。",
+            "not_fulfilled": "当前数据未满足该条件，不触发其对应交易动作。",
+            "partially_fulfilled": "仅部分证据可核验，继续观察，不作为已兑现信号。",
+        }[status],
+        ko={
+            "fulfilled": "현재 데이터로 조건을 확인했으며 이번 의사결정 근거에 반영합니다.",
+            "not_fulfilled": "현재 데이터가 조건을 충족하지 않아 해당 거래 동작을 실행하지 않습니다.",
+            "partially_fulfilled": "일부 근거만 확인 가능하므로 관찰을 유지하고 확정 신호로 보지 않습니다.",
+        }[status],
+    )[:120]
+    return status, evidence, impact
+
+
 def _build_previous_watch_context_fallback(
     result: "AnalysisResult",
     previous_watch_context: Optional[Dict[str, Any]],
+    current_analysis_context: Optional[Dict[str, Any]],
     report_language: str,
 ) -> Optional[Dict[str, Any]]:
-    """Build an honest, non-empty fallback from persisted watch points.
+    """Build condition-level conclusions from persisted watches and runtime facts.
 
-    The fallback never claims that a condition was fully verified. It preserves
-    the real previous conditions and records the current report's observable
-    market snapshot so a missing model field does not degrade into an empty
-    shell.
+    Only predicates supported by current quote/capital-flow facts are resolved.
+    Compound or time-dependent predicates remain explicitly partial.
     """
     if not isinstance(previous_watch_context, dict):
         return None
@@ -581,10 +1037,6 @@ def _build_previous_watch_context_fallback(
     phase_decision = phase_decision if isinstance(phase_decision, dict) else {}
     phase_context = phase_decision.get("phase_context")
     phase_context = phase_context if isinstance(phase_context, dict) else {}
-    data_perspective = dashboard.get("data_perspective")
-    data_perspective = data_perspective if isinstance(data_perspective, dict) else {}
-    price_position = data_perspective.get("price_position")
-    price_position = price_position if isinstance(price_position, dict) else {}
 
     observed_at = (
         phase_context.get("effective_daily_bar_date")
@@ -592,87 +1044,58 @@ def _build_previous_watch_context_fallback(
         or phase_context.get("market_local_time")
     )
     phase = phase_context.get("phase")
-    current_price = price_position.get("current_price")
-    limitations = phase_decision.get("data_limitations")
-    limitation = ""
-    if isinstance(limitations, list):
-        limitation = next(
-            (str(value).strip() for value in limitations if str(value or "").strip()),
-            "",
-        )
 
-    evidence_parts: List[str] = []
-    if observed_at:
-        evidence_parts.append(
-            _localized_text(
+    facts = _watch_context_facts(result, current_analysis_context)
+    item_results: List[Dict[str, str]] = []
+    for condition in conditions:
+        status, evidence, impact = _build_watch_verification_observation(
+            condition,
+            facts=facts,
+            phase=str(phase or "").strip(),
+            report_language=report_language,
+        )
+        if observed_at:
+            observed_prefix = _localized_text(
                 report_language,
                 en=f"data as of {observed_at}",
                 zh=f"数据截至 {observed_at}",
                 ko=f"데이터 기준 {observed_at}",
             )
+            separator = "; " if report_language == "en" else "；"
+            evidence = f"{observed_prefix}{separator}{evidence}"[:240]
+        item_results.append(
+            {
+                "condition": condition[:120],
+                "status": status,
+                "evidence": evidence,
+                "impact": impact,
+            }
         )
-    if phase:
-        evidence_parts.append(
-            _localized_text(
-                report_language,
-                en=f"market phase {phase}",
-                zh=f"市场阶段 {phase}",
-                ko=f"시장 단계 {phase}",
-            )
-        )
-    if current_price is not None and not isinstance(current_price, bool):
-        evidence_parts.append(
-            _localized_text(
-                report_language,
-                en=f"reference price {current_price}",
-                zh=f"参考价 {current_price}",
-                ko=f"기준가 {current_price}",
-            )
-        )
-    if limitation:
-        evidence_parts.append(
-            _localized_text(
-                report_language,
-                en=f"limitation: {limitation}",
-                zh=f"数据限制：{limitation}",
-                ko=f"데이터 제한: {limitation}",
-            )
-        )
-    evidence_parts.append(
-        _localized_text(
-            report_language,
-            en="the main model did not return a complete condition-level conclusion",
-            zh="主模型未返回该条件的完整逐条结论",
-            ko="주 모델이 이 조건의 완전한 항목별 결론을 반환하지 않았습니다",
-        )
-    )
-    separator = "; " if report_language == "en" else "；"
-    evidence = separator.join(evidence_parts)[:200]
-    impact = _localized_text(
-        report_language,
-        en="Keep as a partially verified risk item; do not treat it as a confirmed signal.",
-        zh="作为部分核验的风险项保留，不将其视为已兑现交易信号。",
-        ko="부분 검증된 위험 항목으로 유지하며 확인된 거래 신호로 간주하지 않습니다.",
-    )[:120]
+
+    fully_verified = sum(item["status"] == "fulfilled" for item in item_results)
+    not_verified = sum(item["status"] == "not_fulfilled" for item in item_results)
     summary = _localized_text(
         report_language,
-        en=f"Preserved {len(conditions)} previous watch point(s); current data only supports partial verification, so none is treated as confirmed.",
-        zh=f"已保留并逐条列出上次 {len(conditions)} 个观察点；当前数据仅支持部分核验，均未作为已兑现信号。",
-        ko=f"이전 관찰 포인트 {len(conditions)}개를 보존해 나열했습니다. 현재 데이터로는 부분 검증만 가능하며 확인된 신호로 간주하지 않습니다.",
+        en=(
+            f"Preserved {len(conditions)} previous watch point(s); "
+            f"{fully_verified} fulfilled, {not_verified} not fulfilled, and "
+            f"{len(item_results) - fully_verified - not_verified} remain partially verified."
+        ),
+        zh=(
+            f"已保留上次 {len(conditions)} 个观察点：{fully_verified} 个已兑现、"
+            f"{not_verified} 个未兑现、{len(item_results) - fully_verified - not_verified} 个仍需补充核验。"
+        ),
+        ko=(
+            f"이전 관찰 포인트 {len(conditions)}개를 보존했습니다: "
+            f"{fully_verified}개 이행, {not_verified}개 미이행, "
+            f"{len(item_results) - fully_verified - not_verified}개는 부분 검증 상태입니다."
+        ),
     )[:120]
 
     return {
         "has_previous": True,
         "previous_analysis_time": previous_analysis_time,
-        "items": [
-            {
-                "condition": condition[:120],
-                "status": "partially_fulfilled",
-                "evidence": evidence,
-                "impact": impact,
-            }
-            for condition in conditions
-        ],
+        "items": item_results,
         "summary": summary,
         "verification_source": "deterministic_fallback",
     }
@@ -697,6 +1120,7 @@ def apply_placeholder_fill(
     missing_fields: List[str],
     *,
     previous_watch_context: Optional[Dict[str, Any]] = None,
+    current_analysis_context: Optional[Dict[str, Any]] = None,
     market_phase_summary: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Fill mandatory gaps in-place, retaining real prior watch-point context."""
@@ -822,6 +1246,7 @@ def apply_placeholder_fill(
             contextual_fallback = _build_previous_watch_context_fallback(
                 result,
                 previous_watch_context,
+                current_analysis_context,
                 report_language,
             )
             if contextual_fallback is not None and (
@@ -4055,6 +4480,7 @@ class GeminiAnalyzer:
                         result,
                         missing_fields,
                         previous_watch_context=context.get("previous_analysis_data"),
+                        current_analysis_context=context,
                         market_phase_summary=context.get("market_phase_context"),
                     )
                     logger.warning(
@@ -4887,6 +5313,7 @@ class GeminiAnalyzer:
         missing_fields: List[str],
         *,
         previous_watch_context: Optional[Dict[str, Any]] = None,
+        current_analysis_context: Optional[Dict[str, Any]] = None,
         market_phase_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Delegate to module-level apply_placeholder_fill."""
@@ -4894,6 +5321,7 @@ class GeminiAnalyzer:
             result,
             missing_fields,
             previous_watch_context=previous_watch_context,
+            current_analysis_context=current_analysis_context,
             market_phase_summary=market_phase_summary,
         )
 

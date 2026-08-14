@@ -1722,6 +1722,7 @@ class StockAnalysisPipeline:
                             previous_watch_context=initial_context.get(
                                 "previous_analysis_data"
                             ),
+                            current_analysis_context=initial_context,
                             market_phase_summary=market_phase_summary,
                         )
                         logger.info(

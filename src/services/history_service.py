@@ -48,6 +48,11 @@ from src.schemas.decision_action import (
     display_operation_advice_for_result,
 )
 from src.schemas.decision_scale import extract_decision_guardrail_reason
+from src.decision_context import (
+    render_decision_context_section,
+    render_phase_decision_section,
+    render_previous_watch_verification_section,
+)
 from src.utils.sniper_points import find_sniper_points
 from src.utils.data_processing import (
     extract_realtime_detail_fields,
@@ -1114,6 +1119,12 @@ class HistoryService:
                         f"**{labels['chip_label']}**: {chip_unavailable_reason}",
                         "",
                     ])
+        phase_lines = render_phase_decision_section(dashboard, report_language)
+        if phase_lines:
+            report_lines.extend(phase_lines)
+        previous_watch_lines = render_previous_watch_verification_section(dashboard, report_language)
+        if previous_watch_lines:
+            report_lines.extend(previous_watch_lines)
 
         # ========== 作战计划 ==========
         battle = dashboard.get('battle_plan', {}) if dashboard else {}
@@ -1185,7 +1196,6 @@ class HistoryService:
             report_lines.append("")
 
         # ========== 决策上下文（策略层 → 风控/降级 → 最终决策）==========
-        from src.decision_context import render_decision_context_section
 
         decision_lines = render_decision_context_section(dashboard, report_language)
         if decision_lines:

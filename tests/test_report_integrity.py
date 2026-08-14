@@ -745,20 +745,24 @@ class TestPreviousWatchVerificationIntegrity(unittest.TestCase):
         self.assertIn("dashboard.previous_watch_verification.summary", missing)
 
     def test_placeholder_fill_top_level_uses_previous_watch_context(self) -> None:
-        """Fallback preserves real prior conditions and current market evidence."""
+        """Fallback evaluates price-only predicates and preserves unknown evidence."""
         result = self._base_result(
             phase_decision={
                 "phase_context": {
-                    "phase": "premarket",
+                    "phase": "postmarket",
                     "effective_daily_bar_date": "2026-08-11",
                 },
-                "data_limitations": ["盘前暂无当日分时行情。"],
+                "data_limitations": ["资金流数据截至前一交易日"],
             },
             data_perspective={"price_position": {"current_price": 1346.5}},
         )
         previous_context = {
             "analysis_time": "2026-08-11 09:30",
-            "watch_conditions": ["放量站上 1363.35", "跌破 1312.14 止损"],
+            "watch_conditions": [
+                "放量站上 1363.35",
+                "跌破 1312.14 止损",
+                "主力资金转为净流入",
+            ],
         }
 
         apply_placeholder_fill(
@@ -774,15 +778,235 @@ class TestPreviousWatchVerificationIntegrity(unittest.TestCase):
             [item["condition"] for item in pwv["items"]],
             previous_context["watch_conditions"],
         )
-        self.assertTrue(all(item["status"] == "partially_fulfilled" for item in pwv["items"]))
-        self.assertTrue(all("1346.5" in item["evidence"] for item in pwv["items"]))
-        self.assertTrue(all(item["impact"] for item in pwv["items"]))
+        self.assertEqual(
+            [item["status"] for item in pwv["items"]],
+            ["not_fulfilled", "not_fulfilled", "partially_fulfilled"],
+        )
+        self.assertIn("参考价 1346.5", pwv["items"][0]["evidence"])
+        self.assertIn("站上1363.35", pwv["items"][0]["evidence"])
+        self.assertIn("非价格证据", pwv["items"][2]["evidence"])
+        self.assertNotIn("主模型未返回", pwv["items"][0]["evidence"])
         self.assertEqual(pwv["verification_source"], "deterministic_fallback")
         ok, missing = check_content_integrity(
             result, require_previous_watch_verification=True
         )
         self.assertTrue(ok)
         self.assertEqual(missing, [])
+    def test_placeholder_fill_uses_realtime_volume_and_capital_flow(self) -> None:
+        """Fallback resolves supported volume/fund-flow predicates from runtime facts."""
+        result = self._base_result(
+            phase_decision={
+                "phase_context": {
+                    "phase": "postmarket",
+                    "effective_daily_bar_date": "2026-08-13",
+                },
+                "data_limitations": [],
+            },
+            data_perspective={"price_position": {"current_price": 18.31}},
+        )
+        previous_context = {
+            "analysis_time": "2026-08-12 18:00",
+            "watch_conditions": [
+                "量比回升至1以上",
+                "主力资金转为净流入",
+            ],
+        }
+        current_context = {
+            "realtime_quote": {"price": 18.31, "volume_ratio": 0.89},
+            "fundamental_context": {
+                "capital_flow": {
+                    "status": "ok",
+                    "data": {
+                        "stock_flow": {
+                            "main_net_inflow": -421030500.0,
+                            "inflow_5d": -1264705000.0,
+                            "inflow_10d": 4612388600.0,
+                        }
+                    },
+                }
+            },
+        }
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context=previous_context,
+            current_analysis_context=current_context,
+        )
+
+        items = result.dashboard["previous_watch_verification"]["items"]
+        self.assertEqual(
+            [item["status"] for item in items],
+            ["not_fulfilled", "not_fulfilled"],
+        )
+        self.assertIn("量比 0.89", items[0]["evidence"])
+        self.assertIn("阈值 1", items[0]["evidence"])
+        self.assertIn("当日主力净流出 4.21 亿元", items[1]["evidence"])
+        self.assertIn("5日净流出 12.65 亿元", items[1]["evidence"])
+
+    def test_placeholder_fill_reports_exact_intraday_price_observation(self) -> None:
+        result = self._base_result(
+            phase_decision={"phase_context": {"phase": "postmarket"}, "data_limitations": []},
+            data_perspective={"price_position": {"current_price": 105.0}},
+        )
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={"watch_conditions": ["跌破100止损"]},
+            current_analysis_context={"realtime_quote": {"price": 105.0, "low": 99.0}},
+        )
+
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "fulfilled")
+        self.assertIn("跌破100（观测 99）", item["evidence"])
+
+    def test_placeholder_fill_localizes_english_flow_period_and_units(self) -> None:
+        result = self._base_result(
+            phase_decision={"phase_context": {"phase": "postmarket"}, "data_limitations": []},
+        )
+        result.report_language = "en"
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={"watch_conditions": ["主力资金转为净流入"]},
+            current_analysis_context={
+                "fundamental_context": {
+                    "capital_flow": {
+                        "status": "ok",
+                        "data": {"stock_flow": {"main_net_inflow": -421030500.0}},
+                    }
+                }
+            },
+        )
+
+        evidence = result.dashboard["previous_watch_verification"]["items"][0]["evidence"]
+        self.assertIn("Today main-force net outflow CNY 0.42bn", evidence)
+        self.assertNotIn("当日", evidence)
+
+    def test_placeholder_fill_keeps_compound_condition_partial_when_only_price_resolves(self) -> None:
+        """Price success cannot mark a compound volume condition fulfilled."""
+        result = self._base_result(
+            phase_decision={"phase_context": {"phase": "postmarket"}, "data_limitations": []},
+            data_perspective={"price_position": {"current_price": 18.75}},
+        )
+        previous_context = {
+            "watch_conditions": ["放量站稳18.70"],
+        }
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context=previous_context,
+            current_analysis_context={"realtime_quote": {"price": 18.75}},
+        )
+
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "partially_fulfilled")
+        self.assertIn("价格条件已满足", item["evidence"])
+        self.assertIn("量比缺失", item["evidence"])
+    def test_placeholder_fill_interprets_not_break_as_price_at_or_above_floor(self) -> None:
+        result = self._base_result(
+            phase_decision={"phase_context": {"phase": "postmarket"}, "data_limitations": []},
+            data_perspective={"price_position": {"current_price": 18.31}},
+        )
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={"watch_conditions": ["收盘不破18.20"]},
+        )
+
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "fulfilled")
+        self.assertIn("不破18.2", item["evidence"])
+
+
+    def test_placeholder_fill_does_not_repeat_unverified_model_limitation(self) -> None:
+        result = self._base_result(
+            phase_decision={
+                "phase_context": {"phase": "postmarket"},
+                "data_limitations": ["未包含主力资金净流入/流出及融资融券余额数据"],
+            },
+            data_perspective={"price_position": {"current_price": 18.31}},
+        )
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={"watch_conditions": ["融资盘止跌后再确认"]},
+            current_analysis_context={
+                "fundamental_context": {
+                    "capital_flow": {
+                        "status": "ok",
+                        "data": {"stock_flow": {"main_net_inflow": -421030500.0}},
+                    }
+                }
+            },
+        )
+
+        evidence = result.dashboard["previous_watch_verification"]["items"][0]["evidence"]
+        self.assertNotIn("未包含主力资金", evidence)
+        self.assertIn("非价格证据", evidence)
+
+    def test_placeholder_fill_treats_liangneng_threshold_as_volume_not_price(self) -> None:
+        result = self._base_result(
+            phase_decision={
+                "phase_context": {"phase": "postmarket"},
+                "data_limitations": [],
+            },
+            data_perspective={"price_position": {"current_price": 100.21}},
+        )
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={
+                "watch_conditions": ["若量能持续低于2.00且主力资金净流出，则维持观望。"]
+            },
+            current_analysis_context={
+                "realtime_quote": {"price": 100.21, "volume_ratio": 0.95},
+                "fundamental_context": {
+                    "capital_flow": {
+                        "status": "ok",
+                        "data": {"stock_flow": {"main_net_inflow": -737000000.0}},
+                    }
+                },
+            },
+        )
+
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "partially_fulfilled")
+        self.assertIn("量比 0.95", item["evidence"])
+        self.assertIn("阈值 2", item["evidence"])
+        self.assertNotIn("价格条件", item["evidence"])
+
+    def test_placeholder_fill_keeps_explicit_price_clause_after_volume_clause(self) -> None:
+        result = self._base_result(
+            phase_decision={
+                "phase_context": {"phase": "postmarket"},
+                "data_limitations": [],
+            },
+            data_perspective={"price_position": {"current_price": 90.0}},
+        )
+
+        apply_placeholder_fill(
+            result,
+            ["dashboard.previous_watch_verification"],
+            previous_watch_context={
+                "watch_conditions": ["量能低于1且股价低于100"]
+            },
+            current_analysis_context={
+                "realtime_quote": {"price": 90.0, "volume_ratio": 0.8},
+            },
+        )
+
+        item = result.dashboard["previous_watch_verification"]["items"][0]
+        self.assertEqual(item["status"], "fulfilled")
+        self.assertIn("量比 0.8", item["evidence"])
+        self.assertIn("价格条件已满足", item["evidence"])
+        self.assertIn("低于100", item["evidence"])
 
     def test_placeholder_fill_has_previous_false_state_passes_recheck(self) -> None:
         """The no-previous empty-state placeholder should pass re-check."""
