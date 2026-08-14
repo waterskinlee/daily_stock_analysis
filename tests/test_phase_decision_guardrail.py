@@ -367,3 +367,41 @@ def test_guardrail_replaces_contradicted_model_limitations_with_context_facts() 
     assert "尚未收盘，无法获得完整日线" not in limitations
     assert "未提供分钟级分时/逐笔成交序列，无法核验盘中路径与持续性" in limitations
     assert "未提供分钟级分时成交数据，无法验证盘中持续性" not in limitations
+
+
+def test_guardrail_filters_only_contradicted_clause_from_composite_limitation() -> None:
+    result = _result(
+        operation_advice="持有",
+        decision_type="hold",
+        dashboard={
+            "phase_decision": {
+                "data_limitations": [
+                    "缺少成交量历史对比、资金流向及压力位突破后的持续性数据，无法充分判断量能与资金配合情况"
+                ]
+            }
+        },
+    )
+    overview = _overview("available")
+    overview["blocks"].append(
+        {
+            "key": "fundamentals",
+            "label": "基本面",
+            "status": "available",
+            "source": "capital_flow",
+            "warnings": [],
+            "missing_reasons": [],
+        }
+    )
+    overview["data_quality"]["limitations"] = []
+
+    apply_phase_decision_guardrails(
+        result,
+        market_phase_summary=_phase("postmarket"),
+        analysis_context_pack_overview=overview,
+        report_language="zh",
+    )
+
+    limitations = result.dashboard["phase_decision"]["data_limitations"]
+    assert "缺少成交量历史对比" in limitations
+    assert not any("资金流向" in limitation for limitation in limitations)
+    assert any("压力位突破后的持续性数据" in limitation for limitation in limitations)

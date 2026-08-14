@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -288,6 +289,7 @@ _LIMITATION_BLOCK_KEYWORDS = {
     "fundamentals": (
         "主力资金",
         "资金净流",
+        "资金流向",
         "融资融券",
         "基本面",
         "财务",
@@ -321,6 +323,50 @@ _INTRADAY_DETAIL_MARKERS = (
     "체결",
 )
 
+_CHINESE_MISSING_MARKERS = (
+    "未包含",
+    "未提供",
+    "未获取",
+    "无法获取",
+    "无法获得",
+    "数据缺失",
+    "缺少",
+    "缺失",
+    "缺乏",
+    "不足",
+    "没有",
+)
+_CHINESE_LIMITATION_LIST_SEPARATOR = re.compile(r"(?:、|；|;|以及|及)")
+
+
+def _split_enumerated_model_limitation(
+    limitation: str,
+    *,
+    language: str,
+) -> List[str]:
+    """Split ``缺少 A、B 及 C`` so only contradicted clauses are removed."""
+    if language != "zh":
+        return [limitation]
+    marker_positions = [
+        (limitation.find(marker), marker)
+        for marker in _CHINESE_MISSING_MARKERS
+        if marker in limitation
+    ]
+    if not marker_positions:
+        return [limitation]
+    marker_index, marker = min(marker_positions, key=lambda item: item[0])
+    prefix_end = marker_index + len(marker)
+    prefix = limitation[:prefix_end]
+    body = limitation[prefix_end:]
+    parts = [
+        part.strip(" ，。")
+        for part in _CHINESE_LIMITATION_LIST_SEPARATOR.split(body)
+        if part.strip(" ，。")
+    ]
+    if len(parts) < 2:
+        return [limitation]
+    return [f"{prefix}{part}" for part in parts]
+
 
 def _filter_model_limitations(
     limitations: List[str],
@@ -340,38 +386,43 @@ def _filter_model_limitations(
     }
     filtered: List[str] = []
     for limitation in limitations:
-        lowered = limitation.lower()
-        if phase == "postmarket" and any(
-            marker.lower() in lowered for marker in _POSTMARKET_FALSE_LIMITATION_MARKERS
-        ):
-            continue
-        claims_missing = any(marker.lower() in lowered for marker in _MISSING_DATA_MARKERS)
-        if claims_missing and any(
-            marker.lower() in lowered for marker in _INTRADAY_DETAIL_MARKERS
-        ):
-            canonical = _reason_text(
-                language,
-                en="Minute/tick-level intraday series are unavailable; intraday path and persistence cannot be verified.",
-                zh="未提供分钟级分时/逐笔成交序列，无法核验盘中路径与持续性",
-                ko="분봉/체결 단위 장중 시계열이 없어 장중 경로와 지속성을 확인할 수 없습니다.",
-            )
-            if canonical not in filtered:
-                filtered.append(canonical)
-            continue
-        if claims_missing:
-            contradicted = False
-            for key, keywords in _LIMITATION_BLOCK_KEYWORDS.items():
-                if not any(keyword.lower() in lowered for keyword in keywords):
-                    continue
-                status = block_statuses.get(key)
-                if status == "available" or (
-                    status == "partial" and key in objective_keys
-                ):
-                    contradicted = True
-                    break
-            if contradicted:
+        claims = _split_enumerated_model_limitation(
+            limitation,
+            language=language,
+        )
+        for claim in claims:
+            lowered = claim.lower()
+            if phase == "postmarket" and any(
+                marker.lower() in lowered for marker in _POSTMARKET_FALSE_LIMITATION_MARKERS
+            ):
                 continue
-        filtered.append(limitation)
+            claims_missing = any(marker.lower() in lowered for marker in _MISSING_DATA_MARKERS)
+            if claims_missing and any(
+                marker.lower() in lowered for marker in _INTRADAY_DETAIL_MARKERS
+            ):
+                canonical = _reason_text(
+                    language,
+                    en="Minute/tick-level intraday series are unavailable; intraday path and persistence cannot be verified.",
+                    zh="未提供分钟级分时/逐笔成交序列，无法核验盘中路径与持续性",
+                    ko="분봉/체결 단위 장중 시계열이 없어 장중 경로와 지속성을 확인할 수 없습니다.",
+                )
+                if canonical not in filtered:
+                    filtered.append(canonical)
+                continue
+            if claims_missing:
+                contradicted = False
+                for key, keywords in _LIMITATION_BLOCK_KEYWORDS.items():
+                    if not any(keyword.lower() in lowered for keyword in keywords):
+                        continue
+                    status = block_statuses.get(key)
+                    if status == "available" or (
+                        status == "partial" and key in objective_keys
+                    ):
+                        contradicted = True
+                        break
+                if contradicted:
+                    continue
+            filtered.append(claim)
     return filtered
 
 
