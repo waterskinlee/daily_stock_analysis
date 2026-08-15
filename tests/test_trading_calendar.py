@@ -949,5 +949,43 @@ class ComputeEffectiveRegionTestCase(unittest.TestCase):
         self.assertEqual(result, "cn")
 
 
+class GetMarketForStockTestCase(unittest.TestCase):
+    """Regression tests for get_market_for_stock market inference.
+
+    The trading-day filter fail-opens on unrecognized codes (market None), so a
+    suffixed A-share code that fails to resolve to 'cn' would bypass the gate
+    and still be analyzed on non-trading days (Issue #373 regression).
+    """
+
+    def test_bare_a_share_code_returns_cn(self):
+        self.assertEqual(trading_calendar.get_market_for_stock("600519"), "cn")
+        self.assertEqual(trading_calendar.get_market_for_stock("002428"), "cn")
+        self.assertEqual(trading_calendar.get_market_for_stock("920493"), "cn")
+
+    def test_suffixed_a_share_codes_return_cn(self):
+        for code in ("600519.SH", "002428.SZ", "600519.SS", "920493.BJ"):
+            self.assertEqual(trading_calendar.get_market_for_stock(code), "cn")
+
+    def test_prefixed_a_share_codes_return_cn(self):
+        for code in ("SH600519", "SZ000001", "BJ920493"):
+            self.assertEqual(trading_calendar.get_market_for_stock(code), "cn")
+
+    def test_a_share_forms_are_case_insensitive(self):
+        self.assertEqual(trading_calendar.get_market_for_stock("002428.sz"), "cn")
+        self.assertEqual(trading_calendar.get_market_for_stock("sh600519"), "cn")
+
+    def test_offshore_suffixes_still_resolve_to_their_own_markets(self):
+        self.assertEqual(trading_calendar.get_market_for_stock("00700.HK"), "hk")
+        self.assertEqual(trading_calendar.get_market_for_stock("7203.T"), "jp")
+        self.assertEqual(trading_calendar.get_market_for_stock("005930.KS"), "kr")
+        self.assertEqual(trading_calendar.get_market_for_stock("2330.TW"), "tw")
+        self.assertEqual(trading_calendar.get_market_for_stock("AAPL"), "us")
+
+    def test_malformed_a_share_forms_stay_unrecognized(self):
+        # Non-numeric base, wrong digit length, or wrong prefix stay None (fail-open).
+        for code in ("ABC.SH", "1234567.SH", "12345.SZ", "SH1234567", "600519.HK"):
+            self.assertIsNone(trading_calendar.get_market_for_stock(code))
+
+
 if __name__ == "__main__":
     unittest.main()

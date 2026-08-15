@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 交易日检查不再被带交易所后缀的 A 股代码绕过：`get_market_for_stock` 现可识别 `600519.SH` / `002428.SZ` / `.SS` / `.BJ` 后缀与 `SH600519` / `SZ000001` / `BJ920493` 前缀形式，此前这些代码被当作无法识别（fail-open）保留，导致周六等非交易日仍执行定时个股分析（Issue #373 回归）。
 - [新功能] 后台定时分析任务写入共享事件总线：analyzer 每次定时批处理在 `scheduled_run_status`/`scheduled_run_events` 记录运行状态与实时 run-flow 事件（复用 query_id 作为 run_id，写入 fail-open），server 新增只读端点 `GET /api/v1/analysis/scheduled-runs` 与 `GET /api/v1/analysis/scheduled-runs/{run_id}/flow`；Web 首页新增「定时分析进行中」横幅，3 秒轮询展示活跃批次与股票总数。旧单 Agent/手动分析路径不写入，保持 unscoped。
 
 - [改进] 多 Agent 分析管线支持按角色独立模型（`AGENT_TECHNICAL_MODEL` 等 7 个开关，空值继承 `AGENT_LITELLM_MODEL`→`LITELLM_MODEL`），并记录输入/输出 Token 分离与候选模型链；pipeline 预取与 Agent 工具共用同一任务级搜索缓存，避免新闻源重复请求；运行流将「无匹配」与真实失败区分展示；Agent 仅注入各自所需上下文，决策阶段不再让 LLM 生成确定性的 `phase_context`/`strategy_synthesis`；specialist/full 模式下技术、情报两个独立阶段并行执行（`AGENT_DAG_PARALLEL` 可关闭）。

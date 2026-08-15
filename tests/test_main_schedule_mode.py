@@ -191,6 +191,34 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(effective_region, "jp,kr")
         self.assertFalse(should_skip_all)
 
+    def test_compute_trading_day_filter_skips_suffixed_a_share_codes_when_closed(self) -> None:
+        """Suffixed A-share codes (.SZ/.SH) must be filtered on non-trading days.
+
+        Regression: get_market_for_stock returned None for suffixed A-share
+        codes, so the fail-open branch kept them and the run analyzed stocks on
+        Saturday despite TRADING_DAY_CHECK_ENABLED=true.
+        """
+        args = self._make_args()
+        config = self._make_config(
+            trading_day_check_enabled=True,
+            market_review_enabled=True,
+            market_review_region="cn",
+            database_path=str(Path(self.temp_dir.name) / "stock_analysis.db"),
+        )
+
+        stock_codes = ["002428.SZ", "601138.SH", "600519", "000547.SZ"]
+
+        with patch("src.core.trading_calendar.get_open_markets_today", return_value=set()):
+            filtered_codes, effective_region, should_skip_all = main._compute_trading_day_filter(
+                config,
+                args,
+                stock_codes,
+            )
+
+        self.assertEqual(filtered_codes, [])
+        self.assertEqual(effective_region, "")
+        self.assertTrue(should_skip_all)
+
     def test_public_webui_bind_warns_when_auth_is_disabled(self) -> None:
         with patch("src.auth.is_auth_enabled", return_value=False), \
              patch("main.logger.warning") as warning_log:

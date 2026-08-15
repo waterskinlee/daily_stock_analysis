@@ -142,10 +142,23 @@ def get_market_for_stock(code: str) -> Optional[str]:
     suffix_market = get_suffix_market(code)
     if suffix_market:
         return suffix_market
-    # A-share: 6-digit numeric
-    if code.isdigit() and len(code) == 6:
+    # A-share: 6-digit numeric, optionally with .SH/.SZ/.SS/.BJ suffix or
+    # SH/SZ/BJ prefix (e.g. 600519, 002428.SZ, 600519.SH, SH600519, 920493.BJ).
+    # Without this, suffixed A-share codes resolve to None and the trading-day
+    # filter treats them as fail-open, so non-trading-day runs still analyze them.
+    if _is_a_share_code(code):
         return "cn"
     return None
+
+
+def _is_a_share_code(code: str) -> bool:
+    """Return True for A-share codes in bare, suffix or prefix form."""
+    if code.isdigit() and len(code) == 6:
+        return True
+    if "." in code:
+        base, suffix = code.rsplit(".", 1)
+        return base.isdigit() and len(base) == 6 and suffix in {"SH", "SZ", "SS", "BJ"}
+    return len(code) == 8 and code[:2] in {"SH", "SZ", "BJ"} and code[2:].isdigit()
 
 
 def is_market_open(market: str, check_date: date) -> bool:
