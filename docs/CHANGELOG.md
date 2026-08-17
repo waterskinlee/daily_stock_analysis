@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 - [修复] 交易日检查不再被带交易所后缀的 A 股代码绕过：`get_market_for_stock` 现可识别 `600519.SH` / `002428.SZ` / `.SS` / `.BJ` 后缀与 `SH600519` / `SZ000001` / `BJ920493` 前缀形式，此前这些代码被当作无法识别（fail-open）保留，导致周六等非交易日仍执行定时个股分析（Issue #373 回归）。
 - [新功能] 后台定时分析任务写入共享事件总线：analyzer 每次定时批处理在 `scheduled_run_status`/`scheduled_run_events` 记录运行状态与实时 run-flow 事件（复用 query_id 作为 run_id，写入 fail-open），server 新增只读端点 `GET /api/v1/analysis/scheduled-runs` 与 `GET /api/v1/analysis/scheduled-runs/{run_id}/flow`；Web 首页新增「定时分析进行中」横幅，3 秒轮询展示活跃批次与股票总数。旧单 Agent/手动分析路径不写入，保持 unscoped。
+- [新功能] 个股与定时分析支持协作式取消：新增 `POST /api/v1/analysis/tasks/{task_id}/cancel` 与 `POST /api/v1/analysis/scheduled-runs/{run_id}/cancel`，任务队列和 SQLite 定时状态具备幂等竞态保护，执行链在安全检查点停止并广播 `task_cancel_requested` / `task_cancelled`；Web 首页任务面板与定时分析横幅提供取消入口，并在停止完成前保留状态反馈。
 
 - [改进] 多 Agent 分析管线支持按角色独立模型（`AGENT_TECHNICAL_MODEL` 等 7 个开关，空值继承 `AGENT_LITELLM_MODEL`→`LITELLM_MODEL`），并记录输入/输出 Token 分离与候选模型链；pipeline 预取与 Agent 工具共用同一任务级搜索缓存，避免新闻源重复请求；运行流将「无匹配」与真实失败区分展示；Agent 仅注入各自所需上下文，决策阶段不再让 LLM 生成确定性的 `phase_context`/`strategy_synthesis`；specialist/full 模式下技术、情报两个独立阶段并行执行（`AGENT_DAG_PARALLEL` 可关闭）。
 - [修复] Web 个股报告新增「决策上下文」卡：展示策略层多策略综合（综合信号/共识度/冲突/置信度/支持与反方策略）到最终决策的路径，明确标注「策略层共识 ≠ 最终决策」，并在风控下调（如 buy→sell）或数据降级时高亮原因，消除「多策略综合偏多但核心结论偏空」的歧义；后端通知、历史 Markdown 与 Jinja 模板同步渲染同一决策上下文（`agent_disagreement_explanation` 首次被消费渲染），三语本地化。
