@@ -121,6 +121,43 @@ class TestAgentLLMRunDiagnostics(unittest.TestCase):
             [1, 2],
         )
 
+    def test_agent_loop_keeps_thinking_labels_when_cancellation_is_enabled(self):
+        adapter = _SequenceAdapter(
+            [
+                LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="call-1", name="echo", arguments={"message": "ping"})],
+                    usage={"total_tokens": 1},
+                    provider="openai",
+                    model="openai/gpt-test",
+                ),
+                LLMResponse(
+                    content="Done.",
+                    tool_calls=[],
+                    usage={"total_tokens": 1},
+                    provider="openai",
+                    model="openai/gpt-test",
+                ),
+            ]
+        )
+        events = []
+
+        result = run_agent_loop(
+            messages=[{"role": "user", "content": "Analyze"}],
+            tool_registry=_make_registry_with_echo(),
+            llm_adapter=adapter,
+            max_steps=2,
+            progress_callback=events.append,
+            thinking_labels={"echo": "Custom echo"},
+            cancel_check=lambda: False,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn(
+            "「Custom echo」已完成，继续深入分析...",
+            [event.get("message") for event in events if event.get("type") == "thinking"],
+        )
+
     def test_unscoped_agent_loop_keeps_legacy_diagnostics_behavior(self):
         adapter = _SequenceAdapter(
             [

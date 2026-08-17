@@ -337,6 +337,7 @@ def run_agent_loop(
     llm_adapter: LLMToolAdapter,
     max_steps: int = 10,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    thinking_labels: Optional[Dict[str, str]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     max_wall_clock_seconds: Optional[float] = None,
     tool_call_timeout_seconds: Optional[float] = None,
