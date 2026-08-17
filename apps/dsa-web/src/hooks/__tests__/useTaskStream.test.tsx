@@ -157,6 +157,45 @@ describe('useTaskStream', () => {
     );
   });
 
+  it('forwards cancellation requested and cancelled SSE events', async () => {
+    const onTaskCancelRequested = vi.fn();
+    const onTaskCancelled = vi.fn();
+
+    renderHook(() => useTaskStream({
+      enabled: true,
+      onTaskCancelRequested,
+      onTaskCancelled,
+    }));
+    await waitFor(() => {
+      expect(eventSourceInstance.listeners.task_cancel_requested).toBeDefined();
+      expect(eventSourceInstance.listeners.task_cancelled).toBeDefined();
+    });
+
+    const payload = (status: string) => new MessageEvent('task_cancelled', {
+      data: JSON.stringify({
+        task_id: 'task-cancel-1',
+        stock_code: '600519',
+        stock_name: '贵州茅台',
+        status,
+        progress: 35,
+        report_type: 'detailed',
+        created_at: '2026-03-29T08:00:00Z',
+      }),
+    });
+    eventSourceInstance.listeners.task_cancel_requested?.(payload('cancel_requested'));
+    eventSourceInstance.listeners.task_cancelled?.(payload('cancelled'));
+
+    expect(onTaskCancelRequested).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: 'task-cancel-1',
+      status: 'cancel_requested',
+    }));
+    expect(onTaskCancelled).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: 'task-cancel-1',
+      status: 'cancelled',
+    }));
+  });
+
+
   it('shares one SSE connection across multiple hook instances', async () => {
     const firstConnected = vi.fn();
     const secondConnected = vi.fn();

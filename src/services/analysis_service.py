@@ -31,6 +31,7 @@ from src.services.run_diagnostics import (
     get_current_diagnostic_context,
     reset_run_diagnostic_context,
 )
+from src.services.analysis_cancellation import AnalysisCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class AnalysisService:
         query_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         send_notification: bool = True,
+        is_cancelled: Optional[Callable[[], bool]] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
         skills: Optional[List[str]] = None,
         analysis_phase: str = "auto",
@@ -111,6 +113,7 @@ class AnalysisService:
                 config=config,
                 query_id=query_id,
                 trace_id=effective_trace_id,
+                cancel_check=is_cancelled,
                 query_source=query_source or "api",
                 progress_callback=progress_callback,
                 analysis_skills=skills,
@@ -143,6 +146,8 @@ class AnalysisService:
             # 构建响应
             return self._build_analysis_response(result, query_id, report_type=rt.value)
             
+        except AnalysisCancelledError:
+            raise
         except Exception as e:
             self.last_error = str(e)
             logger.error(f"分析股票 {stock_code} 失败: {e}", exc_info=True)

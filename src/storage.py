@@ -2404,15 +2404,23 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         error=error,
                     ))
                 else:
-                    row.status = normalized_status
+                    effective_status = normalized_status
+                    if row.status in {"completed", "failed", "cancelled"} and normalized_status == "running":
+                        effective_status = row.status
+                    elif row.status == "cancel_requested":
+                        if normalized_status == "running":
+                            effective_status = "cancel_requested"
+                        elif normalized_status in {"completed", "failed", "cancelled"}:
+                            effective_status = "cancelled"
+                    row.status = effective_status
                     row.stock_count = max(0, int(stock_count or 0))
                     if completed_count is not None:
                         row.completed_count = max(0, int(completed_count))
                     if error is not None:
                         row.error = error
                     row.last_activity_at = now_value
-                    if normalized_status in {"completed", "failed", "cancelled"}:
-                        row.finished_at = now_value
+                    if effective_status in {"completed", "failed", "cancelled"}:
+                        row.finished_at = row.finished_at or now_value
                 return True
 
             return self._run_write_transaction(
@@ -2421,6 +2429,41 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             )
         except Exception as exc:
             logger.warning("定时任务状态写入失败（fail-open）: run_id=%s err=%s", normalized_run_id, exc)
+            return False
+
+    def request_scheduled_run_cancellation(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Atomically mark a running scheduled batch as cancellation-requested."""
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return None
+
+        try:
+            def _write(session: Session) -> Optional[Dict[str, Any]]:
+                row = session.execute(
+                    select(ScheduledRunStatus).where(ScheduledRunStatus.run_id == normalized_run_id)
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
+                if row.status == "running":
+                    row.status = "cancel_requested"
+                    row.last_activity_at = utc_naive_now()
+                return self._scheduled_run_status_to_dict(row)
+
+            return self._run_write_transaction(
+                f"request_scheduled_run_cancellation[{normalized_run_id}]",
+                _write,
+            )
+        except Exception as exc:
+            logger.warning("定时任务取消请求写入失败（fail-open）: run_id=%s err=%s", normalized_run_id, exc)
+            return None
+
+    def is_scheduled_run_cancel_requested(self, run_id: str) -> bool:
+        """Return whether a scheduled run has an active cancellation request."""
+        try:
+            status = self.get_scheduled_run_status(run_id)
+            return bool(status and status.get("status") in {"cancel_requested", "cancelled"})
+        except Exception as exc:
+            logger.warning("查询定时任务取消标志失败（fail-open）: run_id=%s err=%s", run_id, exc)
             return False
 
     def reconcile_stale_scheduled_runs(
@@ -2445,7 +2488,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             def _write(session: Session) -> int:
                 rows = session.execute(
                     select(ScheduledRunStatus).where(
-                        ScheduledRunStatus.status == "running",
+                        ScheduledRunStatus.status.in_(("running", "cancel_requested")),
                     )
                 ).scalars().all()
                 reconciled = []
@@ -2464,7 +2507,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                         )
                         reconciled.append(row)
                 for row in reconciled:
-                    row.status = "failed"
+                    if row.status == "cancel_requested":
+                        row.status = "cancelled"
+                        row.error = row.error or (
+                            "Scheduled run cancellation was requested before the scheduler process restarted."
+                        )
+                    else:
+                        row.status = "failed"
                     row.finished_at = reconciled_at
                 return len(reconciled)
 
@@ -2532,11 +2581,11 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             return self._scheduled_run_status_to_dict(row)
 
     def list_active_scheduled_runs(self) -> List[Dict[str, Any]]:
-        """Return currently-running background scheduled batches (newest first)."""
+        """Return running or cancellation-requested batches (newest first)."""
         with self.get_session() as session:
             rows = session.execute(
                 select(ScheduledRunStatus)
-                .where(ScheduledRunStatus.status == "running")
+                .where(ScheduledRunStatus.status.in_(("running", "cancel_requested")))
                 .order_by(desc(ScheduledRunStatus.started_at))
             ).scalars().all()
             return [self._scheduled_run_status_to_dict(row) for row in rows]

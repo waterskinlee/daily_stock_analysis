@@ -42,6 +42,7 @@ from src.agent.tools.execution import (
 )
 from src.agent.stock_scope import StockScope
 from src.llm.usage import should_persist_usage_telemetry
+from src.services.analysis_cancellation import raise_if_cancelled
 from src.utils.data_processing import normalize_report_signal_attribution
 from src.storage import persist_llm_usage as _persist_usage
 
@@ -336,7 +337,7 @@ def run_agent_loop(
     llm_adapter: LLMToolAdapter,
     max_steps: int = 10,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    thinking_labels: Optional[Dict[str, str]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
     max_wall_clock_seconds: Optional[float] = None,
     tool_call_timeout_seconds: Optional[float] = None,
     stock_scope: Optional[StockScope] = None,
@@ -363,6 +364,7 @@ def run_agent_loop(
             stage lifecycle. Orchestrated business stages disable this so
             ``stage_start`` / ``stage_done`` only describe real stages.
         agent_name: Optional orchestrated-agent identity. When set, every LLM
+        cancel_check: Optional callback returning True when cancellation was requested.
             round-trip is recorded under ``agent_<name>`` diagnostics.
 
     Returns:
@@ -407,6 +409,7 @@ def run_agent_loop(
             )
         )
 
+    raise_if_cancelled(cancel_check)
     for step in range(max_steps):
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
         timeout_exhausted = remaining_timeout is not None and remaining_timeout <= 0
@@ -519,6 +522,8 @@ def run_agent_loop(
         if model_for_usage and model_for_usage != "error" and should_persist_usage_telemetry(response.usage):
             _persist_usage(response.usage, model_for_usage, call_type="agent")
 
+        raise_if_cancelled(cancel_check)
+
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
         if remaining_timeout is not None and remaining_timeout <= 0:
             logger.warning("Agent timed out after LLM call at step %d", step + 1)
@@ -595,6 +600,7 @@ def run_agent_loop(
                     }
                 )
 
+            raise_if_cancelled(cancel_check)
             remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
             if remaining_timeout is not None and remaining_timeout <= 0:
                 logger.warning("Agent timed out after tool execution at step %d", step + 1)

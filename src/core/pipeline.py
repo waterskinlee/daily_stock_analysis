@@ -66,6 +66,7 @@ from src.services.daily_market_context import (
     format_daily_market_context_prompt_section,
 )
 from src.services.social_sentiment_service import SocialSentimentService
+from src.services.analysis_cancellation import AnalysisCancelledError, raise_if_cancelled
 from src.services.intelligence_service import IntelligenceService
 from src.services.market_hotspot_service import MarketHotspotService
 from src.services.analysis_context_builder import (
@@ -232,6 +233,7 @@ class StockAnalysisPipeline:
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
         flow_event_sink: Optional[Callable[[str, int, Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         """
         初始化调度器
@@ -259,6 +261,7 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
+        self.cancel_check = cancel_check
         self.flow_event_sink = flow_event_sink
         self._flow_event_index = 0
         self._flow_event_lock = threading.Lock()
@@ -366,6 +369,20 @@ class StockAnalysisPipeline:
                 },
             )
 
+    def _check_cancelled(self) -> None:
+        """Stop at a safe pipeline boundary when cancellation was requested."""
+        raise_if_cancelled(getattr(self, "cancel_check", None))
+
+    def _wait_with_cancellation(self, delay_seconds: float) -> None:
+        """Wait in short intervals so scheduled cancellation is not delayed by throttling."""
+        deadline = time.monotonic() + max(0.0, delay_seconds)
+        while True:
+            self._check_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
+
     def _forward_scheduled_flow_event(self, stock_code: str, event: Dict[str, Any]) -> None:
         """Forward one run-flow event to the background scheduled-batch sink."""
         sink = getattr(self, "flow_event_sink", None)
@@ -469,6 +486,7 @@ class StockAnalysisPipeline:
         """
         stock_name = code
         try:
+            self._check_cancelled()
             portfolio_context = getattr(self, "portfolio_context", None)
             if not isinstance(portfolio_context, dict):
                 portfolio_context = None
@@ -495,6 +513,7 @@ class StockAnalysisPipeline:
                 market,
                 target_date=daily_market_target_date,
             )
+            self._check_cancelled()
 
             self._emit_progress(18, f"{code}：正在获取行情与筹码数据")
             # 获取股票名称（先走轻量名称路径，后续若 realtime_quote 有 name 再覆盖）
@@ -619,9 +638,11 @@ class StockAnalysisPipeline:
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
+            self._check_cancelled()
             if use_agent:
                 logger.info(f"{stock_name}({code}) 启用 Agent 模式进行分析")
                 self._emit_progress(58, f"{stock_name}：正在切换 Agent 分析链路")
+                self._check_cancelled()
                 return self._analyze_with_agent(
                     code,
                     report_type,
@@ -636,6 +657,7 @@ class StockAnalysisPipeline:
                     daily_market_context=daily_market_context,
                     portfolio_context=portfolio_context,
                     market_structure_context=market_structure_context,
+                    cancel_check=self.cancel_check,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -816,6 +838,7 @@ class StockAnalysisPipeline:
                     stream_progress_callback=_on_llm_stream,
                     analysis_context_pack_summary=analysis_context_pack_summary,
                 )
+                self._check_cancelled()
                 llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
                 record_llm_run(
                     success=bool(result and getattr(result, "success", True)),
@@ -833,6 +856,8 @@ class StockAnalysisPipeline:
                         else ("LLM returned empty result" if result is None else None)
                     ),
                 )
+            except AnalysisCancelledError:
+                raise
             except Exception as exc:
                 record_llm_run(
                     success=False,
@@ -888,6 +913,7 @@ class StockAnalysisPipeline:
                     result.market_structure_context = market_structure_context
                 result.market_phase_summary = market_phase_summary
                 result.analysis_context_pack_overview = analysis_context_pack_overview
+                self._check_cancelled()
                 self._refresh_decision_action_for_final_result(
                     result,
                     report_type=report_type.value,
@@ -954,6 +980,8 @@ class StockAnalysisPipeline:
 
             return result
 
+        except AnalysisCancelledError:
+            raise
         except Exception as e:
             logger.error(f"{stock_name}({code}) 分析失败: {e}")
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
@@ -1392,11 +1420,13 @@ class StockAnalysisPipeline:
         daily_market_context: Optional[DailyMarketContext] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
         market_structure_context: Optional[Dict[str, Any]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
         """
         try:
+            self._check_cancelled()
             from src.agent.factory import build_agent_executor
             report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
 
@@ -1545,6 +1575,7 @@ class StockAnalysisPipeline:
 
             # Issue #1066: ensure deep history is in DB before agent tools run
             self._ensure_agent_history(code)
+            self._check_cancelled()
 
             analysis_context = self._load_agent_analysis_context(code, stock_name)
             market = get_market_for_stock(normalize_stock_code(code))
@@ -1587,7 +1618,14 @@ class StockAnalysisPipeline:
                         model=getattr(self.config, "agent_litellm_model", None),
                         call_type="agent_analysis",
                     )
-                agent_result = executor.run(message, context=initial_context)
+                agent_result = executor.run(
+                    message,
+                    context=initial_context,
+                    cancel_check=cancel_check,
+                )
+                self._check_cancelled()
+            except AnalysisCancelledError:
+                raise
             except Exception as exc:
                 if record_aggregate_llm:
                     record_llm_run(
@@ -1976,6 +2014,8 @@ class StockAnalysisPipeline:
 
             return result
 
+        except AnalysisCancelledError:
+            raise
         except Exception as e:
             logger.error(f"[{code}] Agent 分析失败: {e}")
             logger.exception(f"[{code}] Agent 详细错误信息:")
@@ -4023,6 +4063,7 @@ class StockAnalysisPipeline:
                 event_sink=lambda event: self._forward_scheduled_flow_event(code, event),
             )
         try:
+            self._check_cancelled()
             self._emit_progress(12, f"{code}：正在准备分析任务")
             # Step 1: 获取并保存数据
             success, error = self.fetch_and_save_stock_data(
@@ -4030,6 +4071,7 @@ class StockAnalysisPipeline:
                 force_refresh=force_refresh,
                 current_time=current_time,
             )
+            self._check_cancelled()
             
             if not success:
                 logger.warning(f"[{code}] 数据获取失败: {error}")
@@ -4038,6 +4080,7 @@ class StockAnalysisPipeline:
                 self._emit_progress(16, f"{code}：行情数据准备完成")
             
             # Step 2: AI 分析
+            self._check_cancelled()
             if skip_analysis:
                 logger.info(f"[{code}] 跳过 AI 分析（dry-run 模式）")
                 return None
@@ -4067,6 +4110,8 @@ class StockAnalysisPipeline:
             
             return result
             
+        except AnalysisCancelledError:
+            raise
         except Exception as e:
             # 捕获所有异常，确保单股失败不影响整体
             logger.exception(f"[{code}] 处理过程发生未知异常: {e}")
@@ -4083,6 +4128,7 @@ class StockAnalysisPipeline:
         merge_notification: bool = False,
         current_time: Optional[datetime] = None,
         stock_completion_callback: Optional[Callable[[int, int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[AnalysisResult]:
         """
         运行完整的分析流程
@@ -4105,6 +4151,9 @@ class StockAnalysisPipeline:
             分析结果列表
         """
         start_time = time.time()
+        if cancel_check is not None:
+            self.cancel_check = cancel_check
+        self._check_cancelled()
         
         # 使用配置中的股票列表
         if stock_codes is None:
@@ -4114,6 +4163,7 @@ class StockAnalysisPipeline:
         if not stock_codes:
             logger.error("未配置自选股列表，请在 .env 文件中设置 STOCK_LIST")
             return []
+        self._check_cancelled()
         
         logger.info(f"===== 开始分析 {len(stock_codes)} 只股票 =====")
         logger.info(f"股票列表: {', '.join(stock_codes)}")
@@ -4166,6 +4216,7 @@ class StockAnalysisPipeline:
         
         # 使用线程池并发处理
         # 注意：max_workers 设置较低（默认3）以避免触发反爬
+        self._check_cancelled()
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # 提交任务
             future_to_code = {
@@ -4188,6 +4239,7 @@ class StockAnalysisPipeline:
                 should_delay = True
                 try:
                     result = future.result()
+                    self._check_cancelled()
                     if result and result.success:
                         results.append(result)
                         if single_stock_notify and send_notification and not dry_run:
@@ -4201,6 +4253,8 @@ class StockAnalysisPipeline:
                             f"[{code}] 分析结果标记为失败，不计入汇总: "
                             f"{result.error_message or '未知原因'}"
                         )
+                except AnalysisCancelledError:
+                    raise
                 except Exception as exc:
                     should_delay = False
                     logger.error(f"[{code}] 任务执行失败: {exc}")
@@ -4230,7 +4284,7 @@ class StockAnalysisPipeline:
                     # 因此它对降低并发请求峰值的效果有限；真正的峰值主要由 max_workers 决定。
                     # 该行为目前保留（按需求不改逻辑）。
                     logger.debug(f"等待 {analysis_delay} 秒后继续下一只股票...")
-                    time.sleep(analysis_delay)
+                    self._wait_with_cancellation(analysis_delay)
 
         
         # 统计
@@ -4257,10 +4311,12 @@ class StockAnalysisPipeline:
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
+        self._check_cancelled()
         # 保存报告到本地文件（无论是否推送通知都保存）
         if results and not dry_run:
             self._save_local_report(results, report_type)
 
+        self._check_cancelled()
         # 发送通知（单股推送模式下跳过汇总推送，避免重复）
         if results and send_notification and not dry_run:
             if single_stock_notify:
@@ -4274,6 +4330,7 @@ class StockAnalysisPipeline:
             else:
                 self._send_notifications(results, report_type)
         
+        self._check_cancelled()
         return results
 
     def _send_single_stock_notification(

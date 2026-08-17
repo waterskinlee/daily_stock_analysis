@@ -203,4 +203,49 @@ describe('TaskPanel', () => {
 
     expect(container).toBeEmptyDOMElement();
   });
+
+  it('renders a cancel action for pending and processing tasks', () => {
+    const onCancelTask = vi.fn();
+    render(
+      <TaskPanel
+        tasks={[
+          baseTask,
+          { ...baseTask, taskId: 'task-2', stockCode: '000001', stockName: '平安银行', status: 'pending', progress: 0 },
+        ]}
+        onCancelTask={onCancelTask}
+      />,
+    );
+
+    const processingButton = screen.getByRole('button', { name: '取消贵州茅台的分析任务' });
+    const pendingButton = screen.getByRole('button', { name: '取消平安银行的分析任务' });
+    expect(processingButton).toBeEnabled();
+    expect(pendingButton).toBeEnabled();
+
+    fireEvent.click(processingButton);
+
+    expect(onCancelTask).toHaveBeenCalledWith(baseTask);
+  });
+
+  it('keeps the cancel action visible but disabled after cancellation is requested', () => {
+    render(
+      <TaskPanel
+        tasks={[{ ...baseTask, status: 'cancel_requested', message: '正在取消...' }]}
+        onCancelTask={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '正在取消贵州茅台的分析任务' })).toBeDisabled();
+  });
+
+  it('does not offer per-stock cancellation for a market review task', () => {
+    render(
+      <TaskPanel
+        tasks={[{ ...baseTask, stockCode: 'MARKET', reportType: 'market_review' }]}
+        onCancelTask={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: /取消.*分析任务/ })).not.toBeInTheDocument();
+  });
+
 });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Button } from '../common';
 import { scheduledRunApi, type ScheduledRunStatus } from '../../api/analysis';
 import { useUiLanguage } from '../../contexts/UiLanguageContext';
 
@@ -13,20 +14,23 @@ export const ScheduledRunBanner: React.FC = () => {
   const { t } = useUiLanguage();
   const [runs, setRuns] = useState<ScheduledRunStatus[]>([]);
   const [failed, setFailed] = useState(false);
+  const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
+  const [cancelErrorRunId, setCancelErrorRunId] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
+  const activeRef = useRef(true);
 
   useEffect(() => {
-    let active = true;
+    activeRef.current = true;
 
     const poll = async () => {
       try {
         const next = await scheduledRunApi.listActiveRuns();
-        if (active) {
+        if (activeRef.current) {
           setRuns(next);
           setFailed(false);
         }
       } catch {
-        if (active) {
+        if (activeRef.current) {
           setFailed(true);
         }
       }
@@ -38,13 +42,35 @@ export const ScheduledRunBanner: React.FC = () => {
     }, POLL_INTERVAL_MS);
 
     return () => {
-      active = false;
+      activeRef.current = false;
       if (timerRef.current !== null) {
         window.clearInterval(timerRef.current);
         timerRef.current = null;
       }
     };
   }, []);
+
+  const handleCancel = async (run: ScheduledRunStatus) => {
+    if (run.status !== 'running' || cancellingRunId !== null) {
+      return;
+    }
+    setCancellingRunId(run.runId);
+    setCancelErrorRunId(null);
+    try {
+      const updated = await scheduledRunApi.cancelRun(run.runId);
+      if (activeRef.current) {
+        setRuns((current) => current.map((item) => item.runId === updated.runId ? updated : item));
+      }
+    } catch {
+      if (activeRef.current) {
+        setCancelErrorRunId(run.runId);
+      }
+    } finally {
+      if (activeRef.current) {
+        setCancellingRunId(null);
+      }
+    }
+  };
 
   if (failed) {
     return (
@@ -67,7 +93,7 @@ export const ScheduledRunBanner: React.FC = () => {
         >
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="text-sm font-semibold text-foreground">
-              {t('home.scheduledRunBannerTitle')}
+              {run.status === 'cancel_requested' ? t('home.scheduledRunCancelRequested') : t('home.scheduledRunBannerTitle')}
             </span>
             <span className="text-xs text-muted-text">
               {t('home.scheduledRunTotal', { total: String(run.stockCount) })}
@@ -76,6 +102,29 @@ export const ScheduledRunBanner: React.FC = () => {
           <p className="mt-1 font-mono text-[11px] text-muted-text">
             {t('home.scheduledRunId')}: {run.runId}
           </p>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            {cancelErrorRunId === run.runId ? (
+              <p className="text-xs text-danger" role="status">
+                {t('home.scheduledRunCancelFailed')}
+              </p>
+            ) : <span />}
+            <Button
+              type="button"
+              variant="danger-subtle"
+              size="sm"
+              className="h-10 shrink-0"
+              disabled={run.status !== 'running' || cancellingRunId !== null}
+              isLoading={cancellingRunId === run.runId}
+              aria-label={t(
+                run.status === 'cancel_requested'
+                  ? 'home.scheduledRunCancelRequested'
+                  : 'home.scheduledRunCancel',
+              )}
+              onClick={() => void handleCancel(run)}
+            >
+              {t('home.scheduledRunCancel')}
+            </Button>
+          </div>
         </div>
       ))}
     </div>

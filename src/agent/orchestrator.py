@@ -49,6 +49,7 @@ from src.agent.protocols import (
     normalize_decision_signal,
     normalize_stage_failure_reason,
 )
+from src.services.analysis_cancellation import AnalysisCancelledError, raise_if_cancelled
 from src.agent.skills.defaults import is_skill_agent_name
 from src.agent.skills.engine import EvidencePartition, StrategyEngine, StrategyResult, StrategyResultStatus
 from src.agent.skills.scheduler import AgentSkillScheduler, SkillBatchResult
@@ -353,7 +354,10 @@ class AgentOrchestrator:
             and self._agent_run_accepts_timeout(agent.run)
         ):
             run_kwargs["timeout_seconds"] = timeout_seconds
-        return agent.run(ctx, **run_kwargs)
+        raise_if_cancelled(ctx.meta.get("cancel_check"))
+        result = agent.run(ctx, **run_kwargs)
+        raise_if_cancelled(ctx.meta.get("cancel_check"))
+        return result
     @staticmethod
     def _clone_context_for_stage(ctx: AgentContext) -> AgentContext:
         """Clone a context for one parallel stage so writes stay isolated."""
@@ -397,6 +401,8 @@ class AgentOrchestrator:
                     progress_callback=progress_callback,
                     timeout_seconds=timeout_seconds,
                 )
+            except AnalysisCancelledError:
+                raise
             except Exception as exc:
                 logger.error("[Orchestrator] parallel stage '%s' failed: %s", agent.agent_name, exc)
                 result = StageResult(
@@ -576,7 +582,12 @@ class AgentOrchestrator:
     # Public interface (mirrors AgentExecutor)
     # -----------------------------------------------------------------
 
-    def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> "AgentResult":
+    def run(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> "AgentResult":
         """Run the multi-agent pipeline for a dashboard analysis.
 
         Returns an ``AgentResult`` (same type as ``AgentExecutor.run``).
@@ -584,6 +595,9 @@ class AgentOrchestrator:
         from src.agent.executor import AgentResult
 
         ctx = self._build_context(task, context)
+        if cancel_check is not None:
+            ctx.meta["cancel_check"] = cancel_check
+        raise_if_cancelled(cancel_check)
         ctx.meta["response_mode"] = "dashboard"
         orch_result = self._execute_pipeline(ctx, parse_dashboard=True)
 
@@ -718,6 +732,7 @@ class AgentOrchestrator:
         all_tool_calls: List[Dict[str, Any]] = []
         models_used: List[str] = []
         t0 = time.time()
+        raise_if_cancelled(ctx.meta.get("cancel_check"))
         timeout_s = self._get_timeout_seconds()
 
         agents = self._build_agent_chain(ctx)
@@ -901,6 +916,7 @@ class AgentOrchestrator:
                         models_used,
                     )
                     continue
+            raise_if_cancelled(ctx.meta.get("cancel_check"))
 
             if agent.agent_name == "decision":
                 self._run_strategy_engine(ctx)

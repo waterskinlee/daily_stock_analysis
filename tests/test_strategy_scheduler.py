@@ -8,6 +8,7 @@ import unittest
 
 from src.agent.protocols import AgentContext, AgentOpinion, StageResult, StageStatus
 from src.agent.skills.scheduler import AgentSkillScheduler
+from src.services.analysis_cancellation import AnalysisCancelledError
 from src.services.history_loader import (
     get_frozen_target_date,
     reset_frozen_target_date,
@@ -168,6 +169,20 @@ class TestAgentSkillScheduler(unittest.TestCase):
         self.assertEqual(batch.invalid_records[0]["agent_name"], "skill_hot_theme")
         self.assertEqual(batch.invalid_records[0]["reason"], "skill_timeout")
         self.assertEqual(batch.timeout_per_skill, 30)
+
+    def test_cancellation_is_not_converted_to_a_failed_skill(self):
+        def run_stage(agent, ctx, progress_callback=None, timeout_seconds=None):
+            raise AnalysisCancelledError("cancel requested")
+
+        scheduler = AgentSkillScheduler(max_concurrency=1)
+
+        with self.assertRaises(AnalysisCancelledError):
+            scheduler.run(
+                [_FakeSkillAgent("skill_hot_theme")],
+                AgentContext(query="test"),
+                run_stage,
+            )
+
 
     def test_success_without_opinion_becomes_skill_error(self):
         def run_stage(agent, ctx, progress_callback=None, timeout_seconds=None):

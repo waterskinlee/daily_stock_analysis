@@ -705,7 +705,12 @@ class AgentExecutor:
         self.max_steps = max_steps
         self.timeout_seconds = timeout_seconds
 
-    def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def run(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> AgentResult:
         """Execute the agent loop for a given task.
 
         Args:
@@ -748,7 +753,10 @@ class AgentExecutor:
             {"role": "user", "content": self._build_user_message(task, context)},
         ]
 
-        return self._run_loop(messages, tool_decls, parse_dashboard=True)
+        run_kwargs = {}
+        if cancel_check is not None:
+            run_kwargs["cancel_check"] = cancel_check
+        return self._run_loop(messages, tool_decls, parse_dashboard=True, **run_kwargs)
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.
@@ -842,6 +850,7 @@ class AgentExecutor:
         tool_decls: List[Dict[str, Any]],
         parse_dashboard: bool,
         progress_callback: Optional[Callable] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
         stock_scope: Optional[StockScope] = None,
     ) -> AgentResult:
         """Delegate to the shared runner and adapt the result.
@@ -849,15 +858,18 @@ class AgentExecutor:
         Dashboard mode exposes only the parsed canonical payload through both
         ``dashboard`` and ``content``; free-form mode preserves the raw text.
         """
-        loop_result = run_agent_loop(
-            messages=messages,
-            tool_registry=self.tool_registry,
-            llm_adapter=self.llm_adapter,
-            max_steps=self.max_steps,
-            progress_callback=progress_callback,
-            max_wall_clock_seconds=self.timeout_seconds,
-            stock_scope=stock_scope,
-        )
+        runner_kwargs = {
+            "messages": messages,
+            "tool_registry": self.tool_registry,
+            "llm_adapter": self.llm_adapter,
+            "max_steps": self.max_steps,
+            "progress_callback": progress_callback,
+            "max_wall_clock_seconds": self.timeout_seconds,
+            "stock_scope": stock_scope,
+        }
+        if cancel_check is not None:
+            runner_kwargs["cancel_check"] = cancel_check
+        loop_result = run_agent_loop(**runner_kwargs)
 
         model_str = loop_result.model
 

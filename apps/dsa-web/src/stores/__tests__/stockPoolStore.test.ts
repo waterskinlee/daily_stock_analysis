@@ -27,6 +27,7 @@ vi.mock('../../api/analysis', async () => {
     analysisApi: {
       analyzeAsync: vi.fn(),
       getTasks: vi.fn(),
+      cancelTask: vi.fn(),
     },
   };
 });
@@ -987,6 +988,22 @@ describe('stockPoolStore', () => {
     expect(state.selectedHistoryIds).toHaveLength(0);
     expect(state.selectedReport).toBeNull();
     expect(state.markdownDrawerOpen).toBe(false);
+  });
+
+  it('updates an active task with the cancellation response', async () => {
+    const task = createTask({ status: 'processing', progress: 60 });
+    const cancelRequestedTask = {
+      ...task,
+      status: 'cancel_requested' as const,
+      message: '正在取消...',
+    };
+    vi.mocked(analysisApi.cancelTask).mockResolvedValue(cancelRequestedTask);
+    useStockPoolStore.getState().syncTaskCreated(task);
+
+    await useStockPoolStore.getState().cancelTask(task.taskId);
+
+    expect(analysisApi.cancelTask).toHaveBeenCalledWith(task.taskId);
+    expect(useStockPoolStore.getState().activeTasks).toEqual([cancelRequestedTask]);
   });
 
   it('ignores late task updates after a task has been removed', () => {

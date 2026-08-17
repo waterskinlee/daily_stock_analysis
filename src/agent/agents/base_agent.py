@@ -31,6 +31,7 @@ from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 from src.report_language import normalize_report_language
 from src.services.daily_market_context import format_daily_market_context_prompt_section
+from src.services.analysis_cancellation import AnalysisCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ class BaseAgent(ABC):
                 llm_adapter=self.llm_adapter,
                 max_steps=self.max_steps,
                 progress_callback=progress_callback,
+                cancel_check=ctx.meta.get("cancel_check"),
                 max_wall_clock_seconds=timeout_seconds,
                 stock_scope=ctx.meta.get("stock_scope"),
                 emit_stage_events=False,
@@ -157,6 +159,8 @@ class BaseAgent(ABC):
 
             result.status = StageStatus.COMPLETED
 
+        except AnalysisCancelledError:
+            raise
         except TimeoutError as exc:
             logger.error("[%s] execution timed out: %s", self.agent_name, exc, exc_info=True)
             result.status = StageStatus.FAILED

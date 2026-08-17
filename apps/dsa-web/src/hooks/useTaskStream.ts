@@ -13,6 +13,8 @@ export type SSEEventType =
   | 'task_started'
   | 'task_progress'
   | 'task_completed'
+  | 'task_cancel_requested'
+  | 'task_cancelled'
   | 'task_failed'
   | 'heartbeat';
 
@@ -40,6 +42,10 @@ export interface UseTaskStreamOptions {
   onTaskProgress?: (task: TaskInfo) => void;
   /** Task failed callback */
   onTaskFailed?: (task: TaskInfo) => void;
+  /** Task cancellation request callback */
+  onTaskCancelRequested?: (task: TaskInfo) => void;
+  /** Task terminal cancellation callback */
+  onTaskCancelled?: (task: TaskInfo) => void;
   /** Incremental run-flow event callback carried by task_progress */
   onTaskFlowEvent?: (task: TaskInfo, event: RunFlowEvent) => void;
   /** Connected callback */
@@ -73,6 +79,8 @@ type TaskStreamCallbacks = Pick<
   | 'onTaskCompleted'
   | 'onTaskProgress'
   | 'onTaskFailed'
+  | 'onTaskCancelRequested'
+  | 'onTaskCancelled'
   | 'onTaskFlowEvent'
   | 'onConnected'
   | 'onError'
@@ -226,6 +234,20 @@ function connectSharedStream() {
       });
     }
   });
+  eventSource.addEventListener('task_cancel_requested', (e) => {
+    const payload = parseEventData((e as MessageEvent<string>).data);
+    if (payload) {
+      forEachSubscriber((callbacks) => callbacks.onTaskCancelRequested?.(payload.task));
+    }
+  });
+
+  eventSource.addEventListener('task_cancelled', (e) => {
+    const payload = parseEventData((e as MessageEvent<string>).data);
+    if (payload) {
+      forEachSubscriber((callbacks) => callbacks.onTaskCancelled?.(payload.task));
+    }
+  });
+
 
   eventSource.addEventListener('task_completed', (e) => {
     const payload = parseEventData((e as MessageEvent<string>).data);
@@ -271,6 +293,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
     onTaskCompleted,
     onTaskProgress,
     onTaskFailed,
+    onTaskCancelRequested,
+    onTaskCancelled,
     onTaskFlowEvent,
     onConnected,
     onError,
@@ -290,6 +314,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
     onTaskCompleted,
     onTaskProgress,
     onTaskFailed,
+    onTaskCancelRequested,
+    onTaskCancelled,
     onTaskFlowEvent,
     onConnected,
     onError,
@@ -303,6 +329,8 @@ export function useTaskStream(options: UseTaskStreamOptions = {}): UseTaskStream
       onTaskCompleted,
       onTaskProgress,
       onTaskFailed,
+      onTaskCancelRequested,
+      onTaskCancelled,
       onTaskFlowEvent,
       onConnected,
       onError,

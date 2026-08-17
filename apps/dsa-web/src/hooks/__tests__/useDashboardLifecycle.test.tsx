@@ -227,6 +227,48 @@ describe('useDashboardLifecycle', () => {
     expect(removeTask).toHaveBeenCalledWith(failedTask.taskId);
   });
 
+  it('keeps cancel-requested tasks until a terminal cancellation event arrives', () => {
+    const syncTaskUpdated = vi.fn();
+    const removeTask = vi.fn();
+
+    renderHook(() =>
+      useDashboardLifecycle({
+        loadInitialHistory: vi.fn().mockResolvedValue(undefined),
+        refreshHistory: vi.fn().mockResolvedValue(undefined),
+        refreshActiveTasks: vi.fn().mockResolvedValue(undefined),
+        syncTaskCreated: vi.fn(),
+        syncTaskUpdated,
+        syncTaskFailed: vi.fn(),
+        removeTask,
+        ...defaultMocks,
+      }),
+    );
+
+    const taskStreamOptions = vi.mocked(useTaskStream).mock.calls[0]?.[0];
+    const cancelRequestedTask = {
+      ...createTask(),
+      status: 'cancel_requested' as const,
+      progress: 72,
+    };
+
+    act(() => {
+      taskStreamOptions?.onTaskCancelRequested?.(cancelRequestedTask);
+      vi.advanceTimersByTime(5_000);
+    });
+
+    expect(syncTaskUpdated).toHaveBeenCalledWith(cancelRequestedTask);
+    expect(removeTask).not.toHaveBeenCalled();
+
+    const cancelledTask = { ...cancelRequestedTask, status: 'cancelled' as const };
+    act(() => {
+      taskStreamOptions?.onTaskCancelled?.(cancelledTask);
+      vi.advanceTimersByTime(2_000);
+    });
+
+    expect(syncTaskUpdated).toHaveBeenCalledWith(cancelledTask);
+    expect(removeTask).toHaveBeenCalledWith(cancelledTask.taskId);
+  });
+
   it('reconciles active tasks when the SSE stream connects', () => {
     const refreshActiveTasks = vi.fn().mockResolvedValue(undefined);
 

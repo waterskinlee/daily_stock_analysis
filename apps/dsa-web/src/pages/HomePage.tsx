@@ -349,6 +349,7 @@ const HomePage: React.FC = () => {
     syncTaskUpdated,
     syncTaskFailed,
     refreshActiveTasks,
+    cancelTask,
     removeTask,
     openMarkdownDrawer,
     closeMarkdownDrawer,
@@ -1362,6 +1363,7 @@ const HomePage: React.FC = () => {
         <TaskPanel
           tasks={activeTasks}
           onOpenRunFlow={openTaskRunFlow}
+          onCancelTask={async (task) => cancelTask(task.taskId)}
           collapsed={isTaskPanelCollapsed}
           onCollapsedChange={handleTaskPanelCollapsedChange}
         />
@@ -1395,6 +1397,7 @@ const HomePage: React.FC = () => {
     ),
     [
       activeTasks,
+      cancelTask,
       batchAnalyzeStatus,
       handleAnalyzeWatchlist,
       handleDeleteStock,

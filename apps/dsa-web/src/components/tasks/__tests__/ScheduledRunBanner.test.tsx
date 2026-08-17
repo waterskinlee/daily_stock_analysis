@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { scheduledRunApi } from '../../../api/analysis';
 import { UiLanguageProvider } from '../../../contexts/UiLanguageContext';
@@ -8,11 +8,13 @@ import { ScheduledRunBanner } from '../ScheduledRunBanner';
 vi.mock('../../../api/analysis', () => ({
   scheduledRunApi: {
     listActiveRuns: vi.fn(),
+    cancelRun: vi.fn(),
     getRunFlow: vi.fn(),
   },
 }));
 
 const listActiveRunsMock = vi.mocked(scheduledRunApi.listActiveRuns);
+const cancelRunMock = vi.mocked(scheduledRunApi.cancelRun);
 
 function renderBanner() {
   return render(
@@ -59,5 +61,37 @@ describe('ScheduledRunBanner', () => {
     renderBanner();
 
     expect(await screen.findByText('定时任务状态加载失败')).toBeInTheDocument();
+  });
+  it('requests cancellation and disables the action while the run drains', async () => {
+    listActiveRunsMock.mockResolvedValue([
+      {
+        runId: 'run-123',
+        status: 'running',
+        stockCount: 12,
+        completedCount: 4,
+        startedAt: null,
+        finishedAt: null,
+        error: null,
+      },
+    ]);
+    cancelRunMock.mockResolvedValue({
+      runId: 'run-123',
+      status: 'cancel_requested',
+      stockCount: 12,
+      completedCount: 4,
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    });
+    renderBanner();
+
+    const cancelButton = await screen.findByRole('button', { name: '取消本轮定时分析' });
+    await act(async () => {
+      cancelButton.click();
+      await Promise.resolve();
+    });
+
+    expect(cancelRunMock).toHaveBeenCalledWith('run-123');
+    expect(await screen.findByRole('button', { name: '正在取消本轮定时分析' })).toBeDisabled();
   });
 });

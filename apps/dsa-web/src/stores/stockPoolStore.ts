@@ -118,6 +118,7 @@ export interface StockPoolState {
   syncTaskUpdated: (task: TaskInfo) => void;
   syncTaskFailed: (task: TaskInfo) => void;
   refreshActiveTasks: () => Promise<void>;
+  cancelTask: (taskId: string) => Promise<void>;
   removeTask: (taskId: string) => void;
   resetDashboardState: () => void;
   loadStockBar: () => Promise<void>;
@@ -1020,6 +1021,15 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
       }
     } catch {
       // Keep the current task panel when reconciliation cannot reach the API.
+    }
+  },
+
+  cancelTask: async (taskId) => {
+    try {
+      const task = await analysisApi.cancelTask(taskId);
+      get().syncTaskUpdated(task);
+    } catch (error) {
+      set({ error: getParsedApiError(error) });
     }
   },
 

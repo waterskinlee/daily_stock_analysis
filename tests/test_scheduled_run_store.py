@@ -182,5 +182,24 @@ class ScheduledRunStoreTestCase(unittest.TestCase):
         self.assertEqual(len(scoped), 2)
 
 
+    def test_cancel_request_is_persisted_and_running_heartbeats_cannot_clear_it(self) -> None:
+        self.db.save_scheduled_run_status("run-1", "running", stock_count=3)
+
+        requested = self.db.request_scheduled_run_cancellation("run-1")
+
+        self.assertIsNotNone(requested)
+        assert requested is not None
+        self.assertEqual(requested["status"], "cancel_requested")
+        self.assertTrue(self.db.is_scheduled_run_cancel_requested("run-1"))
+        self.db.save_scheduled_run_status("run-1", "running", stock_count=3, completed_count=1)
+        current = self.db.get_scheduled_run_status("run-1")
+        assert current is not None
+        self.assertEqual(current["status"], "cancel_requested")
+        self.assertEqual(current["completed_count"], 1)
+        self.assertEqual([row["run_id"] for row in self.db.list_active_scheduled_runs()], ["run-1"])
+
+    def test_cancel_request_for_missing_run_returns_none(self) -> None:
+        self.assertIsNone(self.db.request_scheduled_run_cancellation("missing"))
+
 if __name__ == "__main__":
     unittest.main()

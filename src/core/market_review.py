@@ -15,7 +15,7 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import uuid
 
 from src.config import get_config
@@ -30,6 +30,7 @@ from src.services.run_diagnostics import (
     record_history_run,
     record_notification_run,
 )
+from src.services.analysis_cancellation import AnalysisCancelledError, raise_if_cancelled
 from src.schemas.market_light import MARKET_LIGHT_REGIONS
 from src.utils.market_review_region import (
     MARKET_REVIEW_REGION_ORDER,
@@ -184,6 +185,7 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -199,6 +201,7 @@ def run_market_review(
         query_id: 历史记录关联 ID；API 后台任务会传入 task_id，CLI/Bot 为空时自动生成
         save_report_file: 是否保存 Markdown 文件；上下文生成路径可关闭以避免多区域临时复盘互相覆盖
         persist_history: 是否写入 analysis_history；预热路径可关闭以避免覆盖用户可见的同日大盘复盘记录
+        cancel_check: Optional callback returning True when cancellation was requested.
         trigger_source: 触发来源，用于日志排障（cli/schedule/api/bot/service 等）
 
     Returns:
@@ -221,12 +224,14 @@ def run_market_review(
         persist_region,
     )
 
+    raise_if_cancelled(cancel_check)
     try:
         if len(run_markets) > 1:
             # 多市场顺序执行，合并报告
             parts = []
             market_light_snapshots: Dict[str, Dict[str, Any]] = {}
             market_review_payloads: Dict[str, Dict[str, Any]] = {}
+            raise_if_cancelled(cancel_check)
             for mkt, title_key, label in _MARKET_REVIEW_MARKETS:
                 if mkt not in run_markets:
                     continue
@@ -245,6 +250,7 @@ def run_market_review(
                     config=runtime_config,
                 )
                 review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                raise_if_cancelled(cancel_check)
                 mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
@@ -283,7 +289,9 @@ def run_market_review(
                 config=runtime_config,
             )
             review_result = market_analyzer.run_daily_review_with_snapshot()
+            raise_if_cancelled(cancel_check)
             review_report = review_result.report
+            raise_if_cancelled(cancel_check)
             market_light_snapshots = {}
             _collect_market_light_snapshot(
                 market_light_snapshots,
@@ -298,6 +306,7 @@ def run_market_review(
                 )
             }
         
+        raise_if_cancelled(cancel_check)
         if review_report:
             market_review_payload = _build_combined_market_review_payload(
                 review_report=review_report,
@@ -314,6 +323,7 @@ def run_market_review(
                 market_review_payload,
                 review_report=review_report,
             )
+            raise_if_cancelled(cancel_check)
             if save_report_file:
                 # 保存报告到文件
                 date_str = datetime.now().strftime('%Y%m%d')
@@ -331,6 +341,7 @@ def run_market_review(
                     filepath,
                 )
 
+                raise_if_cancelled(cancel_check)
             if persist_history:
                 _persist_market_review_history(
                     review_report=review_report,
@@ -342,6 +353,7 @@ def run_market_review(
                     market_review_payload=market_review_payload,
                 )
             
+            raise_if_cancelled(cancel_check)
             # 推送通知（合并模式下跳过，由 main 层统一发送）
             if merge_notification and send_notification:
                 logger.info(
@@ -377,6 +389,7 @@ def run_market_review(
                     supports_payload = False
                 if supports_payload:
                     send_kwargs["structured_payload"] = market_review_payload
+                raise_if_cancelled(cancel_check)
                 success = notifier.send(report_content, **send_kwargs)
                 _record_market_review_notification_run(
                     query_id=history_query_id,
@@ -431,6 +444,7 @@ def run_market_review(
                     attempts=0,
                 )
             
+            raise_if_cancelled(cancel_check)
             if return_structured:
                 return MarketReviewRunResult(
                     report=review_report,
@@ -440,6 +454,8 @@ def run_market_review(
                 return merge_markdown_report
             return review_report
         
+    except AnalysisCancelledError:
+        raise
     except GenerationError:
         logger.exception(
             "[MarketReview] component=market_review action=failed "
@@ -765,6 +781,8 @@ def _render_sector_payload_block(payload: Dict[str, Any]) -> str:
 
 def _format_sector_change_pct(sector: Dict[str, Any]) -> str:
     raw = sector.get("change_pct", sector.get("changePct"))
+    if raw is None:
+        return "--"
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -821,7 +839,7 @@ def _persist_market_review_history(
         )
 
         history_query_id = query_id or f"market_review_{uuid.uuid4().hex}"
-        context_snapshot = {
+        context_snapshot: Dict[str, Any] = {
             "report_kind": MARKET_REVIEW_REPORT_TYPE,
             "market_review_region": region,
             "report_language": report_language,

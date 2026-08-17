@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useId, useState } from 'react';
-import { ChevronDown, RefreshCw, Workflow } from 'lucide-react';
+import { ChevronDown, LoaderCircle, RefreshCw, Workflow, X } from 'lucide-react';
 import { Badge, Button, Card, StatusDot, Tooltip } from '../common';
 import { DashboardPanelHeader } from '../dashboard';
 import type { TaskInfo } from '../../types/analysis';
@@ -13,12 +13,13 @@ import { useUiLanguage } from '../../contexts/UiLanguageContext';
 interface TaskItemProps {
   task: TaskInfo;
   onOpenRunFlow?: (task: TaskInfo) => void;
+  onCancelTask?: (task: TaskInfo) => void | Promise<void>;
 }
 
 /**
  * 单个任务项
  */
-const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow }) => {
+const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow, onCancelTask }) => {
   const { language, t } = useUiLanguage();
   const isPending = task.status === 'pending';
   const isProcessing = task.status === 'processing';
@@ -35,6 +36,25 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow }) => {
   const traceId = (task.traceId || '').trim();
   const requestedPhaseLabel = getRequestedPhaseLabel(task.analysisPhase, language);
   const requestedPhaseVariant = task.analysisPhase === 'auto' ? 'default' : 'info';
+  const [isCancelling, setIsCancelling] = useState(false);
+  const isCancellableTaskKind = task.reportType !== 'market_review';
+  const canCancel = isCancellableTaskKind && (isPending || isProcessing);
+  const showCancelAction = Boolean(onCancelTask) && isCancellableTaskKind && (canCancel || isCancelRequested);
+
+  const handleCancel = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!onCancelTask || !canCancel || isCancelling) {
+      return;
+    }
+    setIsCancelling(true);
+    try {
+      await onCancelTask(task);
+    } catch {
+      // The owner reports request errors; this component only owns button state.
+    } finally {
+      setIsCancelling(false);
+    }
+  };
 
   return (
     <div className="home-subpanel grid min-w-0 gap-2.5 px-3 py-2.5" data-testid="task-panel-item">
@@ -80,6 +100,32 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow }) => {
                   })}
                 >
                   <Workflow className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              </span>
+            </Tooltip>
+          ) : null}
+          {showCancelAction ? (
+            <Tooltip content={isCancelRequested ? t('taskPanel.cancelRequested') : t('taskPanel.cancel')}>
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  variant="danger-subtle"
+                  size="xsm"
+                  className="h-10 w-10 px-0 active:scale-[0.96]"
+                  disabled={isCancelRequested || isCancelling}
+                  onClick={handleCancel}
+                  aria-label={t(
+                    isCancelRequested || isCancelling
+                      ? 'taskPanel.cancelRequestedActionAria'
+                      : 'taskPanel.cancelAria',
+                    { stock: task.stockName || task.stockCode },
+                  )}
+                >
+                  {isCancelling ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  )}
                 </Button>
               </span>
             </Tooltip>
@@ -159,6 +205,8 @@ interface TaskPanelProps {
   className?: string;
   /** 打开运行流面板 */
   onOpenRunFlow?: (task: TaskInfo) => void;
+  /** 请求取消任务 */
+  onCancelTask?: (task: TaskInfo) => void | Promise<void>;
   /** 是否折叠 */
   collapsed?: boolean;
   /** 折叠状态变化 */
@@ -175,6 +223,7 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
   title,
   className = '',
   onOpenRunFlow,
+  onCancelTask,
   collapsed,
   onCollapsedChange,
 }) => {
@@ -287,7 +336,12 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
         <div id={contentId} className="max-h-64 overflow-y-auto border-t border-subtle p-2">
           <div className="space-y-2">
             {activeTasks.map((task) => (
-              <TaskItem key={task.taskId} task={task} onOpenRunFlow={onOpenRunFlow} />
+              <TaskItem
+                key={task.taskId}
+                task={task}
+                onOpenRunFlow={onOpenRunFlow}
+                onCancelTask={onCancelTask}
+              />
             ))}
           </div>
         </div>

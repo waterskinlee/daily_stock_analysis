@@ -10,6 +10,7 @@ import type {
   MarketReviewRequest,
   TaskStatus,
   TaskListResponse,
+  TaskInfo,
 } from '../types/analysis';
 import type { RunFlowSnapshot } from '../types/runFlow';
 import { serializeMarketReviewRegions } from '../utils/marketReviewRegion';
@@ -165,6 +166,16 @@ export const analysisApi = {
   },
 
   /**
+   * Request cooperative cancellation for an async stock-analysis task.
+   */
+  cancelTask: async (taskId: string): Promise<TaskInfo> => {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/analysis/tasks/${encodeURIComponent(taskId)}/cancel`
+    );
+    return toCamelCase<TaskInfo>(response.data);
+  },
+
+  /**
    * Get a run-flow snapshot for an active analysis task.
    * @param taskId Task ID
    */
@@ -188,7 +199,7 @@ export const analysisApi = {
 
 export type ScheduledRunStatus = {
   runId: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled' | string;
+  status: 'running' | 'cancel_requested' | 'completed' | 'failed' | 'cancelled' | string;
   stockCount: number;
   completedCount: number;
   startedAt: string | null;
@@ -218,6 +229,13 @@ export const scheduledRunApi = {
     );
     const data = toCamelCase<{ runs: ScheduledRunStatus[] }>(response.data);
     return Array.isArray(data.runs) ? data.runs : [];
+  },
+  cancelRun: async (runId: string): Promise<ScheduledRunStatus> => {
+    const response = await apiClient.post<Record<string, unknown>>(
+      `/api/v1/analysis/scheduled-runs/${encodeURIComponent(runId)}/cancel`
+    );
+    const data = toCamelCase<{ run: ScheduledRunStatus }>(response.data);
+    return data.run;
   },
   getRunFlow: async (
     runId: string,

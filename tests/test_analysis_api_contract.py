@@ -7,6 +7,7 @@ from datetime import datetime
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -2930,6 +2931,18 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             },
         )
 
+    def test_openapi_declares_task_and_scheduled_run_cancellation_routes(self) -> None:
+        if create_app is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app(static_dir=Path(temp_dir))
+            paths = app.openapi()["paths"]
+
+        self.assertIn("post", paths["/api/v1/analysis/tasks/{task_id}/cancel"])
+        self.assertIn("post", paths["/api/v1/analysis/scheduled-runs/{run_id}/cancel"])
+
+
     def test_openapi_declares_backtest_phase_filter_enum_and_400(self) -> None:
         if create_app is None:
             self.skipTest("fastapi is not installed in this test environment")
@@ -3909,6 +3922,82 @@ class BatchTaskQueueContractTestCase(unittest.TestCase):
         self.assertEqual(updated.message, "LLM 正在生成分析结果")
         self.assertEqual(events, [("task_progress", updated.to_dict())])
 
+
+    def test_cancel_pending_task_marks_it_cancelled_and_releases_stock(self) -> None:
+        queue = AnalysisTaskQueue(max_workers=1)
+        queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
+        events = []
+        queue._broadcast_event = lambda event_type, data: events.append((event_type, data))
+
+        accepted, _ = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        cancelled = queue.cancel_task(accepted[0].task_id)
+
+        self.assertEqual(cancelled.status, TaskStatus.CANCELLED)
+        self.assertFalse(queue.is_analyzing("600519"))
+        self.assertEqual(events[-1][0], "task_cancelled")
+
+    def test_cancel_processing_task_requests_cooperative_stop(self) -> None:
+        queue = AnalysisTaskQueue(max_workers=1)
+        queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
+
+        accepted, _ = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        with queue._data_lock:
+            queue._tasks[accepted[0].task_id].status = TaskStatus.PROCESSING
+            queue._futures[accepted[0].task_id].set_running_or_notify_cancel()
+
+        requested = queue.cancel_task(accepted[0].task_id)
+
+        self.assertEqual(requested.status, TaskStatus.CANCEL_REQUESTED)
+        self.assertTrue(queue.is_cancel_requested(accepted[0].task_id))
+
+    def test_processing_cancellation_wins_a_completion_race(self) -> None:
+        queue = AnalysisTaskQueue(max_workers=1)
+        queue._executor = type("ExecutorStub", (), {"submit": lambda self, *args, **kwargs: Future()})()
+        accepted, _ = queue.submit_tasks_batch(["600519"], report_type="detailed")
+        task_id = accepted[0].task_id
+        service_started = threading.Event()
+        release_service = threading.Event()
+        events = []
+        queue._broadcast_event = lambda event_type, data: events.append((event_type, data))
+
+        class ServiceStub:
+            def analyze_stock(self, **kwargs):
+                self.cancel_check = kwargs["is_cancelled"]
+                service_started.set()
+                release_service.wait(timeout=2)
+                return {"stock_name": "贵州茅台"}
+
+        service = ServiceStub()
+
+        def run_worker() -> None:
+            with patch(
+                "src.services.analysis_service.AnalysisService",
+                return_value=service,
+            ), patch(
+                "src.services.task_queue.get_current_diagnostic_context",
+                return_value=object(),
+            ), patch("src.services.task_queue.reset_run_diagnostic_context"):
+                queue._execute_task(task_id, "600519", "detailed", False)
+
+        worker = threading.Thread(target=run_worker)
+        worker.start()
+        self.assertTrue(service_started.wait(timeout=2))
+
+        requested = queue.cancel_task(task_id)
+        self.assertEqual(requested.status, TaskStatus.CANCEL_REQUESTED)
+        self.assertTrue(service.cancel_check())
+
+        release_service.set()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        final_task = queue.get_task(task_id)
+        self.assertIsNotNone(final_task)
+        self.assertEqual(final_task.status, TaskStatus.CANCELLED)
+        self.assertIsNone(final_task.result)
+        self.assertFalse(queue.is_analyzing("600519"))
+        self.assertNotIn("task_completed", [event_type for event_type, _ in events])
+        self.assertEqual(events[-1][0], "task_cancelled")
 
 class ImageStockExtractorContractTestCase(unittest.TestCase):
     def test_litellm_completion_patch_target_remains_available(self) -> None:

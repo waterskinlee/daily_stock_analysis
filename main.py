@@ -712,6 +712,8 @@ def run_full_analysis(
 
     query_id = uuid.uuid4().hex
     scheduled_status_writer = None
+    from src.services.analysis_cancellation import AnalysisCancelledError, raise_if_cancelled
+    scheduled_cancel_check: Optional[Callable[[], bool]] = None
     flow_event_sink = None
     scheduled_completed_count = 0
     stock_completion_callback: Optional[Callable[[int, int], None]] = None
@@ -729,6 +731,21 @@ def run_full_analysis(
                 event=event,
             )
         )
+        scheduled_cancel_check = lambda: scheduled_db.is_scheduled_run_cancel_requested(query_id)
+
+    def _wait_with_scheduled_cancellation(delay_seconds: float) -> None:
+        if delay_seconds <= 0:
+            return
+        if scheduled_cancel_check is None:
+            time.sleep(delay_seconds)
+            return
+        deadline = time.monotonic() + delay_seconds
+        while True:
+            raise_if_cancelled(scheduled_cancel_check)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
     try:
         _refresh_stock_index_cache_for_analysis(config)
         if portfolio_stock_codes is not None:
@@ -795,22 +812,33 @@ def run_full_analysis(
         )
         analysis_reference_time = datetime.now(timezone.utc)
         daily_market_context_target_date = None
+        if scheduled_status_writer is not None:
+            scheduled_status_writer.save_scheduled_run_status(
+                query_id,
+                "running",
+                stock_count=0,
+            )
+            raise_if_cancelled(scheduled_cancel_check)
         if should_use_daily_market_context:
             daily_market_context_target_date = _resolve_daily_market_context_target_date(
                 market_review_region,
                 analysis_reference_time,
             )
         market_report = ""
-        pipeline = StockAnalysisPipeline(
-            config=config,
-            max_workers=args.workers,
-            query_id=query_id,
-            query_source="cli",
-            save_context_snapshot=save_context_snapshot,
-            daily_market_context_enabled=should_use_daily_market_context,
-            daily_market_context_allow_generate=should_use_daily_market_context,
-            flow_event_sink=flow_event_sink,
-        )
+        pipeline_kwargs = {
+            "config": config,
+            "max_workers": args.workers,
+            "query_id": query_id,
+            "query_source": "cli",
+            "save_context_snapshot": save_context_snapshot,
+            "daily_market_context_enabled": should_use_daily_market_context,
+            "daily_market_context_allow_generate": should_use_daily_market_context,
+            "flow_event_sink": flow_event_sink,
+        }
+        if scheduled_cancel_check is not None:
+            pipeline_kwargs["cancel_check"] = scheduled_cancel_check
+        pipeline = StockAnalysisPipeline(**pipeline_kwargs)
+
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge
             # content must avoid silently reusing unrelated historical reports.
@@ -823,6 +851,8 @@ def run_full_analysis(
                 target_date=daily_market_context_target_date,
                 return_full_report=False,
             )
+            if scheduled_cancel_check is not None:
+                raise_if_cancelled(scheduled_cancel_check)
             _prime_daily_market_context(
                 config,
                 pipeline=pipeline,
@@ -833,6 +863,8 @@ def run_full_analysis(
                 return_full_report=True,
                 require_current_query_match=True,
             )
+            if scheduled_cancel_check is not None:
+                raise_if_cancelled(scheduled_cancel_check)
 
         if scheduled_status_writer is not None:
             scheduled_status_writer.save_scheduled_run_status(
@@ -853,6 +885,9 @@ def run_full_analysis(
 
             stock_completion_callback = persist_stock_completion
 
+        if scheduled_cancel_check is not None:
+            raise_if_cancelled(scheduled_cancel_check)
+
         # 1. 运行大盘复盘（提前，让本轮个股复用完整上下文）
         analysis_delay = getattr(config, 'analysis_delay', 0)
         review_result = None
@@ -864,19 +899,26 @@ def run_full_analysis(
             review_trigger_source = "schedule" if schedule_mode else "cli"
             if analysis_delay > 0:
                 logger.info(f"等待 {analysis_delay} 秒后执行大盘复盘（避免API限流）...")
-                time.sleep(analysis_delay)
+                _wait_with_scheduled_cancellation(analysis_delay)
+            review_kwargs = {
+                "notifier": pipeline.notifier,
+                "analyzer": pipeline.analyzer,
+                "search_service": pipeline.search_service,
+                "send_notification": not args.no_notify,
+                "merge_notification": merge_notification,
+                "override_region": market_review_region,
+                "query_id": query_id,
+                "trigger_source": review_trigger_source,
+            }
+            if scheduled_cancel_check is not None:
+                review_kwargs["cancel_check"] = scheduled_cancel_check
             review_result = _run_market_review_with_shared_lock(
                 config,
                 run_market_review,
-                notifier=pipeline.notifier,
-                analyzer=pipeline.analyzer,
-                search_service=pipeline.search_service,
-                send_notification=not args.no_notify,
-                merge_notification=merge_notification,
-                override_region=market_review_region,
-                query_id=query_id,
-                trigger_source=review_trigger_source,
+                **review_kwargs,
             )
+            if scheduled_cancel_check is not None:
+                raise_if_cancelled(scheduled_cancel_check)
             if review_result:
                 market_report = _market_review_report_text(review_result)
 
@@ -897,9 +939,14 @@ def run_full_analysis(
             }
             if stock_completion_callback is not None:
                 pipeline_run_kwargs["stock_completion_callback"] = stock_completion_callback
+            if scheduled_cancel_check is not None:
+                pipeline_run_kwargs["cancel_check"] = scheduled_cancel_check
+                raise_if_cancelled(scheduled_cancel_check)
             results = pipeline.run(**pipeline_run_kwargs)
 
         # Issue #190: 合并推送（个股+大盘复盘）
+        if scheduled_cancel_check is not None:
+            raise_if_cancelled(scheduled_cancel_check)
         if merge_notification and (results or market_report) and not args.no_notify:
             parts = []
             if market_report:
@@ -913,6 +960,8 @@ def run_full_analysis(
             if parts:
                 combined_content = "\n\n---\n\n".join(parts)
                 if pipeline.notifier.is_available():
+                    if scheduled_cancel_check is not None:
+                        raise_if_cancelled(scheduled_cancel_check)
                     if pipeline.notifier.send(combined_content, email_send_to_all=True, route_type="report"):
                         logger.info("已合并推送（个股+大盘复盘）")
                     else:
@@ -930,6 +979,8 @@ def run_full_analysis(
 
         logger.info("\n任务执行完成")
 
+        if scheduled_cancel_check is not None:
+            raise_if_cancelled(scheduled_cancel_check)
         # === 新增：生成飞书云文档 ===
         try:
             from src.feishu_doc import FeishuDocManager
@@ -964,16 +1015,24 @@ def run_full_analysis(
                     logger.info(f"飞书云文档创建成功: {doc_url}")
                     # 可选：将文档链接也推送到群里
                     if not args.no_notify:
+                        if scheduled_cancel_check is not None:
+                            raise_if_cancelled(scheduled_cancel_check)
                         pipeline.notifier.send(
                             f"[{now.strftime('%Y-%m-%d %H:%M')}] 复盘文档创建成功: {doc_url}",
                             route_type="report",
                         )
 
+        except AnalysisCancelledError:
+            raise
         except Exception as e:
             logger.error(f"飞书文档生成失败: {e}")
 
+        if scheduled_cancel_check is not None:
+            raise_if_cancelled(scheduled_cancel_check)
         # === Auto backtest ===
         _run_auto_backtest(config)
+        if scheduled_cancel_check is not None:
+            raise_if_cancelled(scheduled_cancel_check)
 
         if scheduled_status_writer is not None:
             scheduled_status_writer.save_scheduled_run_status(
@@ -985,6 +1044,16 @@ def run_full_analysis(
 
         return True
 
+    except AnalysisCancelledError:
+        logger.info("定时分析任务已按请求取消: %s", query_id)
+        if scheduled_status_writer is not None:
+            scheduled_status_writer.save_scheduled_run_status(
+                query_id,
+                "cancelled",
+                stock_count=len(stock_codes or []),
+                completed_count=scheduled_completed_count,
+            )
+        return True
     except Exception as e:
         logger.exception(f"分析流程执行失败: {e}")
         if scheduled_status_writer is not None:

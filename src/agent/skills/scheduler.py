@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from src.agent.protocols import AgentContext, AgentOpinion, StageResult, StageStatus
+from src.services.analysis_cancellation import AnalysisCancelledError
+
 logger = logging.getLogger(__name__)
 
 RunStageCallable = Callable[[Any, AgentContext, Optional[Callable], Optional[float]], StageResult]
@@ -70,6 +72,8 @@ class AgentSkillScheduler:
                 index, agent = futures[future]
                 try:
                     result, opinions = future.result()
+                except AnalysisCancelledError:
+                    raise
                 except Exception as exc:
                     logger.warning("[AgentSkillScheduler] skill '%s' failed: %s", agent.agent_name, exc)
                     result = StageResult(

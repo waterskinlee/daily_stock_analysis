@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { analysisApi } from '../analysis';
+import { analysisApi, scheduledRunApi } from '../analysis';
 
 const post = vi.hoisted(() => vi.fn());
 
@@ -54,5 +54,61 @@ describe('analysisApi.triggerMarketReview', () => {
       },
       expect.any(Object),
     );
+  });
+});
+
+describe('analysisApi.cancelTask', () => {
+  beforeEach(() => {
+    post.mockReset();
+  });
+
+  it('posts an encoded task id and converts the returned task payload', async () => {
+    post.mockResolvedValue({
+      status: 200,
+      data: {
+        task_id: 'task/1',
+        stock_code: '600519',
+        status: 'cancel_requested',
+        progress: 42,
+        message: '正在取消...',
+        report_type: 'detailed',
+        created_at: '2026-08-17T08:00:00Z',
+      },
+    });
+
+    const result = await analysisApi.cancelTask('task/1');
+
+    expect(post).toHaveBeenCalledWith('/api/v1/analysis/tasks/task%2F1/cancel');
+    expect(result.taskId).toBe('task/1');
+    expect(result.status).toBe('cancel_requested');
+  });
+});
+
+describe('scheduledRunApi.cancelRun', () => {
+  beforeEach(() => {
+    post.mockReset();
+  });
+
+  it('requests cancellation and returns the normalized run status', async () => {
+    post.mockResolvedValue({
+      status: 200,
+      data: {
+        run: {
+          run_id: 'run/1',
+          status: 'cancel_requested',
+          stock_count: 8,
+          completed_count: 2,
+          started_at: null,
+          finished_at: null,
+          error: null,
+        },
+      },
+    });
+
+    const result = await scheduledRunApi.cancelRun('run/1');
+
+    expect(post).toHaveBeenCalledWith('/api/v1/analysis/scheduled-runs/run%2F1/cancel');
+    expect(result.runId).toBe('run/1');
+    expect(result.status).toBe('cancel_requested');
   });
 });

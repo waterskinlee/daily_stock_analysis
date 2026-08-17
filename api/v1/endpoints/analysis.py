@@ -82,6 +82,7 @@ from src.services.task_queue import (
     get_task_queue,
     DuplicateTaskError,
     TaskStatus as TaskStatusEnum,
+    TaskCancellationUnavailableError,
 )
 from src.services.run_diagnostics import build_run_diagnostic_summary
 from src.services.run_flow import build_task_run_flow_snapshot
@@ -658,6 +659,50 @@ def get_task_list(
     )
 
 
+
+@router.post(
+    "/tasks/{task_id}/cancel",
+    response_model=TaskInfo,
+    responses={
+        200: {"description": "Cancellation accepted or task already cancelled"},
+        404: {"description": "任务不存在", "model": ErrorResponse},
+        409: {"description": "任务已结束或当前无法安全取消", "model": ErrorResponse},
+    },
+    summary="取消分析任务",
+    description="请求停止一个等待中或执行中的个股分析任务。执行中的任务在安全检查点停止。",
+)
+def cancel_analysis_task(task_id: str) -> TaskInfo:
+    """Cancel one queued or cooperatively cancellable analysis task."""
+    task_queue = get_task_queue()
+    try:
+        task = task_queue.cancel_task(task_id)
+    except TaskCancellationUnavailableError as exc:
+        raise api_error(409, "task_not_cancellable", str(exc)) from exc
+
+    if task is None:
+        raise api_error(404, "not_found", f"任务 {task_id} 不存在或已过期")
+    if task.status in (TaskStatusEnum.COMPLETED, TaskStatusEnum.FAILED):
+        raise api_error(409, "task_already_finished", f"任务 {task_id} 已结束，无法取消")
+
+    return TaskInfo(
+        task_id=task.task_id,
+        trace_id=_get_task_trace_id(task),
+        stock_code=task.stock_code,
+        stock_name=task.stock_name,
+        status=task.status.value,
+        progress=task.progress,
+        message=task.message,
+        report_type=task.report_type,
+        created_at=task.created_at.isoformat(),
+        started_at=task.started_at.isoformat() if task.started_at else None,
+        completed_at=task.completed_at.isoformat() if task.completed_at else None,
+        error=task.error,
+        original_query=task.original_query,
+        selection_source=task.selection_source,
+        analysis_phase=task.analysis_phase,
+        skills=getattr(task, "skills", None),
+        region=task.region,
+    )
 # ============================================================
 # GET /tasks/stream - SSE 实时推送
 # ============================================================
@@ -680,6 +725,8 @@ async def task_stream():
     - task_started: 任务开始执行
     - task_progress: 任务阶段进度更新
     - task_completed: 任务完成
+    - task_cancel_requested: 任务已请求取消
+    - task_cancelled: 任务已取消
     - task_failed: 任务失败
     - heartbeat: 心跳（每 30 秒）
     
@@ -1520,6 +1567,33 @@ def list_scheduled_runs() -> Dict[str, Any]:
         logger.error(f"查询定时任务状态失败: {exc}", exc_info=True)
         raise api_error(500, "internal_error", f"查询定时任务状态失败: {str(exc)}")
     return {"runs": runs}
+
+
+@router.post(
+    "/scheduled-runs/{run_id}/cancel",
+    summary="取消后台定时分析任务",
+    description="请求停止 analyzer 进程中的当前定时批任务；任务会在安全检查点退出。",
+)
+def cancel_scheduled_run(run_id: str) -> Dict[str, Any]:
+    """Persist a cross-process cancellation request for one scheduled run."""
+    from src.storage import get_db
+
+    try:
+        db = get_db()
+        requested = db.request_scheduled_run_cancellation(run_id)
+        if requested is None:
+            current = db.get_scheduled_run_status(run_id)
+            if current is None:
+                raise api_error(404, "not_found", f"定时任务 {run_id} 不存在")
+            raise api_error(500, "internal_error", f"取消定时任务 {run_id} 失败")
+        if requested.get("status") in {"completed", "failed"}:
+            raise api_error(409, "scheduled_run_already_finished", f"定时任务 {run_id} 已结束，无法取消")
+        return {"run": requested}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"取消定时任务失败: {exc}", exc_info=True)
+        raise api_error(500, "internal_error", f"取消定时任务失败: {str(exc)}")
 
 
 @router.get(
