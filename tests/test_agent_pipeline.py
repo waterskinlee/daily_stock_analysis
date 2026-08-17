@@ -3099,6 +3099,59 @@ class TestAgentConstructionChain(unittest.TestCase):
         self.assertEqual(mock_completion.call_args.kwargs["reasoning_effort"], "xhigh")
 
     @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_uses_native_reasoning_for_responses_max(self, _mock_router):
+        """Responses routes should receive the native max reasoning object."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/gpt-5.6-luna",
+            litellm_fallback_models=[],
+            llm_model_list=[
+                {
+                    "model_name": "openai/gpt-5.6-luna",
+                    "litellm_params": {"model": "openai/responses/gpt-5.6-luna"},
+                    "model_info": {
+                        "dsa_protocol": "openai",
+                        "dsa_api_surface": "responses",
+                        "dsa_reasoning_effort": "max",
+                    },
+                }
+            ],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "openai/gpt-5.6-luna",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args.kwargs["reasoning"], {"effort": "max"})
+        self.assertNotIn("reasoning_effort", mock_completion.call_args.kwargs)
+
+    @patch("src.agent.llm_adapter.Router")
     def test_llm_adapter_recovers_from_unsupported_temperature(self, _mock_router):
         """Agent direct LiteLLM calls should retry once with a request-scoped parameter repair."""
         from src.llm.generation_params import clear_litellm_generation_param_recovery_cache

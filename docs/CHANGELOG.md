@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 后台定时分析任务写入共享事件总线：analyzer 每次定时批处理在 `scheduled_run_status`/`scheduled_run_events` 记录运行状态与实时 run-flow 事件（复用 query_id 作为 run_id，写入 fail-open），server 新增只读端点 `GET /api/v1/analysis/scheduled-runs` 与 `GET /api/v1/analysis/scheduled-runs/{run_id}/flow`；Web 首页新增「定时分析进行中」横幅，3 秒轮询展示活跃批次与股票总数。旧单 Agent/手动分析路径不写入，保持 unscoped。
 - [新功能] 个股与定时分析支持协作式取消：新增 `POST /api/v1/analysis/tasks/{task_id}/cancel` 与 `POST /api/v1/analysis/scheduled-runs/{run_id}/cancel`，任务队列和 SQLite 定时状态具备幂等竞态保护，执行链在安全检查点停止并广播 `task_cancel_requested` / `task_cancelled`；Web 首页任务面板与定时分析横幅提供取消入口，并在停止完成前保留状态反馈。
 - [修复] 协作式取消接入共享 Agent runner 时恢复 `thinking_labels` 参数；此前签名替换遗漏导致 specialist 决策阶段进入函数体后触发 `NameError: thinking_labels is not defined`，使多 Agent 个股分析在决策阶段失败。
+- [修复] OpenAI Responses 渠道的 `reasoning_effort=max` 改用原生 `reasoning={"effort":"max"}` 请求结构，绕过 LiteLLM 1.96.0 会静默丢弃未知 `max` 档位的兼容缺陷；Chat Completions 与其他推理档位保持原参数路径。
 
 - [改进] 多 Agent 分析管线支持按角色独立模型（`AGENT_TECHNICAL_MODEL` 等 7 个开关，空值继承 `AGENT_LITELLM_MODEL`→`LITELLM_MODEL`），并记录输入/输出 Token 分离与候选模型链；pipeline 预取与 Agent 工具共用同一任务级搜索缓存，避免新闻源重复请求；运行流将「无匹配」与真实失败区分展示；Agent 仅注入各自所需上下文，决策阶段不再让 LLM 生成确定性的 `phase_context`/`strategy_synthesis`；specialist/full 模式下技术、情报两个独立阶段并行执行（`AGENT_DAG_PARALLEL` 可关闭）。
 - [修复] Web 个股报告新增「决策上下文」卡：展示策略层多策略综合（综合信号/共识度/冲突/置信度/支持与反方策略）到最终决策的路径，明确标注「策略层共识 ≠ 最终决策」，并在风控下调（如 buy→sell）或数据降级时高亮原因，消除「多策略综合偏多但核心结论偏空」的歧义；后端通知、历史 Markdown 与 Jinja 模板同步渲染同一决策上下文（`agent_disagreement_explanation` 首次被消费渲染），三语本地化。

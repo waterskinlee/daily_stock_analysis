@@ -594,7 +594,12 @@ def apply_litellm_generation_params(
         model_list=model_list,
         request_overrides=effective_overrides,
     ) == "openai":
-        updated["reasoning_effort"] = reasoning_effort
+        wire_model = resolve_litellm_wire_model(model, model_list).strip().lower()
+        if reasoning_effort == "max" and "/responses/" in wire_model:
+            updated.pop("reasoning_effort", None)
+            updated["reasoning"] = {"effort": "max"}
+        else:
+            updated["reasoning_effort"] = reasoning_effort
     else:
         updated.pop("reasoning_effort", None)
     cached_recovery = get_cached_litellm_generation_param_recovery(

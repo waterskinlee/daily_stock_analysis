@@ -1532,6 +1532,52 @@ class LLMChannelConfigTestCase(unittest.TestCase):
                 {"openai/gpt-5.6-sol": "xhigh"},
             )
 
+    def test_responses_max_reasoning_effort_uses_native_reasoning_payload(self) -> None:
+        model_list = [
+            {
+                "model_name": "openai/gpt-5.6-luna",
+                "litellm_params": {"model": "openai/responses/gpt-5.6-luna"},
+                "model_info": {
+                    "dsa_protocol": "openai",
+                    "dsa_api_surface": "responses",
+                    "dsa_reasoning_effort": "max",
+                },
+            }
+        ]
+
+        call_kwargs = apply_litellm_generation_params(
+            {"model": "openai/gpt-5.6-luna", "messages": []},
+            "openai/gpt-5.6-luna",
+            0.7,
+            model_list=model_list,
+        )
+
+        self.assertEqual(call_kwargs["reasoning"], {"effort": "max"})
+        self.assertNotIn("reasoning_effort", call_kwargs)
+
+    def test_chat_completions_max_reasoning_effort_keeps_legacy_parameter(self) -> None:
+        model_list = [
+            {
+                "model_name": "openai/gpt-5.6-luna",
+                "litellm_params": {"model": "openai/gpt-5.6-luna"},
+                "model_info": {
+                    "dsa_protocol": "openai",
+                    "dsa_api_surface": "chat_completions",
+                    "dsa_reasoning_effort": "max",
+                },
+            }
+        ]
+
+        call_kwargs = apply_litellm_generation_params(
+            {"model": "openai/gpt-5.6-luna", "messages": []},
+            "openai/gpt-5.6-luna",
+            0.7,
+            model_list=model_list,
+        )
+
+        self.assertEqual(call_kwargs["reasoning_effort"], "max")
+        self.assertNotIn("reasoning", call_kwargs)
+
     def test_reasoning_effort_is_sent_only_for_openai_protocol(self) -> None:
         with patch.dict(os.environ, {"LLM_REASONING_EFFORT": "high"}, clear=True):
             openai_kwargs = apply_litellm_generation_params(
