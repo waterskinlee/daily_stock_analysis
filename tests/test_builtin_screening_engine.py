@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import pandas as pd
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient as FastAPITestClient
 
@@ -815,3 +816,156 @@ def test_fresh_snapshot_cache_reuses_fallback_from_same_source_chain(tmp_path, m
     assert second.attrs["snapshot_source"] == "last_good_cache"
     assert second.attrs["last_good_snapshot_source"] == "sina"
     assert second.attrs["fallback_used"] is False
+
+
+class _FakeTusharePro:
+    """Minimal Tushare Pro stub returning per-date EOD tables."""
+
+    def __init__(self, *, open_dates, daily_by_date=None, daily_basic_by_date=None):
+        self._open_dates = list(open_dates)
+        self._daily_by_date = dict(daily_by_date or {})
+        self._daily_basic_by_date = dict(daily_basic_by_date or {})
+        self.daily_calls: list[str] = []
+        self.daily_basic_calls: list[str] = []
+        self.stock_basic_calls = 0
+
+    def trade_cal(self, **kwargs):
+        return pd.DataFrame(
+            {"cal_date": list(self._open_dates), "is_open": ["1"] * len(self._open_dates)}
+        )
+
+    def daily(self, trade_date=None, fields=None):
+        self.daily_calls.append(str(trade_date))
+        return self._daily_by_date.get(str(trade_date), pd.DataFrame())
+
+    def daily_basic(self, trade_date=None, fields=None):
+        self.daily_basic_calls.append(str(trade_date))
+        return self._daily_basic_by_date.get(str(trade_date), pd.DataFrame())
+
+    def stock_basic(self, **kwargs):
+        self.stock_basic_calls += 1
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "symbol": ["000001"],
+                "name": ["Ping An"],
+                "industry": ["bank"],
+            }
+        )
+
+
+def _tushare_daily_rows(trade_date: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": trade_date,
+                "close": 10.0,
+                "pct_chg": 1.0,
+                "amount": 1000.0,
+            }
+        ]
+    )
+
+
+def _tushare_daily_basic_rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "turnover_rate": 1.5,
+                "volume_ratio": 1.2,
+                "pe": 9.0,
+                "pb": 0.9,
+                "total_mv": 100.0,
+                "circ_mv": 80.0,
+            }
+        ]
+    )
+
+
+def _patch_tushare_pro(monkeypatch, pro: _FakeTusharePro) -> None:
+    import tushare as ts
+
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.delenv("TUSHARE_TRADE_DATE", raising=False)
+    monkeypatch.setattr(ts, "pro_api", lambda token: pro)
+
+
+def test_tushare_snapshot_walks_back_to_previous_open_day_when_latest_daily_empty(monkeypatch) -> None:
+    pro = _FakeTusharePro(
+        open_dates=["20260817", "20260818", "20260819"],
+        daily_by_date={"20260818": _tushare_daily_rows("20260818")},
+        daily_basic_by_date={"20260818": _tushare_daily_basic_rows()},
+    )
+    _patch_tushare_pro(monkeypatch, pro)
+
+    result = screening_snapshot._fetch_tushare()
+
+    assert pro.daily_calls == ["20260819", "20260818"]
+    assert pro.daily_basic_calls == ["20260818"]
+    assert pro.stock_basic_calls == 1
+    assert result.attrs["trade_date"] == "20260818"
+    assert result.loc[0, "code"] == "000001"
+
+
+def test_tushare_snapshot_walks_back_when_daily_basic_not_published(monkeypatch) -> None:
+    pro = _FakeTusharePro(
+        open_dates=["20260817", "20260818", "20260819"],
+        daily_by_date={
+            "20260819": _tushare_daily_rows("20260819"),
+            "20260818": _tushare_daily_rows("20260818"),
+        },
+        daily_basic_by_date={"20260818": _tushare_daily_basic_rows()},
+    )
+    _patch_tushare_pro(monkeypatch, pro)
+
+    result = screening_snapshot._fetch_tushare()
+
+    assert pro.daily_calls == ["20260819", "20260818"]
+    assert pro.daily_basic_calls == ["20260819", "20260818"]
+    assert result.attrs["trade_date"] == "20260818"
+
+
+def test_tushare_snapshot_raises_after_exhausting_open_day_lookback(monkeypatch) -> None:
+    pro = _FakeTusharePro(
+        open_dates=[
+            "20260812",
+            "20260813",
+            "20260814",
+            "20260817",
+            "20260818",
+            "20260819",
+            "20260820",
+        ],
+    )
+    _patch_tushare_pro(monkeypatch, pro)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        screening_snapshot._fetch_tushare()
+
+    assert pro.daily_calls == ["20260820", "20260819", "20260818", "20260817", "20260814"]
+    assert pro.daily_basic_calls == []
+    assert pro.stock_basic_calls == 0
+    message = str(excinfo.value)
+    assert "tushare daily returned empty data for 20260820" in message
+    assert "looked back over 5 open days" in message
+
+
+def test_tushare_snapshot_explicit_trade_date_does_not_walk_back(monkeypatch) -> None:
+    pro = _FakeTusharePro(
+        open_dates=["20260818", "20260819"],
+        daily_by_date={"20260818": _tushare_daily_rows("20260818")},
+        daily_basic_by_date={"20260818": _tushare_daily_basic_rows()},
+    )
+    _patch_tushare_pro(monkeypatch, pro)
+    monkeypatch.setenv("TUSHARE_TRADE_DATE", "20260819")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        screening_snapshot._fetch_tushare()
+
+    assert pro.daily_calls == ["20260819"]
+    assert pro.stock_basic_calls == 0
+    message = str(excinfo.value)
+    assert "tushare daily returned empty data for 20260819" in message
+    assert "looked back" not in message

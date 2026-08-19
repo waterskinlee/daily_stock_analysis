@@ -32,6 +32,10 @@ _EM_REQUEST_JITTER_SECONDS = 0.3
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
 _SNAPSHOT_CALL_TIMEOUT_SECONDS = 60.0
+# Tushare EOD tables are published after the close, so the latest calendar-open
+# day frequently has no `daily` rows yet. Walk back this many open days before
+# declaring the source empty.
+_TUSHARE_TRADE_DATE_LOOKBACK = 5
 _EM_SESSION: requests.Session | None = None
 _EM_LAST_REQUEST_AT = 0.0
 _EM_LOCK = threading.Lock()
@@ -582,6 +586,8 @@ def _fetch_tushare() -> pd.DataFrame:
 
     Tushare is not a real-time source here. It is used as a resilient fallback
     by joining the latest open trading day's daily quote and daily_basic data.
+    The newest calendar-open day often has no EOD rows yet (published after
+    the close), so empty results walk back over earlier open days.
     """
     token = (
         os.getenv("TUSHARE_TOKEN", "").strip()
@@ -594,27 +600,47 @@ def _fetch_tushare() -> pd.DataFrame:
 
     pro = ts.pro_api(token)
     _configure_tushare_client(pro, token=token)
-    trade_date = _resolve_tushare_trade_date(pro)
-    daily = pro.daily(
-        trade_date=trade_date,
-        fields="ts_code,trade_date,close,pct_chg,amount",
-    )
-    daily_basic = pro.daily_basic(
-        trade_date=trade_date,
-        fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
-    )
-    stock_basic = pro.stock_basic(
-        exchange="",
-        list_status="L",
-        fields="ts_code,symbol,name,industry",
-    )
+    trade_dates = _resolve_tushare_trade_date_candidates(pro)
+    first_error: RuntimeError | None = None
+    for trade_date in trade_dates:
+        daily = pro.daily(
+            trade_date=trade_date,
+            fields="ts_code,trade_date,close,pct_chg,amount",
+        )
+        if daily is None or daily.empty:
+            if first_error is None:
+                first_error = RuntimeError(f"tushare daily returned empty data for {trade_date}")
+            logger.info("tushare daily empty for %s; trying previous open day", trade_date)
+            continue
+        daily_basic = pro.daily_basic(
+            trade_date=trade_date,
+            fields="ts_code,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv",
+        )
+        if daily_basic is None or daily_basic.empty:
+            if first_error is None:
+                first_error = RuntimeError(f"tushare daily_basic returned empty data for {trade_date}")
+            logger.info("tushare daily_basic empty for %s; trying previous open day", trade_date)
+            continue
 
-    if daily is None or daily.empty:
-        raise RuntimeError(f"tushare daily returned empty data for {trade_date}")
-    if daily_basic is None or daily_basic.empty:
-        raise RuntimeError(f"tushare daily_basic returned empty data for {trade_date}")
+        stock_basic = pro.stock_basic(
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name,industry",
+        )
+        snapshot = _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
+        snapshot.attrs["trade_date"] = trade_date
+        if trade_date != trade_dates[0]:
+            logger.info(
+                "tushare snapshot using earlier open day %s (latest open day %s has no EOD data yet)",
+                trade_date,
+                trade_dates[0],
+            )
+        return snapshot
 
-    return _prepare_tushare_snapshot(daily, daily_basic, stock_basic)
+    detail = str(first_error) if first_error is not None else "tushare returned no usable daily data"
+    if len(trade_dates) > 1:
+        detail = f"{detail} (looked back over {len(trade_dates)} open days)"
+    raise RuntimeError(detail)
 
 
 def _configure_tushare_client(pro: object, *, token: str) -> None:
@@ -634,11 +660,19 @@ def _configure_tushare_client(pro: object, *, token: str) -> None:
         pass
 
 
-def _resolve_tushare_trade_date(pro) -> str:
-    """Return the latest open trade date for Tushare requests."""
+def _resolve_tushare_trade_date_candidates(
+    pro,
+    *,
+    limit: int = _TUSHARE_TRADE_DATE_LOOKBACK,
+) -> list[str]:
+    """Return recent open trade dates, newest first, for Tushare fallback.
+
+    An explicit ``TUSHARE_TRADE_DATE`` override pins a single date so the
+    caller keeps strict fail-fast behavior for user-selected days.
+    """
     explicit = os.getenv("TUSHARE_TRADE_DATE", "").strip()
     if explicit:
-        return explicit
+        return [explicit]
 
     end = date.today()
     start = end - timedelta(days=30)
@@ -651,7 +685,8 @@ def _resolve_tushare_trade_date(pro) -> str:
     )
     if calendar is None or calendar.empty or "cal_date" not in calendar.columns:
         raise RuntimeError("tushare trade_cal returned no open trading days")
-    return str(calendar["cal_date"].max())
+    dates = sorted((str(value) for value in calendar["cal_date"].tolist()), reverse=True)
+    return dates[: max(1, limit)]
 
 
 def _prepare_tushare_snapshot(
