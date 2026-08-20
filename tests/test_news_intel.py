@@ -161,6 +161,51 @@ class NewsIntelStorageTestCase(unittest.TestCase):
         recent_news = self.db.get_recent_news(code="600519", days=7, limit=10)
         self.assertEqual(len(recent_news), 1)
         self.assertEqual(recent_news[0].title, "茅台股价震荡")
+    def test_get_news_intel_by_query_id_filters_code(self) -> None:
+        first = SearchResponse(
+            query="百合花 603823 股票 最新消息",
+            results=[SearchResult(
+                title="百合花新闻",
+                snippet="百合花摘要",
+                url="https://news.example.com/lily",
+                source="example.com",
+                published_date="2026-08-20",
+            )],
+            provider="Unit",
+            success=True,
+        )
+        second = SearchResponse(
+            query="禾望电气 603063 股票 最新消息",
+            results=[SearchResult(
+                title="禾望电气新闻",
+                snippet="禾望电气摘要",
+                url="https://news.example.com/hopewind",
+                source="example.com",
+                published_date="2026-08-20",
+            )],
+            provider="Unit",
+            success=True,
+        )
+        self.db.save_news_intel(
+            code="603823",
+            name="百合花",
+            dimension="latest_news",
+            query=first.query,
+            response=first,
+            query_context={"query_id": "batch-q"},
+        )
+        self.db.save_news_intel(
+            code="603063",
+            name="禾望电气",
+            dimension="latest_news",
+            query=second.query,
+            response=second,
+            query_context={"query_id": "batch-q"},
+        )
+
+        scoped = self.db.get_news_intel_by_query_id("batch-q", code="603823", limit=20)
+
+        self.assertEqual([item.title for item in scoped], ["百合花新闻"])
 
     def test_save_news_intel_retries_on_sqlite_locked_execute(self) -> None:
         result = SearchResult(
