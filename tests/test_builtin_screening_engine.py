@@ -437,7 +437,7 @@ def test_pipeline_uses_ranker_success_flag_instead_of_partial_llm_scores(monkeyp
     assert "LLM ranking failed: fell back to screen_score" in result.degradation
 
 
-def test_default_scorecard_scores_full_pool_before_seeded_rotation(monkeypatch) -> None:
+def test_default_scorecard_scores_full_pool_before_deterministic_seeded_rotation(monkeypatch) -> None:
     snapshot_df = pd.DataFrame([
         {
             "code": f"00000{index}",
@@ -512,7 +512,9 @@ def test_default_scorecard_scores_full_pool_before_seeded_rotation(monkeypatch) 
     }
 
     assert all(statuses == ["completed"] * 5 for statuses in observed_statuses)
-    assert len(variants) >= 2
+    # period 已剔除随机 run_id：同一 client seed + 同一交易日 + 同一候选池
+    # 的 rotation 必须完全可复现（每日轮换由 period 的日期分量承担）。
+    assert len(variants) == 1
 
 
 def test_dsa_provider_context_respects_host_max_candidates_setting() -> None:

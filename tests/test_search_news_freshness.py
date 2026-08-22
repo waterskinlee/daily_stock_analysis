@@ -5,7 +5,7 @@ Unit tests for strict news freshness filtering and strategy window logic (Issue 
 
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2651,6 +2651,52 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         reasons = "；".join(scored.relevance_reasons or [])
         self.assertIn("摘要命中公司英文别名 Apple", reasons)
         self.assertNotIn("标题命中公司英文别名", reasons)
+
+    def test_filter_news_response_reference_date_anchors_window(self) -> None:
+        """reference_date 冻结窗口：以冻结日为锚，而非服务器 now()。"""
+        service = SearchService(
+            bocha_keys=["dummy_key"],
+            searxng_public_instances_enabled=False,
+            news_max_age_days=3,
+            news_strategy_profile="short",
+        )
+        frozen = date(2026, 3, 27)
+        resp = _response(
+            [
+                _result("frozen_ok", "2026-03-26"),
+                _result("frozen_old", "2026-03-20"),
+                _result("frozen_future", "2026-03-30"),
+            ]
+        )
+        filtered = service._filter_news_response(
+            resp,
+            search_days=3,
+            max_results=5,
+            log_scope="test:ref",
+            reference_date=frozen,
+        )
+        self.assertEqual([r.title for r in filtered.results], ["frozen_ok"])
+
+    def test_search_stock_news_accepts_reference_date_passthrough(self) -> None:
+        """search_stock_news 透传 reference_date 且默认 None 不报错。"""
+        today = datetime.now().date()
+        service, mock_search = self._create_service_with_mock_provider(
+            news_max_age_days=3,
+            news_strategy_profile="short",
+            response=_response([_result("fresh", today.isoformat(), snippet="600519 相关报道")]),
+        )
+        resp_default = service.search_stock_news("600519", "贵州茅台", max_results=3)
+        self.assertEqual([r.title for r in resp_default.results], ["fresh"])
+        resp_frozen = service.search_stock_news(
+            "600519",
+            "贵州茅台",
+            max_results=3,
+            reference_date=date(2026, 3, 27),
+        )
+        # 夹具条目日期是“今天”：以 2026-03-27 为锚的窗口不含今天 → 被过滤，
+        # 证明 reference_date 确实接管了窗口锚点。
+        self.assertEqual([r.title for r in resp_frozen.results], [])
+
 
 if __name__ == "__main__":
     unittest.main()

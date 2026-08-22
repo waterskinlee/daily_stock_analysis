@@ -694,6 +694,8 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
             stock_code="600519",
             stock_name="贵州茅台",
             max_results=5,
+            # 冻结窗口锚点：来自 _phase_payload 的 effective_daily_bar_date
+            reference_date=date(2026, 3, 26),
         )
     def test_agent_pack_summary_uses_db_daily_context_after_history_prefetch(self):
         pipeline = _make_pipeline(agent_mode=True, save_context_snapshot=True)

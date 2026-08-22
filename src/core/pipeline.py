@@ -1561,6 +1561,9 @@ class StockAnalysisPipeline:
                         stock_code=code,
                         stock_name=stock_name,
                         max_results=5,
+                        reference_date=self._frozen_news_reference_date(
+                            market_phase_context
+                        ),
                     )
                     if _apply_agent_news_response(prefetched_news, target_name=stock_name):
                         logger.info(
@@ -1687,6 +1690,9 @@ class StockAnalysisPipeline:
                         stock_code=code,
                         stock_name=resolved_stock_name,
                         max_results=5,
+                        reference_date=self._frozen_news_reference_date(
+                            market_phase_context
+                        ),
                     )
                     news_context_updated = _apply_agent_news_response(
                         resolved_news,
@@ -3189,6 +3195,27 @@ class StockAnalysisPipeline:
         if isinstance(phase, dict) and "is_partial_bar" in phase:
             today_overlay["is_partial_bar"] = phase.get("is_partial_bar")
         return {"today": today_overlay}
+
+    @staticmethod
+    def _frozen_news_reference_date(
+        market_phase_context: Optional[Dict[str, Any]],
+    ) -> Optional[date]:
+        """从冻结的市场相位上下文解析新闻窗口锚点日期。
+
+        优先 effective_daily_bar_date，回退 session_date；解析失败返回 None
+        （search_service 内部回落 now()，行为与旧版一致）。
+        """
+        if not isinstance(market_phase_context, dict):
+            return None
+        for key in ("effective_daily_bar_date", "session_date"):
+            raw = str(market_phase_context.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                return date.fromisoformat(raw[:10])
+            except ValueError:
+                continue
+        return None
 
     def _build_agent_analysis_artifacts(
         self,

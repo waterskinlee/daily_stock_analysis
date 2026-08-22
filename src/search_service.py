@@ -4840,12 +4840,18 @@ class SearchService:
         max_results: int,
         log_scope: str,
         keep_unknown: bool = False,
+        reference_date: Optional[date] = None,
     ) -> SearchResponse:
-        """Hard-filter results by published_date recency and normalize date strings."""
+        """Hard-filter results by published_date recency and normalize date strings.
+
+        reference_date：窗口锚点。None → 服务器当天（向后兼容）；分析管线
+        持有冻结交易日时应显式传入，避免任务跨 UTC/CST 午夜时把前一日
+        新闻误判为 old/future。
+        """
         if not response.success or not response.results:
             return response
 
-        today = datetime.now().date()
+        today = reference_date or datetime.now().date()
         earliest = today - timedelta(days=max(0, int(search_days) - 1))
         latest = today + timedelta(days=self.FUTURE_TOLERANCE_DAYS)
 
@@ -5352,8 +5358,13 @@ class SearchService:
         stock_name: str,
         max_results: int = 5,
         focus_keywords: Optional[List[str]] = None,
+        reference_date: Optional[date] = None,
     ) -> SearchResponse:
-        """Search stock news across every active provider and merge the results."""
+        """Search stock news across every active provider and merge the results.
+
+        reference_date：可选冻结窗口锚点（透传给 _filter_news_response）；
+        None 时行为与旧版完全一致。
+        """
         search_days = self._effective_news_window_days()
         provider_max_results = self._provider_request_size(max_results)
         prefer_chinese = self._should_prefer_chinese_news(
@@ -5399,6 +5410,8 @@ class SearchService:
             (
                 f"{query}|target={stock_code}:{stock_name}|"
                 f"news_pref={'zh' if prefer_chinese else 'default'}"
+                # reference_date 参与键：不同冻结锚点的窗口结果不可互用缓存
+                + (f"|ref={reference_date.isoformat()}" if reference_date else "")
             ),
             max_results,
             search_days,
@@ -5474,6 +5487,7 @@ class SearchService:
                     search_days=search_days,
                     max_results=provider_max_results,
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
+                    reference_date=reference_date,
                 )
 
                 if filtered_response.success and filtered_response.results:

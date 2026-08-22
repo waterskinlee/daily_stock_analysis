@@ -545,11 +545,12 @@ def screen(
         picks,
         max_output=output_count,
         seed=selection_seed,
+        # period 不含 run_id：同一 client seed 在同一交易日、同一候选池下
+        # 必须产生相同 rotation（可复现）；日期分量保留每日轮换。
         period=(
             f"{datetime.now(timezone.utc).date().isoformat()}"
-            f":{market}:{strategy}:{run_id}"
+            f":{market}:{strategy}"
         ),
-        analyzer_names=analyzer_names,
     )
     picks = selection_variant.picks
     _emit_progress(progress_callback, 88, "选股核心流程完成")
