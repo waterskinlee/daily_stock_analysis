@@ -1307,8 +1307,12 @@ class ScreeningService:
             "result_variant_pool_size": raw_data.get("result_variant_pool_size") or 0,
             "result_variant_rotated_slots": raw_data.get("result_variant_rotated_slots") or 0,
         }
-        if self.db_manager is not None:
-            self.db_manager.save_screening_run(response)
+        if self.db_manager is not None and not self.db_manager.save_screening_run(response):
+            # 存储层 fail-open 只记日志；这里把持久化失败浮出到响应，
+            # 避免"选股历史静默丢失"（Issue #2153 复核项）。
+            response.setdefault("warnings", []).append(
+                "选股历史持久化失败：本次运行未写入 screening_runs（详见服务端日志）"
+            )
         return response
 
 
