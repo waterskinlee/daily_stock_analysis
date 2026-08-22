@@ -24,6 +24,9 @@ from src.services.run_diagnostics import (
 )
 
 
+# 注：个股新闻准入（_filter_ranked_news_for_context strict 模式）现要求
+# 条目带正相关度/direct 类别；本文件关注新鲜度/语言/回退逻辑，夹具默认
+# 按 direct 相关度构造，避免与准入契约耦合。
 def _result(
     title: str,
     published_date: str | None,
@@ -38,6 +41,8 @@ def _result(
         url=url if url is not None else f"https://example.com/{title}",
         source=source,
         published_date=published_date,
+        relevance_score=60,
+        relevance_category="direct_company_news",
     )
 
 
@@ -125,11 +130,11 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_strategy_profile="medium",
             response=_response(
                 [
-                    _result("old", old),
-                    _result("unknown", None),
-                    _result("future_2", future_2),
-                    _result("future_1", future_1),
-                    _result("fresh", fresh),
+                    _result("old", old, snippet="600519 相关报道"),
+                    _result("unknown", None, snippet="600519 相关报道"),
+                    _result("future_2", future_2, snippet="600519 相关报道"),
+                    _result("future_1", future_1, snippet="600519 相关报道"),
+                    _result("fresh", fresh, snippet="600519 相关报道"),
                 ]
             ),
         )
@@ -169,12 +174,12 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p1 = SimpleNamespace(
             is_available=True,
             name="P1",
-            search=MagicMock(return_value=_response([_result("too_old", old)])),
+            search=MagicMock(return_value=_response([_result("too_old", old, snippet="600519 相关报道")])),
         )
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("fresh", fresh)])),
+            search=MagicMock(return_value=_response([_result("fresh", fresh, snippet="600519 相关报道")])),
         )
         service._providers = [p1, p2]
 
@@ -425,8 +430,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("Another English story", fresh),
+                        _result("English headline", fresh, snippet="600519 related report"),
+                        _result("Another English story", fresh, snippet="600519 related report"),
                     ]
                 )
             ),
@@ -434,7 +439,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("中文资讯", fresh)])),
+            search=MagicMock(return_value=_response([_result("中文资讯", fresh, snippet="600519 相关报道")])),
         )
         service._providers = [p1, p2]
 
@@ -460,9 +465,9 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("中文快讯", fresh),
-                        _result("Second English headline", fresh),
+                        _result("English headline", fresh, snippet="600519 related report"),
+                        _result("中文快讯", fresh, snippet="600519 相关报道"),
+                        _result("Third English headline", fresh, snippet="600519 update"),
                     ]
                 )
             ),
@@ -472,7 +477,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         resp = service.search_stock_news("600519", "贵州茅台", max_results=3)
         self.assertEqual(
             [r.title for r in resp.results],
-            ["中文快讯", "English headline", "Second English headline"],
+            ["中文快讯", "English headline", "Third English headline"],
         )
 
     def test_search_stock_news_prioritizes_chinese_before_truncating_results(self) -> None:
@@ -491,8 +496,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             search=MagicMock(
                 return_value=_response(
                     [
-                        _result("English headline", fresh),
-                        _result("中文快讯", fresh),
+                        _result("English headline", fresh, snippet="600519 related report"),
+                        _result("中文快讯", fresh, snippet="600519 相关报道"),
                     ]
                 )
             ),
@@ -500,7 +505,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         p2 = SimpleNamespace(
             is_available=True,
             name="P2",
-            search=MagicMock(return_value=_response([_result("后续中文资讯", fresh)])),
+            search=MagicMock(return_value=_response([_result("后续中文资讯", fresh, snippet="600519 相关报道")])),
         )
         service._providers = [p1, p2]
 
@@ -822,7 +827,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
                     _result(
                         "外围市场走弱拖累科技股",
                         fresh,
-                        snippet="外围市场情绪走弱，带动科技股阶段性回撤。",
+                        snippet="腾讯控股：外围市场情绪走弱，带动科技股阶段性回撤。",
                         source="finance.example.invalid",
                     ),
                 ]
@@ -2047,7 +2052,7 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         fresh_iso = fresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for stock_code, stock_name, expected_lang, expected_country, title, description in (
-            ("600519", "贵州茅台", "zh-hans", "CN", "中文资讯", "中文摘要"),
+            ("600519", "贵州茅台", "zh-hans", "CN", "中文资讯", "贵州茅台 中文摘要"),
             ("AAPL", "Apple", "en", "US", "Apple earnings beat", "English summary"),
         ):
             with self.subTest(stock_code=stock_code):

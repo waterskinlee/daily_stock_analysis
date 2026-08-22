@@ -2053,30 +2053,36 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             return result is not None
     
     def get_latest_data(
-        self, 
-        code: str, 
-        days: int = 2
+        self,
+        code: str,
+        days: int = 2,
+        as_of: Optional[date] = None,
     ) -> List[StockDaily]:
         """
         获取最近 N 天的数据
-        
+
         用于计算"相比昨日"的变化
-        
+
         Args:
             code: 股票代码
             days: 获取天数
-            
+            as_of: 可选日期上限；只返回 date <= as_of 的记录（复盘/按日重算）。
+                None 保持原行为（不设上限）。
+
         Returns:
             StockDaily 对象列表（按日期降序）
         """
         with self.get_session() as session:
-            results = session.execute(
+            query = (
                 select(StockDaily)
                 .where(StockDaily.code == code)
                 .order_by(desc(StockDaily.date))
                 .limit(days)
-            ).scalars().all()
-            
+            )
+            if as_of is not None:
+                query = query.where(StockDaily.date <= as_of)
+            results = session.execute(query).scalars().all()
+
             return list(results)
 
     def save_news_intel(
@@ -3456,13 +3462,9 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         """
         if target_date is None:
             target_date = date.today()
-        # 注意：尽管入参提供了 target_date，但当前实现实际使用的是“最新两天数据”（get_latest_data），
-        # 并不会按 target_date 精确取当日/前一交易日的上下文。
-        # 因此若未来需要支持“按历史某天复盘/重算”的可解释性，这里需要调整。
-        # 该行为目前保留（按需求不改逻辑）。
-        
-        # 获取最近2天数据
-        recent_data = self.get_latest_data(code, days=2)
+        # 按 target_date 取当日及前一交易日（date <= target_date），支持
+        # 复盘/按日重算；未入库的未来 bar 不会被误当作“今日”。
+        recent_data = self.get_latest_data(code, days=2, as_of=target_date)
         
         if not recent_data:
             logger.warning(f"未找到 {code} 的数据")

@@ -225,7 +225,23 @@ def screen(
     daily_enrich_count = 0
     if daily_needed or daily_requested:
         provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
-        enrich_count = min(daily_limit, len(provisional))
+        configured_multiplier = max(1, int(getattr(config, "daily_enrich_pool_multiplier", 1)))
+        # Widening the pool multiplies daily-fetch wall time, so honor the
+        # multiplier only when parallel fetch workers are configured.
+        effective_multiplier = (
+            configured_multiplier if config.daily_fetch_max_workers >= 2 else 1
+        )
+        enrich_count = min(len(provisional), daily_limit * effective_multiplier)
+        if enrich_count < len(provisional):
+            degradation.append(
+                f"Daily enrichment pool truncated: enriched={enrich_count} of "
+                f"{len(provisional)} snapshot-filtered"
+            )
+        if config.daily_fetch_max_workers == 1 and configured_multiplier > 1:
+            degradation.append(
+                "DAILY_FETCH_MAX_WORKERS=1: pool widening inactive; "
+                "set workers>=2 to use DAILY_ENRICH_POOL_MULTIPLIER"
+            )
         daily_candidates = provisional.head(enrich_count)
         try:
             enriched = enrich_daily_features(
@@ -291,7 +307,12 @@ def screen(
                         + "; ".join(daily_filter_rejections)
                     )
             else:
+                excluded_tail = len(provisional) - len(enriched)
                 df = enriched
+                if excluded_tail > 0:
+                    degradation.append(
+                        f"Non-daily candidates excluded from downstream ranking: {excluded_tail}"
+                    )
         except Exception as exc:
             if daily_needed:
                 raise RuntimeError(
@@ -405,6 +426,12 @@ def screen(
         )
         degradation.extend(llm_context_degradation)
         llm_prompt_degradation: list[str] = []
+        # Optional config cap for the ranking prompt; absent/None keeps the
+        # ranker's built-in default budget.
+        rank_extra_kwargs: dict[str, object] = {}
+        configured_prompt_cap = getattr(config, "llm_ranking_max_prompt_chars", None)
+        if configured_prompt_cap is not None:
+            rank_extra_kwargs["max_prompt_chars"] = max(1, int(configured_prompt_cap))
         llm_result = rank_candidates_with_metadata(
             picks,
             screening.ranking_hints,
@@ -424,6 +451,7 @@ def screen(
             timeout_sec=config.llm_timeout_sec,
             max_tokens=config.llm_max_tokens,
             degradation=llm_prompt_degradation,
+            **rank_extra_kwargs,
         )
         degradation.extend(llm_prompt_degradation)
         picks = llm_result.picks
@@ -449,13 +477,16 @@ def screen(
             p.rank = i + 1
             p.final_score = p.screen_score
 
-    # 8. Independent risk overlay
+    # 8. Independent risk overlay. Candidates below the ranking cut stay
+    # available as backfill when a high-risk veto shrinks the shortlist.
     if config.risk_enabled:
+        reserve_picks = _df_to_picks(df.iloc[top_k:])
         picks, risk_degradation = apply_risk_overlay(
             picks,
             max_penalty=config.risk_max_penalty,
             veto_high_risk=config.risk_veto_high,
             profile=screening.risk_profile,
+            reserve_candidates=reserve_picks,
         )
         degradation.extend(risk_degradation)
 

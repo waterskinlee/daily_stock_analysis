@@ -3985,16 +3985,9 @@ class SearchService:
             ).strip()
             if len(cleaned) >= 4:
                 cls._append_unique(terms, cleaned)
-            # 中文短名（贵州茅台 -> 茅台）：仅用于 A 股中文名匹配；
-            # 港股/美股中文名（如“腾讯控股”->“控股”）不加，避免误伤
-            # 相似公司名（腾讯控股 vs 腾讯音乐）。
-            code_raw = (stock_code or "") if stock_code else ""
-            is_cn_6digit = (
-                code_raw.isdigit()
-                and len(code_raw) == 6
-            )
-            if is_cn_6digit and len(cleaned) >= 2:
-                cls._append_unique(terms, cleaned[-2:])
+        # 中文短名（贵州茅台 -> 茅台）不再作为强身份信号：末2字短名多为
+        # 泛词（黄金/能源/科技…），曾导致无关个股新闻被判 direct（见
+        # _weak_company_identity_terms 与 _score_news_relevance 弱信号处理）。
         else:
             cleaned = re.sub(
                 r"\b(incorporated|inc|corporation|corp|company|co|plc|ltd|limited|holdings?)\.?$",
@@ -4006,6 +3999,33 @@ class SearchService:
                 cls._append_unique(terms, cleaned)
 
         return terms
+
+    @classmethod
+    def _weak_company_identity_terms(
+        cls,
+        stock_name: str,
+        stock_code: Optional[str] = None,
+    ) -> List[str]:
+        """Return weak short-name identity terms for CN A-share names.
+
+        中文短名（贵州茅台 -> 茅台）属于歧义泛词：单独命中不得建立
+        direct 公司身份，只能作为弱背景分（见 _score_news_relevance）。
+        """
+        raw = (stock_name or "").strip()
+        if not raw or not cls._contains_chinese_text(raw):
+            return []
+        code_raw = (stock_code or "") if stock_code else ""
+        if not (code_raw.isdigit() and len(code_raw) == 6):
+            return []
+        without_market_suffix = re.sub(r"[-－（(].*$", "", raw).strip()
+        cleaned = re.sub(
+            r"(股份有限公司|有限责任公司|有限公司|控股集团|控股|集团|股份|公司)$",
+            "",
+            without_market_suffix,
+        ).strip()
+        if len(cleaned) < 2:
+            return []
+        return [cleaned[-2:]]
 
     @classmethod
     def _contains_identity_term(cls, text: str, term: str) -> bool:
@@ -4350,6 +4370,20 @@ class SearchService:
                     has_unambiguous_company_signal = True
                 add_reason(f"摘要命中公司名 {term}")
                 break
+        # 弱信号：中文短名（末2字，如 茅台/黄金）只记歧义背景分，不计入
+        # direct_signal、不置 has_unambiguous_company_signal —— 单独命中
+        # 永远到不了 direct_company_news 门槛（38），防止泛词误判归属。
+        for term in cls._weak_company_identity_terms(stock_name, stock_code=stock_code):
+            if cls._contains_identity_term(title, term):
+                score += 26
+                has_ambiguous_company_signal = True
+                add_reason(f"标题命中公司短名（弱信号） {term}")
+                break
+            if cls._contains_identity_term(snippet, term):
+                score += 16
+                has_ambiguous_company_signal = True
+                add_reason(f"摘要命中公司短名（弱信号） {term}")
+                break
 
         # Issue #2026: when STOCK_NAME_MAP maps a foreign ticker to a Chinese
         # display name (e.g. AAPL -> 苹果), the loop above cannot match English
@@ -4522,15 +4556,20 @@ class SearchService:
         response: SearchResponse,
         *,
         log_scope: str,
+        drop_unverified_when_empty: bool = False,
     ) -> SearchResponse:
-        """Drop obvious non-news pages and zero-relevance fillers from ranked results."""
+        """Drop obvious non-news pages and zero-relevance fillers from ranked results.
+
+        drop_unverified_when_empty=True（个股新闻/事件准入用）：当过滤后没有
+        任何 direct 或正分条目时，返回空结果而不是保留全部未验证条目——
+        宁缺毋滥，避免把无法确认归属的新闻喂给个股分析。
+        """
         if not response.success or not response.results:
             return response
 
         candidates: List[SearchResult] = []
         dropped_low_quality = 0
         dropped_adult_spam = 0
-        dropped_zero_relevance = 0
 
         for item in response.results:
             is_official_source = cls._is_trusted_official_news_source(item)
@@ -4555,10 +4594,27 @@ class SearchService:
             or (item.relevance_score or 0) > 0
         ]
         if meaningful_candidates:
-            dropped_zero_relevance = len(candidates) - len(meaningful_candidates)
             filtered_results = meaningful_candidates
+            dropped_zero_relevance = len(candidates) - len(meaningful_candidates)
+        elif drop_unverified_when_empty:
+            logger.info(
+                "[新闻准入] %s: provider=%s 全部 %s 条未命中目标公司身份，"
+                "按无直接相关新闻处理（宁缺毋滥）",
+                log_scope,
+                response.provider,
+                len(candidates),
+            )
+            return SearchResponse(
+                query=response.query,
+                results=[],
+                provider=response.provider,
+                success=response.success,
+                error_message=response.error_message,
+                search_time=response.search_time,
+            )
         else:
             filtered_results = candidates
+            dropped_zero_relevance = 0
 
         if dropped_low_quality or dropped_adult_spam or dropped_zero_relevance:
             logger.info(
@@ -5436,6 +5492,7 @@ class SearchService:
                     admitted_response = self._filter_ranked_news_for_context(
                         ranked_response,
                         log_scope=f"{stock_code}:{provider.name}:stock_news",
+                        drop_unverified_when_empty=True,
                     )
                     admitted_count = len(admitted_response.results or [])
                     self._record_news_search_run(
@@ -5506,6 +5563,7 @@ class SearchService:
                 admitted_combined = self._filter_ranked_news_for_context(
                     ranked_combined,
                     log_scope=f"{stock_code}:aggregate:stock_news",
+                    drop_unverified_when_empty=True,
                 )
                 limited_response = self._limit_search_response(
                     admitted_combined,
@@ -5931,8 +5989,55 @@ class SearchService:
             
             # 短暂延迟避免请求过快
             time.sleep(0.5)
-        
-        return results
+
+        return self._dedupe_comprehensive_intel(results)
+
+    @staticmethod
+    def _intel_result_key(item: SearchResult) -> Optional[str]:
+        url = (item.url or "").split("#", 1)[0].split("?", 1)[0].strip().lower()
+        if url:
+            return f"u:{url}"
+        title = re.sub(r"\s+", "", item.title or "").lower()
+        return f"t:{title}" if title else None
+
+    @classmethod
+    def _dedupe_comprehensive_intel(
+        cls,
+        results: Dict[str, SearchResponse],
+    ) -> Dict[str, SearchResponse]:
+        """跨维度去重：同一文章（规范化 URL 或标题）只保留首次出现的维度条目。
+
+        维度迭代顺序即主维度优先级；去重后 news_result_count 不再因同一篇
+        文章在 latest/announcement/earnings 重复出现而虚高。
+        """
+        seen: set = set()
+        deduped: Dict[str, SearchResponse] = {}
+        removed_total = 0
+        for dim, response in results.items():
+            kept: List[SearchResult] = []
+            removed_here = 0
+            for item in response.results or []:
+                key = cls._intel_result_key(item)
+                if key and key in seen:
+                    removed_here += 1
+                    continue
+                if key:
+                    seen.add(key)
+                kept.append(item)
+            if removed_here:
+                response = SearchResponse(
+                    query=response.query,
+                    results=kept,
+                    provider=response.provider,
+                    success=response.success,
+                    error_message=response.error_message,
+                    search_time=response.search_time,
+                )
+            deduped[dim] = response
+            removed_total += removed_here
+        if removed_total:
+            logger.info("[情报搜索] 跨维度去重移除 %s 条重复条目", removed_total)
+        return deduped
     
     def format_intel_report(self, intel_results: Dict[str, SearchResponse], stock_name: str) -> str:
         """

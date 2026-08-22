@@ -61,6 +61,17 @@ class LLMRankingResult:
             self.attempted_models = []
 
 
+def _effective_max_tokens(max_tokens: int | None, candidate_count: int) -> int:
+    """Floor the completion budget so per-candidate JSON output never truncates.
+
+    Every ranked candidate must come back with ~a dozen Chinese JSON fields;
+    the legacy 2048 default truncated responses for larger shortlists, and one
+    truncated parse downgrades the whole round back to screen_score ordering.
+    """
+    floor = min(600 + 200 * max(candidate_count, 0), 8192)
+    return max(max_tokens or 0, floor)
+
+
 def rank_candidates(
     candidates: list[Pick],
     ranking_hints: str,
@@ -134,6 +145,7 @@ def rank_candidates_with_metadata(
     if not candidates:
         return LLMRankingResult(picks=candidates)
 
+    effective_max_tokens = _effective_max_tokens(max_tokens, len(candidates))
     prompt = _build_ranking_prompt(
         candidates,
         ranking_hints,
@@ -174,7 +186,7 @@ def rank_candidates_with_metadata(
                     channels=channels or [],
                     config_path=config_path,
                     timeout_sec=timeout_sec,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                 )
             except Exception as exc:
                 failure_reason = "timeout" if _is_timeout_error(exc) else "call_failed"
@@ -418,34 +430,44 @@ def _fit_candidate_prompt_lines(
         trimmed.append("candidate_details")
         return marker[:budget]
 
-    identity_lines = [_format_candidate_for_prompt(p, detail="identity") for p in candidates]
-    lines: list[str] = []
-    used = 0
-    omitted = 0
-    for line in identity_lines:
-        extra = len(line) + (1 if lines else 0)
-        if used + extra > available:
-            omitted += 1
-            continue
-        lines.append(line)
-        used += extra
-
-    if omitted == 0:
-        for idx, pick in enumerate(candidates):
-            for detail in ("full", "compact"):
-                replacement = _format_candidate_for_prompt(pick, detail=detail)
-                delta = len(replacement) - len(lines[idx])
-                if used + delta <= available:
-                    lines[idx] = replacement
-                    used += delta
-                    break
-
-    if omitted:
-        trimmed.append("candidate_omitted")
-        lines.append(f"...{_PROMPT_TRIM_MARKER}:candidate_omitted={omitted}")
+    # Two-round upgrade: base every candidate on one detail tier that fits,
+    # then walk in order upgrading by a single tier while budget allows.
+    # Never leave later candidates at identity while earlier ones jump
+    # straight to full.
+    compact_lines = [_format_candidate_for_prompt(p, detail="compact") for p in candidates]
+    compact_total = sum(len(line) for line in compact_lines) + max(len(compact_lines) - 1, 0)
+    lines: list[str]
+    upgrade_to: str
+    if compact_total <= available:
+        lines = compact_lines
+        used = compact_total
+        upgrade_to = "full"
     else:
-        trimmed.append("candidate_details")
-        lines.append(marker)
+        lines = []
+        used = 0
+        omitted = 0
+        for line in (_format_candidate_for_prompt(p, detail="identity") for p in candidates):
+            extra = len(line) + (1 if lines else 0)
+            if used + extra > available:
+                omitted += 1
+                continue
+            lines.append(line)
+            used += extra
+        if omitted:
+            trimmed.append("candidate_omitted")
+            lines.append(f"...{_PROMPT_TRIM_MARKER}:candidate_omitted={omitted}")
+            return "\n".join(lines)
+        upgrade_to = "compact"
+
+    for idx, pick in enumerate(candidates):
+        replacement = _format_candidate_for_prompt(pick, detail=upgrade_to)
+        delta = len(replacement) - len(lines[idx])
+        if used + delta <= available:
+            lines[idx] = replacement
+            used += delta
+
+    trimmed.append("candidate_details")
+    lines.append(marker)
     return "\n".join(lines)
 
 

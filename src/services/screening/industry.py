@@ -37,8 +37,8 @@ _NUMERIC_FIELDS = (
 _TEXT_FIELDS = ("board_heat_summary", "board_heat_state")
 _HEAT_FIELDS = (*_NUMERIC_FIELDS, *_TEXT_FIELDS)
 _FIELD_ALIASES = {
-    "industry_rank": ["industry_rank", "行业排名", "板块排名", "排名"],
-    "industry_change_pct": ["industry_change_pct", "行业涨跌幅", "板块涨跌幅", "涨跌幅"],
+    "industry_rank": ["industry_rank", "行业排名", "板块排名"],
+    "industry_change_pct": ["industry_change_pct", "行业涨跌幅", "板块涨跌幅"],
     "industry_heat_score": ["industry_heat_score", "行业热度分"],
     "concept_heat_score": ["concept_heat_score", "概念热度分"],
     "board_heat_score": ["board_heat_score", "theme_heat_score", "板块热度分", "主题热度分"],

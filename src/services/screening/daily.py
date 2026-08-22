@@ -926,12 +926,41 @@ def _normalize_daily_history(hist: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["close"]).copy()
+    total_rows = len(df)
+    filled_mask = pd.Series(False, index=df.index)
     for col in ("open", "high", "low"):
         if col not in df.columns:
+            filled_mask |= True
             df[col] = df["close"]
         else:
+            missing = df[col].isna()
+            filled_mask |= missing
             df[col] = df[col].fillna(df["close"])
+    filled_rows = int(filled_mask.sum())
+    filled_ratio = (filled_rows / total_rows) if total_rows else 0.0
+    # Publish the audit on both frames: the normalized result for callers and
+    # the raw input so _compute_daily_quality(raw, ...) sees it regardless of
+    # pandas attrs propagation.
+    for frame in (df, hist):
+        attrs = getattr(frame, "attrs", None)
+        if isinstance(attrs, dict):
+            attrs["synthetic_ohlc_filled_rows"] = filled_rows
+            attrs["synthetic_ohlc_ratio"] = filled_ratio
     return df
+
+
+def _synthetic_ohlc_ratio(raw: pd.DataFrame, normalized: pd.DataFrame) -> float:
+    """Share of rows whose open/high/low were synthesized from close."""
+    raw_attrs = getattr(raw, "attrs", None) or {}
+    norm_attrs = getattr(normalized, "attrs", None) or {}
+    value = raw_attrs.get(
+        "synthetic_ohlc_ratio",
+        norm_attrs.get("synthetic_ohlc_ratio", 0.0),
+    )
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _compute_daily_quality(raw: pd.DataFrame, normalized: pd.DataFrame) -> dict[str, object]:
@@ -981,6 +1010,13 @@ def _compute_daily_quality(raw: pd.DataFrame, normalized: pd.DataFrame) -> dict[
         if ((open_ <= 0) | (high <= 0) | (low <= 0) | (close <= 0)).fillna(False).any():
             score -= 35
             flags.append("non_positive_price")
+
+    synthetic_ratio = _synthetic_ohlc_ratio(raw, normalized)
+    if synthetic_ratio > 0:
+        # Close-filled OHLC rows are fabricated, not observed; cap the
+        # penalty so a fully synthetic history still outranks garbage.
+        score -= min(synthetic_ratio * 40, 25)
+        flags.append("synthetic_ohlc")
 
     if bool(raw.attrs.get("daily_stale")):
         score -= 25
@@ -1160,12 +1196,18 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> float | None:
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, pd.NA)
-    rsi = 100 - (100 / (1 + rs))
-    value = rsi.iloc[-1]
-    if pd.isna(value):
+    last_gain = gain.iloc[-1]
+    last_loss = loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
         return None
-    return float(value)
+    if last_loss == 0:
+        # Wilder's RS divides by zero when the window has no declines. A
+        # rising window is genuinely overbought (RSI=100, previously lost to
+        # a NaN); an unchanged window carries no direction, so report the
+        # neutral midpoint.
+        return 100.0 if last_gain > 0 else 50.0
+    rs = float(last_gain) / float(last_loss)
+    return float(100 - (100 / (1 + rs)))
 
 
 def _classify_rsi(value: float | None) -> str:

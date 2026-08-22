@@ -183,6 +183,9 @@ class Config:
     llm_context_max_chars: int = 4000
     llm_timeout_sec: float = 60.0
     llm_max_tokens: int = 2048
+    # Optional cap for the L2 ranking prompt; None keeps the ranker's
+    # built-in budget default.
+    llm_ranking_max_prompt_chars: int | None = None
 
     # Snapshot data source priority
     snapshot_source_priority: list[str] = field(
@@ -229,6 +232,10 @@ class Config:
     daily_fetch_max_workers: int = 1
     daily_history_cache_dir: Path | None = None
     daily_history_cache_ttl_hours: int = 24
+    # Pool widening beyond daily_enrich_max_candidates. Only honored when
+    # daily_fetch_max_workers >= 2, so serial runs keep the legacy cap and
+    # avoid multiplying an already long wall-clock runtime.
+    daily_enrich_pool_multiplier: int = 3
 
     # Independent risk layer.
     risk_enabled: bool = True
@@ -313,11 +320,14 @@ class Config:
             llm_rank_weight=_parse_float_env("LLM_RANK_WEIGHT", 0.40),
             llm_candidate_multiplier=max(1, int(os.getenv("LLM_CANDIDATE_MULTIPLIER", "6"))),
             llm_max_candidates=max(1, int(os.getenv("LLM_MAX_CANDIDATES", "30"))),
+            llm_max_tokens=max(1, int(os.getenv("LLM_MAX_TOKENS", "2048"))),
+            llm_ranking_max_prompt_chars=_parse_optional_int_env(
+                "LLM_RANKING_MAX_PROMPT_CHARS"
+            ),
             llm_max_retries=max(0, int(os.getenv("LLM_MAX_RETRIES", "1"))),
             llm_min_coverage=_parse_float_env("LLM_MIN_COVERAGE", 0.60),
             llm_context_max_chars=max(500, int(os.getenv("LLM_CONTEXT_MAX_CHARS", "4000"))),
             llm_timeout_sec=max(1.0, _parse_float_env("LLM_TIMEOUT_SEC", 60.0)),
-            llm_max_tokens=max(1, int(os.getenv("LLM_MAX_TOKENS", "2048"))),
             snapshot_source_priority=_resolve_snapshot_source_priority(),
             fallback_snapshot_path=fallback_snapshot_path,
             snapshot_cache_ttl_seconds=max(
@@ -359,6 +369,9 @@ class Config:
             post_analyzer_timeout_sec=float(os.getenv("POST_ANALYZER_TIMEOUT_SEC", "120")),
             daily_enrich_enabled=_parse_bool_env("DAILY_ENRICH_ENABLED", False),
             daily_enrich_max_candidates=max(1, int(os.getenv("DAILY_ENRICH_MAX_CANDIDATES", "100"))),
+            daily_enrich_pool_multiplier=max(
+                1, int(os.getenv("DAILY_ENRICH_POOL_MULTIPLIER", "3"))
+            ),
             daily_lookback_days=max(30, int(os.getenv("DAILY_LOOKBACK_DAYS", "120"))),
             daily_source=os.getenv("DAILY_SOURCE", "auto"),
             daily_fetch_retries=max(0, int(os.getenv("DAILY_FETCH_RETRIES", "2"))),
@@ -409,6 +422,16 @@ def _parse_optional_float_env(name: str) -> float | None:
     if cleaned.lower() in {"", "none", "off", "false"}:
         return None
     return float(cleaned)
+
+
+def _parse_optional_int_env(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if cleaned.lower() in {"", "none", "off", "false"}:
+        return None
+    return int(cleaned)
 
 
 def _parse_llm_channels_env() -> list[dict[str, object]]:

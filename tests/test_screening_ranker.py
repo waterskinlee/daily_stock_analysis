@@ -9,7 +9,14 @@ from unittest.mock import patch
 
 from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
 from src.services.screening.models import Pick
-from src.services.screening.ranker import _call_llm, rank_candidates_with_metadata
+from src.services.screening.ranker import (
+    _PROMPT_TRIM_MARKER,
+    _call_llm,
+    _effective_max_tokens,
+    _fit_candidate_prompt_lines,
+    _format_candidate_for_prompt,
+    rank_candidates_with_metadata,
+)
 
 
 def _response(content: str = "ok") -> SimpleNamespace:
@@ -414,3 +421,142 @@ def test_rank_candidates_with_metadata_reports_all_invalid_models() -> None:
     assert result.failure_reason == "invalid_response"
     assert result.attempted_models == ["deepseek/deepseek-chat", "openai/gpt-4o"]
     assert len(result.errors) == 2
+
+
+def _fit_pick(index: int) -> Pick:
+    # Uniform name/code lengths keep every rendered detail line equally long,
+    # so budget math in the fit tests stays exact.
+    return Pick(
+        rank=index + 1,
+        code=f"60050{index}",
+        name="测试统一长度",
+        final_score=90.0,
+        screen_score=88.0,
+    )
+
+
+def test_effective_max_tokens_floor_scales_with_candidate_count() -> None:
+    # Small shortlists keep the caller-provided budget.
+    assert _effective_max_tokens(2048, 1) == 2048
+    assert _effective_max_tokens(2048, 7) == 2048
+    # From 8 candidates on, 600 + 200*n outgrows the legacy 2048 default
+    # that used to truncate the per-candidate JSON and downgrade the round.
+    assert _effective_max_tokens(2048, 8) == 2200
+    assert _effective_max_tokens(2048, 10) == 2600
+    assert _effective_max_tokens(2048, 12) == 3000
+    # Floor is capped at 8192.
+    assert _effective_max_tokens(2048, 37) == 8000
+    assert _effective_max_tokens(2048, 38) == 8192
+    assert _effective_max_tokens(2048, 100) == 8192
+    # Explicitly larger budgets pass through uncapped; missing/zero is unset.
+    assert _effective_max_tokens(12000, 50) == 12000
+    assert _effective_max_tokens(None, 10) == 2600
+    assert _effective_max_tokens(0, 10) == 2600
+
+
+def test_rank_candidates_with_metadata_applies_output_token_floor() -> None:
+    candidates = [_fit_pick(i) for i in range(10)]
+    captured: list[dict[str, object]] = []
+
+    def call_llm(_prompt, _api_key, _model, _base_url, **kwargs):
+        captured.append(kwargs)
+        return _ranking_response(*[pick.code for pick in candidates])
+
+    with patch("src.services.screening.ranker._call_llm", side_effect=call_llm):
+        result = rank_candidates_with_metadata(
+            candidates,
+            "test hints",
+            "test-key",
+            "deepseek/deepseek-chat",
+            max_retries=0,
+        )
+
+    assert result.ranked is True
+    assert captured[0]["max_tokens"] == 2600
+
+
+def test_fit_candidate_prompt_lines_compact_base_then_in_order_full_upgrades() -> None:
+    picks = [_fit_pick(i) for i in range(5)]
+    compacts = [_format_candidate_for_prompt(p, detail="compact") for p in picks]
+    fulls = [_format_candidate_for_prompt(p) for p in picks]
+    identities = [_format_candidate_for_prompt(p, detail="identity") for p in picks]
+    marker_len = len(f"...{_PROMPT_TRIM_MARKER}:candidate_details")
+    compact_all = sum(map(len, compacts)) + len(picks) - 1
+    full_all = sum(map(len, fulls)) + len(picks) - 1
+    planned_fulls = 2
+    budget = (
+        compact_all
+        + marker_len
+        + 1
+        + sum(len(fulls[i]) - len(compacts[i]) for i in range(planned_fulls))
+    )
+
+    # Preconditions: everyone fits at compact, but full-for-all does not.
+    assert compact_all <= budget - marker_len - 1
+    assert full_all > budget - marker_len - 1
+
+    trimmed: list[str] = []
+    result = _fit_candidate_prompt_lines(picks, budget, trimmed)
+
+    lines = result.split("\n")
+    assert trimmed == ["candidate_details"]
+    assert lines[-1] == f"...{_PROMPT_TRIM_MARKER}:candidate_details"
+    assert len(result) <= budget
+    for idx in range(len(picks)):
+        # Nobody may stay at an identity-only row while others hold details.
+        assert "price=" in lines[idx]
+        assert lines[idx] != identities[idx]
+        if idx < planned_fulls:
+            assert lines[idx] == fulls[idx]
+        else:
+            assert lines[idx] == compacts[idx]
+    # Maximal upgrades: no remaining compact row could still become full.
+    used = len(result) - marker_len - 1
+    for idx in range(planned_fulls, len(picks)):
+        assert used + len(fulls[idx]) - len(compacts[idx]) > budget - marker_len - 1
+
+
+def test_fit_candidate_prompt_lines_never_jumps_from_identity_to_full() -> None:
+    picks = [_fit_pick(i) for i in range(6)]
+    identities = [_format_candidate_for_prompt(p, detail="identity") for p in picks]
+    compacts = [_format_candidate_for_prompt(p, detail="compact") for p in picks]
+    marker_len = len(f"...{_PROMPT_TRIM_MARKER}:candidate_details")
+    identity_all = sum(map(len, identities)) + len(picks) - 1
+    compact_all = sum(map(len, compacts)) + len(picks) - 1
+    planned_compacts = 2
+    budget = (
+        identity_all
+        + marker_len
+        + 1
+        + sum(len(compacts[i]) - len(identities[i]) for i in range(planned_compacts))
+    )
+
+    # Precondition: compact-for-all does not fit this budget.
+    assert compact_all > budget - marker_len - 1
+
+    trimmed: list[str] = []
+    result = _fit_candidate_prompt_lines(picks, budget, trimmed)
+
+    lines = result.split("\n")
+    assert trimmed == ["candidate_details"]
+    assert lines[-1] == f"...{_PROMPT_TRIM_MARKER}:candidate_details"
+    for idx in range(len(picks)):
+        if idx < planned_compacts:
+            assert lines[idx] == compacts[idx]
+        else:
+            assert lines[idx] == identities[idx]
+    # No candidate may leapfrog the compact tier straight to full.
+    assert not any("board_heat_summary=" in line for line in lines[:-1])
+
+
+def test_fit_candidate_prompt_lines_tiny_budget_keeps_identity_omission() -> None:
+    picks = [_fit_pick(i) for i in range(3)]
+    identities = [_format_candidate_for_prompt(p, detail="identity") for p in picks]
+    marker_len = len(f"...{_PROMPT_TRIM_MARKER}:candidate_details")
+    budget = marker_len + 1 + len(identities[0])
+
+    trimmed: list[str] = []
+    result = _fit_candidate_prompt_lines(picks, budget, trimmed)
+
+    assert trimmed == ["candidate_omitted"]
+    assert result == identities[0] + f"\n...{_PROMPT_TRIM_MARKER}:candidate_omitted=2"

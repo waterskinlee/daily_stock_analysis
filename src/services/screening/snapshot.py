@@ -351,6 +351,11 @@ def _read_last_good_snapshot(
             raise ValueError(
                 f"cache stale_age_hours={stale_age_hours:.4g} exceeds max_age_hours={max_age_hours:.4g}"
             )
+        fallback_limit = None if fresh else _snapshot_fallback_max_age_limit()
+        if fallback_limit is not None and stale_age_hours > fallback_limit:
+            raise ValueError(
+                f"Stale fallback snapshot rejected: age={stale_age_hours:.1f}h > limit={fallback_limit}h"
+            )
         cached = pd.DataFrame(data, columns=columns)
         if cached.empty:
             raise ValueError("cached snapshot is empty")
@@ -392,6 +397,18 @@ def _cache_stale_age_hours(mtime: float, *, created_at: str = "") -> float:
     modified = _parse_created_at(created_at) or datetime.fromtimestamp(mtime, tz=timezone.utc)
     age_hours = (datetime.now(timezone.utc) - modified).total_seconds() / 3600.0
     return round(max(age_hours, 0.0), 4)
+
+
+def _snapshot_fallback_max_age_limit() -> float | None:
+    """Optional hard age limit (hours) for reusing last-good snapshot as fallback."""
+    raw = os.getenv("DSA_SNAPSHOT_FALLBACK_MAX_AGE_HOURS", "").strip()
+    if not raw:
+        return None
+    try:
+        limit = float(raw)
+    except ValueError:
+        return None
+    return limit if limit >= 0 else None
 
 
 def _parse_created_at(value: str) -> datetime | None:

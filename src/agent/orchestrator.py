@@ -1500,6 +1500,7 @@ class AgentOrchestrator:
                 "news_context",
                 "fundamental_context",
                 "analysis_context",
+                "portfolio_context",
             ):
                 if context.get(data_key):
                     ctx.set_data(data_key, context[data_key])

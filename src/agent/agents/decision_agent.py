@@ -35,6 +35,9 @@ class DecisionAgent(BaseAgent):
         "fundamental_context",
         "market_phase_context",
         "skill_consensus",
+        # 账户感知：持仓/成本/组合风险进入决策综合（pipeline 已在
+        # initial_context 注入 portfolio_context，orchestrator 预填透传）。
+        "portfolio_context",
     ]
     tool_names: Optional[List[str]] = []  # no tool access — works from context only
 

@@ -25,6 +25,7 @@ RUNTIME_SCHEDULER_FORCE_ENABLED_ENV = "DSA_RUNTIME_SCHEDULER_FORCE_ENABLED"
 RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV = "DSA_RUNTIME_SCHEDULER_RUN_IMMEDIATELY"
 RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
+SKILL_OPINION_OUTCOME_AUTO_RUN_ENV = "SKILL_OPINION_OUTCOME_AUTO_RUN"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 _SCHEDULER_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
@@ -122,6 +123,40 @@ def build_agent_event_monitor_background_tasks(
         "run_immediately": True,
         "name": "agent_event_monitor",
     }]
+
+
+def _is_skill_opinion_outcome_auto_run_enabled() -> bool:
+    """SKILL_OPINION_OUTCOME_AUTO_RUN defaults to on unless explicitly disabled."""
+    raw = os.getenv(SKILL_OPINION_OUTCOME_AUTO_RUN_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def run_skill_opinion_outcome_task(*, limit: int = 100) -> Optional[Dict[str, Any]]:
+    """Evaluate missing/pending skill-opinion outcome keys; never raises."""
+    if not _is_skill_opinion_outcome_auto_run_enabled():
+        logger.info(
+            "Skill opinion outcome auto-run disabled by %s",
+            SKILL_OPINION_OUTCOME_AUTO_RUN_ENV,
+        )
+        return None
+    try:
+        from src.services.skill_opinion_outcome_service import SkillOpinionOutcomeService
+
+        result = SkillOpinionOutcomeService().run_outcomes(limit=limit)
+    except Exception as exc:  # noqa: BLE001 - scheduled jobs must not kill the host process.
+        logger.exception("Skill opinion outcome auto-run failed: %s", exc)
+        return None
+    logger.info(
+        "[SkillOpinionOutcome] processed_keys=%s created=%s updated=%s skipped=%s failed=%s",
+        result.get("processed_keys"),
+        result.get("created"),
+        result.get("updated"),
+        result.get("skipped"),
+        result.get("failed"),
+    )
+    return result
 
 
 class RuntimeSchedulerService:
@@ -227,6 +262,13 @@ class RuntimeSchedulerService:
         finally:
             self._run_lock.release()
         return True
+
+    def _run_daily_analysis_and_outcomes(self) -> None:
+        """Run scheduled analysis, then fire the outcome pass in the background."""
+        self._run_analysis_once()
+        if not _is_skill_opinion_outcome_auto_run_enabled():
+            return
+        self._run_in_background_thread(run_skill_opinion_outcome_task)
 
     def _current_times(self) -> List[str]:
         config = self._config_provider()
@@ -349,9 +391,9 @@ class RuntimeSchedulerService:
                 register_signals=False,
             )
             if run_immediately and self._run_immediately_in_background:
-                scheduler.set_daily_task(self._run_analysis_once, run_immediately=False)
+                scheduler.set_daily_task(self._run_daily_analysis_and_outcomes, run_immediately=False)
             else:
-                scheduler.set_daily_task(self._run_analysis_once, run_immediately=run_immediately)
+                scheduler.set_daily_task(self._run_daily_analysis_and_outcomes, run_immediately=run_immediately)
             for entry in background_tasks:
                 scheduler.add_background_task(
                     entry["task"],

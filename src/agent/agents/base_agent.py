@@ -250,7 +250,17 @@ class BaseAgent(ABC):
                     serialised = str(value)
                 # Cap per-field size to avoid overwhelming the context window
                 if len(serialised) > 8000:
-                    serialised = serialised[:8000] + "...(truncated)"
+                    # 在最后一个完整行/对象边界截断，避免把半个 JSON 值
+                    # 喂给模型；明确标注被丢弃的长度。
+                    cut = serialised.rfind("\n", 0, 8000)
+                    if cut < 4000:
+                        cut = serialised.rfind(",", 0, 8000)
+                    if cut < 4000:
+                        cut = 8000
+                    serialised = (
+                        serialised[:cut]
+                        + f"\n…[已截断，省略 {len(serialised) - cut} 字符]"
+                    )
                 parts.append(f"[Pre-fetched: {key}]\n{serialised}")
         memory_context = self._build_memory_context(ctx)
         if memory_context:

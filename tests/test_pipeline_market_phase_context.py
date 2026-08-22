@@ -347,7 +347,20 @@ class PipelineMarketPhaseContextTestCase(unittest.TestCase):
             },
         )
         self.assertNotIn("date", artifacts.base_context)
-        self.assertEqual(artifacts.enhanced_context, {})
+        # 新契约：带 realtime_quote 时注入轻量盘中覆盖标记（不再硬编码空
+        # enhanced_context），技术块据此输出 PARTIAL + estimated overlay。
+        self.assertEqual(
+            artifacts.enhanced_context,
+            {
+                "today": {
+                    "data_source": "realtime:test",
+                    "is_estimated": True,
+                    "estimated_fields": ["close", "high", "low"],
+                    "is_partial_bar": True,
+                    "price": 1888.0,
+                }
+            },
+        )
         self.assertIs(artifacts.realtime_quote, realtime_quote)
         self.assertIs(artifacts.trend_result, trend_result)
         self.assertIs(artifacts.chip_data, chip_distribution)

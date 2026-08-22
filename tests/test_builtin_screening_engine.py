@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Regression contracts for the DSA-owned screening implementation."""
 
+import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -20,6 +22,8 @@ from src.services.screening import post_analysis as screening_post_analysis
 from src.services.screening.filter import apply_hard_filters
 from src.services.screening.config import Config as ScreeningRuntimeConfig
 from src.services.screening.models import HardFilterConfig, Pick, ScreeningConfig, Strategy
+from src.services.screening.industry import load_industry_map
+from src.services.screening.risk import apply_risk_overlay
 from src.services.screening.scorer import compute_screen_scores
 from src.services.screening import snapshot as screening_snapshot
 from src.services.screening.strategy import list_strategies, load_all_strategies
@@ -969,3 +973,167 @@ def test_tushare_snapshot_explicit_trade_date_does_not_walk_back(monkeypatch) ->
     message = str(excinfo.value)
     assert "tushare daily returned empty data for 20260819" in message
     assert "looked back" not in message
+
+
+def _risk_pick(code: str, final_score: float, *, risky: bool) -> Pick:
+    """Deterministic pick: risky=True accumulates 13 points ('high'); else 0 ('low')."""
+    return Pick(
+        rank=0,
+        code=code,
+        name=f"stock-{code}",
+        final_score=final_score,
+        screen_score=final_score,
+        change_pct=9.0 if risky else 0.0,
+        volume_ratio=7.0 if risky else None,
+        turnover_rate=16.0 if risky else None,
+        pe_ratio=-4.0 if risky else None,
+    )
+
+
+def test_load_industry_map_ignores_generic_change_and_rank_columns(tmp_path) -> None:
+    map_path = tmp_path / "industry-map.json"
+    map_path.write_text(
+        json.dumps(
+            [
+                {"code": "000001", "industry": "银行", "涨跌幅": 3.21, "排名": 5},
+                {"code": "600000", "industry": "地产", "行业涨跌幅": -1.5, "板块排名": 2},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    mapping = load_industry_map(map_path)
+
+    generic = mapping["000001"]
+    assert generic["industry"] == "银行"
+    assert "industry_change_pct" not in generic
+    assert "industry_rank" not in generic
+
+    scoped = mapping["600000"]
+    assert scoped["industry_change_pct"] == pytest.approx(-1.5)
+    assert scoped["industry_rank"] == 2
+
+
+def test_risk_veto_backfills_from_reserves_to_original_shortlist_size() -> None:
+    shortlist = [
+        _risk_pick("600001", 90.0, risky=False),
+        _risk_pick("600002", 95.0, risky=True),
+        _risk_pick("600003", 85.0, risky=False),
+    ]
+    reserves = [
+        _risk_pick("600101", 80.0, risky=True),
+        _risk_pick("600102", 78.0, risky=False),
+        _risk_pick("600103", 70.0, risky=False),
+    ]
+
+    kept, degradation = apply_risk_overlay(
+        shortlist,
+        veto_high_risk=True,
+        reserve_candidates=reserves,
+    )
+
+    assert [pick.code for pick in kept] == ["600001", "600003", "600102"]
+    assert [pick.rank for pick in kept] == [1, 2, 3]
+    vetoed = next(pick for pick in shortlist if pick.code == "600002")
+    assert vetoed.excluded_by_risk is True
+    skipped_reserve = next(pick for pick in reserves if pick.code == "600101")
+    assert skipped_reserve.excluded_by_risk is True
+    backfilled = next(pick for pick in reserves if pick.code == "600102")
+    assert backfilled.excluded_by_risk is False
+    assert backfilled.risk_level == "low"
+    unused_reserve = next(pick for pick in reserves if pick.code == "600103")
+    assert unused_reserve.risk_level == ""
+    assert degradation[-1] == "Risk veto backfilled=1"
+
+
+def test_risk_veto_without_reserves_keeps_reduced_list() -> None:
+    shortlist = [
+        _risk_pick("600001", 90.0, risky=False),
+        _risk_pick("600002", 95.0, risky=True),
+        _risk_pick("600003", 85.0, risky=False),
+    ]
+
+    kept, degradation = apply_risk_overlay(shortlist, veto_high_risk=True)
+
+    assert [pick.code for pick in kept] == ["600001", "600003"]
+    assert not any("backfilled" in note for note in degradation)
+
+
+def test_risk_overlay_ignores_reserves_when_veto_disabled() -> None:
+    shortlist = [
+        _risk_pick("600001", 90.0, risky=False),
+        _risk_pick("600002", 95.0, risky=True),
+    ]
+    reserves = [_risk_pick("600101", 80.0, risky=False)]
+
+    kept, degradation = apply_risk_overlay(shortlist, reserve_candidates=reserves)
+
+    assert [pick.code for pick in kept] == ["600001", "600002"]
+    assert reserves[0].risk_level == ""
+    assert reserves[0].rank == 0
+    assert degradation == []
+
+
+def _write_stale_last_good_cache(path: Path, *, age_hours: float) -> None:
+    cached = pd.DataFrame(
+        [{"code": "000001", "name": "Ping An", "price": 10.0, "volume_ratio": 1.5}]
+    )
+    cached.attrs["snapshot_source"] = "sina"
+    screening_snapshot._write_last_good_snapshot(path, cached)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    created_at = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    payload["created_at"] = created_at.isoformat()
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def test_stale_fallback_snapshot_rejected_under_env_age_limit(tmp_path, monkeypatch) -> None:
+    cache_path = tmp_path / "snapshot-cache.json"
+    _write_stale_last_good_cache(cache_path, age_hours=48.0)
+    monkeypatch.setenv("DSA_SNAPSHOT_FALLBACK_MAX_AGE_HOURS", "24")
+
+    errors: list[str] = []
+    result = screening_snapshot._read_last_good_snapshot(
+        cache_path,
+        required_columns=["volume_ratio"],
+        source_errors=errors,
+    )
+
+    assert result is None
+    assert errors and errors[0].startswith(
+        "last_good_cache: Stale fallback snapshot rejected: age="
+    )
+    assert errors[0].endswith("> limit=24.0h")
+
+
+def test_stale_fallback_snapshot_allowed_without_env_limit(tmp_path, monkeypatch) -> None:
+    cache_path = tmp_path / "snapshot-cache.json"
+    _write_stale_last_good_cache(cache_path, age_hours=48.0)
+    monkeypatch.delenv("DSA_SNAPSHOT_FALLBACK_MAX_AGE_HOURS", raising=False)
+
+    result = screening_snapshot._read_last_good_snapshot(
+        cache_path,
+        required_columns=["volume_ratio"],
+        source_errors=[],
+    )
+
+    assert result is not None
+    assert result.attrs["snapshot_source"] == "last_good_cache"
+    assert result.attrs["stale"] is True
+
+
+def test_env_age_limit_does_not_block_fresh_cache_reads(tmp_path, monkeypatch) -> None:
+    cache_path = tmp_path / "snapshot-cache.json"
+    _write_stale_last_good_cache(cache_path, age_hours=48.0)
+    monkeypatch.setenv("DSA_SNAPSHOT_FALLBACK_MAX_AGE_HOURS", "1")
+
+    result = screening_snapshot._read_last_good_snapshot(
+        cache_path,
+        required_columns=["volume_ratio"],
+        source_errors=[],
+        fresh=True,
+        requested_snapshot_sources=["sina"],
+    )
+
+    assert result is not None
+    assert result.attrs["stale"] is False

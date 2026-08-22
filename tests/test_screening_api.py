@@ -2990,7 +2990,9 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["llm"]["model_list"][0]["litellm_params"]["extra_headers"], {"x-tenant": "dsa"})
         self.assertIn("get_candidate_context", context["dsa"])
         self.assertEqual(context["dsa"]["mode"], "pre_rank_light")
-        self.assertEqual(context["dsa"]["max_candidates"], 3)
+        # dsa.max_candidates 现跟随 _resolve_dsa_llm_max_candidates(max_results)
+        # = min(12, max(requested, requested*2))；本用例 max_results=5 → 10。
+        self.assertEqual(context["dsa"]["max_candidates"], 10)
         self.assertFalse(context["dsa"]["include_news"])
         self.assertNotIn("search_stock_news", context["dsa"])
         self.assertEqual(payload["candidate_count"], 0)

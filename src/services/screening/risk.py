@@ -53,6 +53,7 @@ def apply_risk_overlay(
     max_penalty: float = 12.0,
     veto_high_risk: bool = False,
     profile: dict[str, object] | None = None,
+    reserve_candidates: list[Pick] | None = None,
 ) -> tuple[list[Pick], list[str]]:
     """Attach risk flags and subtract a bounded penalty from final_score."""
     if not picks:
@@ -76,6 +77,33 @@ def apply_risk_overlay(
             degradation.append(f"Risk veto excluded {pick.code}: {', '.join(pick.risk_flags)}")
             continue
         kept.append(pick)
+
+    target_count = len(picks)
+    if veto_high_risk and len(kept) < target_count:
+        seen_codes = {pick.code for pick in picks}
+        backfilled = 0
+        for reserve in reserve_candidates or []:
+            if len(kept) >= target_count:
+                break
+            if reserve.code in seen_codes:
+                continue
+            points, flags = assess_pick_risk(reserve, profile=risk_profile)
+            penalty = min(points, max_penalty)
+            reserve.risk_penalty = round(penalty, 4)
+            reserve.risk_score = round(
+                0.0 if max_penalty == 0 else min(points / max_penalty * 100, 100), 4
+            )
+            reserve.risk_level = _risk_level(points, max_penalty)
+            reserve.risk_flags = _unique([*reserve.risk_flags, *flags])
+            reserve.final_score = round(float(reserve.final_score) - penalty, 4)
+            reserve.excluded_by_risk = veto_high_risk and reserve.risk_level == "high"
+            seen_codes.add(reserve.code)
+            if reserve.excluded_by_risk:
+                continue
+            kept.append(reserve)
+            backfilled += 1
+        if backfilled:
+            degradation.append(f"Risk veto backfilled={backfilled}")
 
     kept.sort(key=lambda item: item.final_score, reverse=True)
     for i, pick in enumerate(kept, start=1):

@@ -1251,6 +1251,9 @@ class TushareFetcher(BaseFetcher):
         """
         result: Dict[str, Any] = {
             "status": "not_supported",
+            # stock_flow 与 sector_rankings 的金额均已归一化为元（Tushare
+            # 原始单位万元，net_mf_amount/net_amount 处 ×10000）。
+            "unit": "CNY",
             "stock_flow": {},
             "sector_rankings": {"top": [], "bottom": []},
             "source_chain": [],

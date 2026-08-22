@@ -22,6 +22,7 @@ from api.v1.endpoints import (
     health,
     history,
     intelligence,
+    skill_opinions,
     portfolio,
     stocks,
     system_config,
@@ -102,6 +103,12 @@ router.include_router(
     screening.router,
     prefix="/screening",
     tags=["Screening"]
+)
+
+router.include_router(
+    skill_opinions.router,
+    prefix="/skill-opinions",
+    tags=["SkillOpinions"]
 )
 
 router.include_router(

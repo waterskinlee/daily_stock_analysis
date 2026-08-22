@@ -1284,6 +1284,9 @@ class AkshareFundamentalAdapter:
         """
         result: Dict[str, Any] = {
             "status": "not_supported",
+            # 东财资金流接口（个股/板块）金额单位即为元；与 Tushare 适配器
+            # 归一化后的单位一致，消费方无需二次换算。
+            "unit": "CNY",
             "stock_flow": {},
             "sector_rankings": {"top": [], "bottom": []},
             "source_chain": [],

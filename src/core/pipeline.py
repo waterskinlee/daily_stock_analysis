@@ -3148,6 +3148,48 @@ class StockAnalysisPipeline:
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
         )
 
+    @staticmethod
+    def _build_agent_intraday_overlay(
+        initial_context: Dict[str, Any],
+        phase: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Agent 路径的轻量盘中覆盖标记。
+
+        legacy 路径由 _enhance_context 合成完整 realtime today bar；agent 路径
+        此前硬编码 enhanced_context={}，导致 AnalysisContextPack 的技术块把
+        盘中运行标成纯日线 AVAILABLE。这里只注入覆盖标记（data_source/
+        is_estimated/is_partial_bar），不伪造 OHLC 数值。realtime_quote 兼容
+        UnifiedRealtimeQuote 对象与 dict 两种形态。
+        """
+        quote = initial_context.get("realtime_quote")
+        if not quote:
+            return {}
+
+        def _get(name: str) -> Any:
+            if isinstance(quote, dict):
+                return quote.get(name)
+            return getattr(quote, name, None)
+
+        source = _get("source") or "unknown"
+        today_overlay: Dict[str, Any] = {
+            "data_source": f"realtime:{source}",
+            "is_estimated": True,
+            "estimated_fields": ["close", "high", "low"],
+        }
+        for attr in ("fetched_at", "provider_timestamp", "is_stale"):
+            value = _get(attr)
+            if value is not None:
+                today_overlay[attr] = value
+        price = _get("price")
+        if price is not None:
+            today_overlay["price"] = price
+        change_pct = _get("change_pct")
+        if change_pct is not None:
+            today_overlay["pct_chg"] = change_pct
+        if isinstance(phase, dict) and "is_partial_bar" in phase:
+            today_overlay["is_partial_bar"] = phase.get("is_partial_bar")
+        return {"today": today_overlay}
+
     def _build_agent_analysis_artifacts(
         self,
         *,
@@ -3184,7 +3226,7 @@ class StockAnalysisPipeline:
             market=market,
             phase=phase,
             base_context=daily_context,
-            enhanced_context={},
+            enhanced_context=self._build_agent_intraday_overlay(initial_context, phase),
             realtime_quote=initial_context.get("realtime_quote"),
             trend_result=initial_context.get("trend_result"),
             chip_data=initial_context.get("chip_distribution"),
