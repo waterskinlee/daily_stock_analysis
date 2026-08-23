@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -560,3 +561,86 @@ def test_fit_candidate_prompt_lines_tiny_budget_keeps_identity_omission() -> Non
 
     assert trimmed == ["candidate_omitted"]
     assert result == identities[0] + f"\n...{_PROMPT_TRIM_MARKER}:candidate_omitted=2"
+
+
+def _stream_chunks(*texts: str):
+    chunks: list[dict] = []
+    for text in texts:
+        chunks.append({"choices": [{"delta": {"content": text}}]})
+    chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    return iter(chunks)
+
+
+def test_screening_ranker_streams_and_accumulates_delta_content() -> None:
+    clear_litellm_generation_param_recovery_cache()
+    completion_calls: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        completion_calls.append(dict(kwargs))
+        return _stream_chunks("he", "llo")
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False):
+        result = _call_llm(
+            "rank candidates",
+            api_key="test-key",
+            model="openai/x-preview-f-free",
+            base_url="",
+            json_mode=False,
+        )
+
+    assert result == "hello"
+    assert completion_calls[0]["stream"] is True
+
+
+def test_screening_ranker_stream_skips_reasoning_only_deltas() -> None:
+    clear_litellm_generation_param_recovery_cache()
+
+    def completion(**kwargs):
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "thinking"}}]},
+            {"choices": [{"delta": {"content": "ok"}}]},
+        ]
+        return iter(chunks)
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False):
+        result = _call_llm(
+            "rank candidates",
+            api_key="test-key",
+            model="openai/x-preview-f-free",
+            base_url="",
+            json_mode=False,
+        )
+
+    assert result == "ok"
+
+
+def test_screening_ranker_stream_kill_switch_restores_non_stream_call() -> None:
+    clear_litellm_generation_param_recovery_cache()
+    completion_calls: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        completion_calls.append(dict(kwargs))
+        return _response("legacy")
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    env = {"LLM_RANKING_STREAM": "false"}
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False), patch.dict(
+        os.environ,
+        env,
+        clear=False,
+    ):
+        result = _call_llm(
+            "rank candidates",
+            api_key="test-key",
+            model="openai/x-preview-f-free",
+            base_url="",
+            json_mode=False,
+        )
+
+    assert result == "legacy"
+    assert "stream" not in completion_calls[0]

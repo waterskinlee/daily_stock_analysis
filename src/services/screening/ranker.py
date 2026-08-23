@@ -536,6 +536,43 @@ def _truncate_text(value: str, limit: int) -> str:
     return text[: max(limit - 1, 0)] + "…"
 
 
+def _ranking_stream_enabled() -> bool:
+    """Screening ranking streams by default; LLM_RANKING_STREAM=0 opts out."""
+    raw = (os.getenv("LLM_RANKING_STREAM") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _accumulate_stream_text(response: object) -> str:
+    """Join streamed delta content, ignoring reasoning-only chunks.
+
+    Streaming sidesteps two gateway behaviors observed on NewAPI routes:
+    non-stream responses whose output hits ``max_tokens`` come back with the
+    entire content dropped, and Responses-surface payloads containing only
+    reasoning items crash LiteLLM's non-stream assembly ("Unknown items").
+    Non-iterable responses fall back to the legacy extractor.
+    """
+    try:
+        iterator = iter(response)
+    except TypeError:
+        return _extract_completion_text(response)
+    parts: list[str] = []
+    for chunk in iterator:
+        try:
+            choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            first = choices[0]
+            delta = first.get("delta") if isinstance(first, dict) else getattr(first, "delta", None)
+            if delta is None:
+                continue
+            content = delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+            if isinstance(content, str) and content:
+                parts.append(content)
+        except Exception:
+            continue
+    return "".join(parts)
+
+
 def _call_llm(
     prompt: str,
     api_key: str,
@@ -594,12 +631,17 @@ def _call_llm(
                 model=candidate_model,
                 temperature=temperature,
             )
+            use_stream = _ranking_stream_enabled()
+            if use_stream:
+                kwargs["stream"] = True
             try:
                 response = _call_screening_litellm_completion(
                     lambda request_kwargs: litellm.completion(**request_kwargs),
                     model=candidate_model,
                     call_kwargs=kwargs,
                 )
+                if use_stream:
+                    return _accumulate_stream_text(response)
                 return _extract_completion_text(response)
             except Exception as exc:
                 last_error = exc
@@ -978,6 +1020,9 @@ def _call_litellm_router(
                 temperature=temperature,
                 model_list=model_list,
             )
+            use_stream = _ranking_stream_enabled()
+            if use_stream:
+                kwargs["stream"] = True
             try:
                 response = _call_screening_litellm_completion(
                     lambda request_kwargs: router.completion(**request_kwargs),
@@ -985,6 +1030,8 @@ def _call_litellm_router(
                     call_kwargs=kwargs,
                     model_list=model_list,
                 )
+                if use_stream:
+                    return _accumulate_stream_text(response)
                 return _extract_completion_text(response)
             except Exception:
                 raise

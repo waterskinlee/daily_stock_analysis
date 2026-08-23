@@ -1555,7 +1555,7 @@ class LLMChannelConfigTestCase(unittest.TestCase):
         self.assertEqual(call_kwargs["reasoning"], {"effort": "max"})
         self.assertNotIn("reasoning_effort", call_kwargs)
 
-    def test_chat_completions_max_reasoning_effort_keeps_legacy_parameter(self) -> None:
+    def test_chat_completions_max_reasoning_effort_uses_native_reasoning_object(self) -> None:
         model_list = [
             {
                 "model_name": "openai/gpt-5.6-luna",
@@ -1575,8 +1575,8 @@ class LLMChannelConfigTestCase(unittest.TestCase):
             model_list=model_list,
         )
 
-        self.assertEqual(call_kwargs["reasoning_effort"], "max")
-        self.assertNotIn("reasoning", call_kwargs)
+        self.assertEqual(call_kwargs["reasoning"], {"effort": "max"})
+        self.assertNotIn("reasoning_effort", call_kwargs)
 
     def test_reasoning_effort_is_sent_only_for_openai_protocol(self) -> None:
         with patch.dict(os.environ, {"LLM_REASONING_EFFORT": "high"}, clear=True):

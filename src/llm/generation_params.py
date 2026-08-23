@@ -594,8 +594,13 @@ def apply_litellm_generation_params(
         model_list=model_list,
         request_overrides=effective_overrides,
     ) == "openai":
-        wire_model = resolve_litellm_wire_model(model, model_list).strip().lower()
-        if reasoning_effort == "max" and "/responses/" in wire_model:
+        if reasoning_effort == "max":
+            # LiteLLM's effort ladder has no native ``max`` tier (upstream maps
+            # none/minimal/low/medium/high/xhigh only): the Responses bridge
+            # silently drops a ``reasoning_effort=max`` string, and
+            # OpenAI-compatible chat gateways reject the unknown tier outright.
+            # Emit the provider-native object form on every openai surface so
+            # the configured max effort actually reaches the model.
             updated.pop("reasoning_effort", None)
             updated["reasoning"] = {"effort": "max"}
         else:
