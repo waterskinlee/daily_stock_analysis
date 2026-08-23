@@ -295,34 +295,51 @@ Local Windows F:\dsa          development only — edit + git, never run servers
   ├── upstream → github.com/ZhuLinsen/daily_stock_analysis      (sync official)
   └── dev branch (local dev; main tracks upstream and is fetch-only)
 
-Ubuntu 192.168.1.197 (user waterskin, sudo password adminadmin)
-  ├── ~/dsa-repo.git         bare central repo (main + dev)
-  ├── ~/dsa-test              TEST env — dev branch, source-mounted into /app, port 8001
-  │   ├── docker compose: dsa-test-server (FastAPI) / dsa-test-analyzer (scheduled)
-  │   └── data/ mock data; scheduled tasks OFF, manual triggers
-  └── ~/daily_stock_analysis  PROD env — image mode (daily_stock_analysis:overlay-<commit>), port 8000
-      ├── containers: stock-server (FastAPI) / stock-analyzer (scheduled)
-      └── data/ REAL data, read-only from the app (mounted volume)
+Ubuntu 192.168.1.197 (user waterskin, ssh alias `ubuntu`)
+  ├── ~/dsa-repo.git         bare central repo (dev); push target when GitHub is unreachable
+  │
+  └── ~/dsa-test             ★ SINGLE canonical root for BOTH environments (one source tree,
+      one runtime config, one prod database)
+      ├── docker/docker-compose.yml       PROD 8000 — containers stock-server / stock-analyzer,
+      │                                    port hardcoded 8000, mounts ../data (real data)
+      ├── docker/docker-compose.test.yml  TEST 8001 — containers dsa-test-server / dsa-test-analyzer
+      │                                    (`docker compose -p dsa-test -f docker-compose.test.yml up -d`),
+      │                                    mounts ../data-test (isolated throwaway data)
+      ├── .env                            container base env for PROD; .env.test for TEST (8001, schedule off)
+      ├── data/runtime.env                ★ the ONLY live WebUI-saved runtime config (prod)
+      ├── data/stock_analysis.db          ★ the ONLY production database
+      └── data-test/                      isolated test runtime.env + empty DB (STOCK_LIST=600519,000001)
+
+`~/daily_stock_analysis` is RETIRED (compose renamed `.disabled-*`, runtime.env `.RETIRED-*`, README pointer).
+Its old compose declared the SAME container names and port 8000 — running `up -d` there hijacks prod.
+NEVER execute compose from that directory again.
 ```
 
-**Deployment flow (mandatory order):** local edit → commit → `git push origin dev` → ubuntu `~/dsa-clone`
-(`git fetch origin dev`, then `git push /home/waterskin/dsa-repo.git FETCH_HEAD:dev`) → `~/dsa-test`
-(`git pull origin dev`, `docker compose -f docker/docker-compose.yml up -d`) → validate test (8001) → prod
-`~/daily_stock_analysis` (build `docker build -f docker/Dockerfile -t daily_stock_analysis:overlay-<commit> .`,
-update `image:` in `docker/docker-compose.yml`, `docker compose up -d`) → validate prod (8000).
+**Deployment flow (mandatory order):** local edit → commit → `git push origin dev`
+(plus `git push ssh://ubuntu/home/waterskin/dsa-repo.git dev:dev` when GitHub is unreachable from Ubuntu) →
+ubuntu `cd ~/dsa-test && git fetch ~/dsa-repo.git dev && git reset --hard FETCH_HEAD` → validate on 8001
+(`docker restart dsa-test-server dsa-test-analyzer`; isolated data-test, safe to experiment) → promote to 8000:
+- code-only change: `cd docker && docker compose restart server analyzer`
+- env / mount / creation-param change: `docker compose up -d --force-recreate server analyzer`
 
 **Config files:**
-- Prod `.env`: `~/daily_stock_analysis/.env` (`ENV_FILE=/app/data/runtime.env`); WebUI-saved runtime config
-  writes to `~/daily_stock_analysis/data/runtime.env`.
-- Test `.env`: `~/dsa-test/.env` (`API_PORT=8001`, `SCHEDULE_ENABLED=false`); runtime in `~/dsa-test/data/runtime.env`.
-- Before every prod sync: back up `data/stock_analysis.db` and `data/runtime.env` to `~/backup/`.
+- Prod container env: `~/dsa-test/.env`; WebUI-saved runtime config: `~/dsa-test/data/runtime.env`
+  (the app reads `/app/data/runtime.env` at startup — restoring/editing it requires a controlled recreate/restart).
+- Test container env: `~/dsa-test/.env.test` (`API_PORT=8001`, `SCHEDULE_ENABLED=false`);
+  runtime in `~/dsa-test/data-test/runtime.env`.
+- Snapshot before any env/data/compose-parameter change: `docker exec <container> env > ~/backup/env-snapshot-<name>-<ts>.txt`
+  and copy `data/runtime.env` / `data/stock_analysis.db` to `~/backup/`.
 - Prod LLM channels: `LLM_CHANNELS=newapio,newapia` → http://192.168.1.33:3008 (NAS New API); proxy
   http://192.168.1.33:7890 (NO_PROXY includes 192.168.1.33 intranet).
 
 **Rules:**
 - `F:\dsa` never runs servers; "deploy to port 8000" always means the Ubuntu prod env, never localhost.
-- Test data, source, containers, and ports are fully isolated from prod; prod `data/` is never written by sync.
-- Prod sync updates code only (source-mount or new overlay image); never touch prod `data/`.
+- Test and prod are physically isolated by different data directories: testing on 8001 can never touch prod
+  `data/`; prod `data/` is written only by the prod containers.
+- `restart` reuses creation-time OS env; only `up -d --force-recreate` reloads env_file/mounts. After any
+  runtime.env restore/change, verify with `GET /api/v1/system/config` key spot-checks (health 200 ≠ correct config).
+- Never align databases by primary-key id across environment DBs (id spaces diverge); merge additively using
+  business keys, with file-level backups first.
 - Windows `core.symlinks=false` makes `CLAUDE.md` appear non-symlinked — environmental artifact, not a defect.
 - `DEV_WORKFLOW.md` is gitignored; the environment section of `AGENTS.md` is the tracked source of truth for it.
 
