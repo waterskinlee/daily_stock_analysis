@@ -1538,11 +1538,25 @@ const DecisionSignalsPage: React.FC = () => {
           )}
         >
           {statsCollapsed ? (
-            <p className="text-sm text-secondary-text">
-              {outcomeStats && outcomeStats.completed > 0
-                ? t('decisionSignals.statsCollapsedSummary', { completed: outcomeStats.completed, total: outcomeStats.total, hitRate: formatStatPercent(outcomeStats.hitRatePct) })
-                : t('decisionSignals.statsCollapsedEmpty')}
-            </p>
+            statsError ? (
+              <p className="text-sm text-danger">
+                {t('decisionSignals.statsCollapsedError')}
+                {' '}
+                <button
+                  type="button"
+                  className="underline underline-offset-2"
+                  onClick={() => setStatsCollapsed(false)}
+                >
+                  {t('decisionSignals.statsExpand')}
+                </button>
+              </p>
+            ) : (
+              <p className="text-sm text-secondary-text">
+                {outcomeStats && outcomeStats.completed > 0
+                  ? t('decisionSignals.statsCollapsedSummary', { completed: outcomeStats.completed, total: outcomeStats.total, hitRate: formatStatPercent(outcomeStats.hitRatePct) })
+                  : t('decisionSignals.statsCollapsedEmpty')}
+              </p>
+            )
           ) : (
             <>
               <p className="mb-3 text-sm text-secondary-text">{t('decisionSignals.statsGlobalScope')}</p>
