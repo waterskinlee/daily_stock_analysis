@@ -415,6 +415,10 @@ class DecisionSignalOutcomeService:
             return self._unable_fields(base, reason="missing_anchor_date", direction_expected=direction)
 
         start_bar = self.stock_repo.get_daily_on_date(code=signal.stock_code, target_date=anchor_date)
+        if start_bar is None or getattr(start_bar, "close", None) is None:
+            # Non-trading-day anchor (weekend/holiday signal): fall back to the
+            # latest completed session on or before the anchor date.
+            start_bar = self.stock_repo.get_daily_on_or_before(code=signal.stock_code, target_date=anchor_date)
         start_price = getattr(start_bar, "close", None)
         if start_price is None:
             return self._unable_fields(

@@ -557,10 +557,28 @@ def test_watch_and_alert_outcomes_remain_unable_without_market_reads(isolated_db
     assert profile_bucket["max_adverse_excursion_pct"] is None
 
 
-def test_missing_anchor_price_is_retried_after_data_arrives(isolated_db) -> None:
+def test_non_trading_day_anchor_falls_back_to_previous_session(isolated_db) -> None:
+    # 2024-01-06 is a Saturday: the signal anchors to Friday 01-05's close and
+    # the forward window covers the next session (Monday 01-08).
+    signal_id = _add_signal(isolated_db, action="buy", horizon="1d", session_date="2024-01-06")
+    with isolated_db.session_scope() as session:
+        session.add(StockDaily(code="600519", date=date(2024, 1, 5), close=100.0, high=101.0, low=99.0))
+        session.add(StockDaily(code="600519", date=date(2024, 1, 8), close=105.0, high=106.0, low=104.0))
+    service = DecisionSignalOutcomeService(db_manager=isolated_db)
+
+    item = service.run_outcomes(signal_id=signal_id)["items"][0]
+
+    assert item["eval_status"] == "completed"
+    assert item["start_price"] == 100.0
+    assert item["end_close"] == 105.0
+    assert item["stock_return_pct"] == 5.0
+
+
+def test_missing_anchor_price_retries_when_no_prior_bar_exists(isolated_db) -> None:
+    # Nothing on or before the anchor date: still missing_anchor_price until
+    # the anchor session's bar arrives.
     signal_id = _add_signal(isolated_db, action="buy", horizon="3d", session_date="2024-01-03")
     with isolated_db.session_scope() as session:
-        session.add(StockDaily(code="600519", date=date(2024, 1, 2), close=100.0, high=101.0, low=99.0))
         session.add(StockDaily(code="600519", date=date(2024, 1, 4), close=105.0, high=106.0, low=104.0))
         session.add(StockDaily(code="600519", date=date(2024, 1, 5), close=106.0, high=107.0, low=105.0))
         session.add(StockDaily(code="600519", date=date(2024, 1, 6), close=107.0, high=108.0, low=106.0))
