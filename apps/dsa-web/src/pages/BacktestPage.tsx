@@ -662,7 +662,7 @@ const BacktestPage: React.FC = () => {
                                 content={predictionParts.join(' / ')}
                                 focusable
                               >
-                                <div className="flex flex-col gap-1">
+                                <div className="flex max-w-[220px] flex-col gap-1">
                                   <span className="block truncate">{actionLabel || row.trendPrediction || '--'}</span>
                                   {actionLabel && row.trendPrediction && (
                                     <span className="block truncate text-xs text-secondary-text">{row.trendPrediction}</span>
