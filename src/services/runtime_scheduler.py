@@ -26,6 +26,7 @@ RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV = "DSA_RUNTIME_SCHEDULER_RUN_IMMEDIATELY"
 RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
 SKILL_OPINION_OUTCOME_AUTO_RUN_ENV = "SKILL_OPINION_OUTCOME_AUTO_RUN"
+DECISION_SIGNAL_OUTCOME_AUTO_RUN_ENV = "DECISION_SIGNAL_OUTCOME_AUTO_RUN"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 _SCHEDULER_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
@@ -133,6 +134,14 @@ def _is_skill_opinion_outcome_auto_run_enabled() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _is_decision_signal_outcome_auto_run_enabled() -> bool:
+    """DECISION_SIGNAL_OUTCOME_AUTO_RUN defaults to on unless explicitly disabled."""
+    raw = os.getenv(DECISION_SIGNAL_OUTCOME_AUTO_RUN_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def run_skill_opinion_outcome_task(*, limit: int = 100) -> Optional[Dict[str, Any]]:
     """Evaluate missing/pending skill-opinion outcome keys; never raises."""
     if not _is_skill_opinion_outcome_auto_run_enabled():
@@ -155,6 +164,30 @@ def run_skill_opinion_outcome_task(*, limit: int = 100) -> Optional[Dict[str, An
         result.get("updated"),
         result.get("skipped"),
         result.get("failed"),
+    )
+    return result
+
+def run_decision_signal_outcome_task(*, limit: int = 100) -> Optional[Dict[str, Any]]:
+    """Evaluate pending decision-signal outcome keys; never raises."""
+    if not _is_decision_signal_outcome_auto_run_enabled():
+        logger.info(
+            "Decision signal outcome auto-run disabled by %s",
+            DECISION_SIGNAL_OUTCOME_AUTO_RUN_ENV,
+        )
+        return None
+    try:
+        from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
+
+        result = DecisionSignalOutcomeService().run_outcomes(limit=limit)
+    except Exception as exc:  # noqa: BLE001 - scheduled jobs must not kill the host process.
+        logger.exception("Decision signal outcome auto-run failed: %s", exc)
+        return None
+    logger.info(
+        "[DecisionSignalOutcome] evaluated=%s created=%s updated=%s skipped=%s",
+        result.get("evaluated"),
+        result.get("created"),
+        result.get("updated"),
+        result.get("skipped"),
     )
     return result
 
@@ -264,11 +297,12 @@ class RuntimeSchedulerService:
         return True
 
     def _run_daily_analysis_and_outcomes(self) -> None:
-        """Run scheduled analysis, then fire the outcome pass in the background."""
+        """Run scheduled analysis, then fire the outcome passes in the background."""
         self._run_analysis_once()
-        if not _is_skill_opinion_outcome_auto_run_enabled():
-            return
-        self._run_in_background_thread(run_skill_opinion_outcome_task)
+        if _is_skill_opinion_outcome_auto_run_enabled():
+            self._run_in_background_thread(run_skill_opinion_outcome_task)
+        if _is_decision_signal_outcome_auto_run_enabled():
+            self._run_in_background_thread(run_decision_signal_outcome_task)
 
     def _current_times(self) -> List[str]:
         config = self._config_provider()
