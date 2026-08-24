@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BarChart3, RefreshCw, Search, ShieldCheck } from 'lucide-react';
+import { Activity, BarChart3, ChevronDown, RefreshCw, Search, ShieldCheck } from 'lucide-react';
 import {
   decisionSignalsApi,
   getDecisionSignalReassessBlockedError,
@@ -402,6 +402,7 @@ const DecisionSignalsPage: React.FC = () => {
   const [outcomeStats, setOutcomeStats] = useState<DecisionSignalOutcomeStatsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState<ParsedApiError | null>(null);
+  const [statsCollapsed, setStatsCollapsed] = useState(true);
   const [stockDraft, setStockDraft] = useState('');
   const [activeStockContext, setActiveStockContext] = useState<StockContext | null>(null);
   const [historyCandidates, setHistoryCandidates] = useState<StockCandidate[]>([]);
@@ -420,6 +421,7 @@ const DecisionSignalsPage: React.FC = () => {
   const [selectedOutcomes, setSelectedOutcomes] = useState<DecisionSignalOutcomeItem[]>([]);
   const [selectedOutcomesLoading, setSelectedOutcomesLoading] = useState(false);
   const [selectedOutcomesError, setSelectedOutcomesError] = useState<ParsedApiError | null>(null);
+  const [stockOutcomeStats, setStockOutcomeStats] = useState<DecisionSignalOutcomeStatsResponse | null>(null);
   const [selectedFeedback, setSelectedFeedback] = useState<DecisionSignalFeedbackItem | null>(null);
   const [selectedFeedbackLoading, setSelectedFeedbackLoading] = useState(false);
   const [selectedFeedbackError, setSelectedFeedbackError] = useState<ParsedApiError | null>(null);
@@ -568,7 +570,7 @@ const DecisionSignalsPage: React.FC = () => {
   useEffect(() => {
     selectedSignalIdRef.current = selected?.item.id ?? null;
     if (!selected) {
-      detailRequestIdRef.current += 1;
+      setStockOutcomeStats(null);
       setSelectedOutcomes([]);
       setSelectedOutcomesError(null);
       setSelectedFeedback(null);
@@ -584,6 +586,17 @@ const DecisionSignalsPage: React.FC = () => {
     setSelectedFeedbackLoading(true);
     setSelectedOutcomesError(null);
     setSelectedFeedbackError(null);
+    setStockOutcomeStats(null);
+
+    void decisionSignalsApi.getOutcomeStats({ stockCode: selected.item.stockCode })
+      .then((response) => {
+        if (detailRequestIdRef.current !== requestId) return;
+        setStockOutcomeStats(response);
+      })
+      .catch(() => {
+        if (detailRequestIdRef.current !== requestId) return;
+        setStockOutcomeStats(null);
+      });
 
     void decisionSignalsApi.getSignalOutcomes(selected.item.id)
       .then((response) => {
@@ -1358,53 +1371,6 @@ const DecisionSignalsPage: React.FC = () => {
           </Card>
         ) : null}
 
-        <Card title={t('decisionSignals.statsTitle')} subtitle={t('decisionSignals.statsDescription')} padding="md">
-          <p className="mb-3 text-sm text-secondary-text">{t('decisionSignals.statsGlobalScope')}</p>
-          {statsError ? (
-            <ApiErrorAlert
-              error={{ ...statsError, title: t('decisionSignals.statsErrorTitle') }}
-              actionLabel={t('common.retry')}
-              onAction={() => void loadOutcomeStats()}
-            />
-          ) : statsLoading ? (
-            <p className="text-sm text-secondary-text">{t('common.loading')}...</p>
-          ) : outcomeStats && outcomeStats.total > 0 ? (
-            <div>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
-                  <p className="text-xs text-secondary-text">{t('decisionSignals.statsTotal')}</p>
-                  <p className="mt-1 text-2xl font-semibold text-foreground">{outcomeStats.total}</p>
-                </div>
-                <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
-                  <p className="text-xs text-secondary-text">{t('decisionSignals.statsHitRate')}</p>
-                  <p className="mt-1 text-2xl font-semibold text-success">{formatStatPercent(outcomeStats.hitRatePct)}</p>
-                </div>
-                <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
-                  <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.hit')}</p>
-                  <p className="mt-1 text-2xl font-semibold text-success">{outcomeStats.hit}</p>
-                </div>
-                <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
-                  <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.miss')}</p>
-                  <p className="mt-1 text-2xl font-semibold text-danger">{outcomeStats.miss}</p>
-                </div>
-                <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
-                  <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.unable')}</p>
-                  <p className="mt-1 text-2xl font-semibold text-warning">{outcomeStats.unable}</p>
-                </div>
-              </div>
-              {outcomeStats.profileCalibration ? (
-                <DecisionSignalProfileCalibration calibration={outcomeStats.profileCalibration} />
-              ) : null}
-            </div>
-          ) : (
-            <EmptyState
-              className="border-none bg-transparent py-6 shadow-none"
-              title={t('decisionSignals.noReviewedStatsTitle')}
-              description={t('decisionSignals.noReviewedStatsDescription')}
-              icon={<BarChart3 className="h-6 w-6" />}
-            />
-          )}
-        </Card>
 
         <Card title={t('decisionSignals.latestTitle')} subtitle={t('decisionSignals.latestDescription')} padding="md">
           {!activeStockContext ? (
@@ -1555,6 +1521,83 @@ const DecisionSignalsPage: React.FC = () => {
         )}
 
         <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} />
+        <Card
+          title={t('decisionSignals.statsTitle')}
+          subtitle={t('decisionSignals.statsDescription')}
+          padding="md"
+          actions={(
+            <button
+              type="button"
+              className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 !text-xs"
+              onClick={() => setStatsCollapsed((current) => !current)}
+              aria-expanded={!statsCollapsed}
+            >
+              {statsCollapsed ? t('decisionSignals.statsExpand') : t('decisionSignals.statsCollapse')}
+              <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', statsCollapsed ? '' : 'rotate-180')} />
+            </button>
+          )}
+        >
+          {statsCollapsed ? (
+            <p className="text-sm text-secondary-text">
+              {outcomeStats && outcomeStats.completed > 0
+                ? t('decisionSignals.statsCollapsedSummary', { completed: outcomeStats.completed, total: outcomeStats.total, hitRate: formatStatPercent(outcomeStats.hitRatePct) })
+                : t('decisionSignals.statsCollapsedEmpty')}
+            </p>
+          ) : (
+            <>
+              <p className="mb-3 text-sm text-secondary-text">{t('decisionSignals.statsGlobalScope')}</p>
+              {outcomeStats && outcomeStats.completed > 0 && outcomeStats.completed < 30 ? (
+                <p className="mb-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+                  {t('decisionSignals.statsSampleWarning', { completed: outcomeStats.completed })}
+                </p>
+              ) : null}
+              {statsError ? (
+                <ApiErrorAlert
+                  error={{ ...statsError, title: t('decisionSignals.statsErrorTitle') }}
+                  actionLabel={t('common.retry')}
+                  onAction={() => void loadOutcomeStats()}
+                />
+              ) : statsLoading ? (
+                <p className="text-sm text-secondary-text">{t('common.loading')}...</p>
+              ) : outcomeStats && outcomeStats.total > 0 ? (
+                <div>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
+                      <p className="text-xs text-secondary-text">{t('decisionSignals.statsTotal')}</p>
+                      <p className="mt-1 text-2xl font-semibold text-foreground">{outcomeStats.total}</p>
+                    </div>
+                    <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
+                      <p className="text-xs text-secondary-text">{t('decisionSignals.statsHitRate')}</p>
+                      <p className="mt-1 text-2xl font-semibold text-success">{formatStatPercent(outcomeStats.hitRatePct)}</p>
+                    </div>
+                    <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
+                      <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.hit')}</p>
+                      <p className="mt-1 text-2xl font-semibold text-success">{outcomeStats.hit}</p>
+                    </div>
+                    <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
+                      <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.miss')}</p>
+                      <p className="mt-1 text-2xl font-semibold text-danger">{outcomeStats.miss}</p>
+                    </div>
+                    <div className="rounded-xl border border-border/60 bg-elevated/40 px-3 py-3">
+                      <p className="text-xs text-secondary-text">{t('decisionSignals.outcome.unable')}</p>
+                      <p className="mt-1 text-2xl font-semibold text-warning">{outcomeStats.unable}</p>
+                    </div>
+                  </div>
+                  {outcomeStats.profileCalibration ? (
+                    <DecisionSignalProfileCalibration calibration={outcomeStats.profileCalibration} />
+                  ) : null}
+                </div>
+              ) : (
+                <EmptyState
+                  className="border-none bg-transparent py-6 shadow-none"
+                  title={t('decisionSignals.noReviewedStatsTitle')}
+                  description={t('decisionSignals.noReviewedStatsDescription')}
+                  icon={<BarChart3 className="h-6 w-6" />}
+                />
+              )}
+            </>
+          )}
+        </Card>
       </div>
 
       <Drawer
@@ -1566,6 +1609,18 @@ const DecisionSignalsPage: React.FC = () => {
         {selected ? (
           <div className="space-y-4">
             {renderReassessPanel()}
+            {stockOutcomeStats ? (
+              <div className={cn(
+                'rounded-xl border px-3 py-2 text-sm',
+                stockOutcomeStats.completed >= 30
+                  ? 'border-border/60 bg-elevated/40 text-secondary-text'
+                  : 'border-warning/30 bg-warning/10 text-warning',
+              )}>
+                {stockOutcomeStats.completed > 0
+                  ? t('decisionSignals.stockSampleBadge', { code: selected.item.stockCode, completed: stockOutcomeStats.completed })
+                  : t('decisionSignals.stockSampleEmpty', { code: selected.item.stockCode })}
+              </div>
+            ) : null}
             <DecisionSignalDetails
               item={selected.item}
               outcomes={selectedOutcomes}

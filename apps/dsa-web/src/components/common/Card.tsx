@@ -10,6 +10,7 @@ interface CardProps {
   variant?: 'default' | 'bordered' | 'gradient';
   hoverable?: boolean;
   padding?: 'none' | 'sm' | 'md' | 'lg';
+  actions?: React.ReactNode;
 }
 
 /**
@@ -24,6 +25,7 @@ export const Card: React.FC<CardProps> = ({
   variant = 'default',
   hoverable = false,
   padding = 'md',
+  actions,
 }) => {
   const paddingStyles = {
     none: '',
@@ -61,10 +63,13 @@ export const Card: React.FC<CardProps> = ({
       style={style}
       className={cn('rounded-2xl', variantStyles[variant], hoverStyles, paddingStyles[padding], className)}
     >
-      {(title || subtitle) && (
-        <div className="mb-3">
-          {subtitle ? <span className="label-uppercase">{subtitle}</span> : null}
-          {title ? <h3 className="mt-1 text-lg font-semibold text-foreground">{title}</h3> : null}
+      {(title || subtitle || actions) && (
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            {subtitle ? <span className="label-uppercase">{subtitle}</span> : null}
+            {title ? <h3 className="mt-1 text-lg font-semibold text-foreground">{title}</h3> : null}
+          </div>
+          {actions ? <div className="flex-shrink-0">{actions}</div> : null}
         </div>
       )}
       {children}

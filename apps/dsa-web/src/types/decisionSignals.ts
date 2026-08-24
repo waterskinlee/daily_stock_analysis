@@ -309,6 +309,7 @@ export interface DecisionSignalOutcomeStatsParams {
   horizons?: DecisionSignalHorizon[];
   engineVersion?: string;
   statuses?: DecisionSignalStatus[];
+  stockCode?: string;
 }
 
 export interface DecisionSignalFeedbackItem {

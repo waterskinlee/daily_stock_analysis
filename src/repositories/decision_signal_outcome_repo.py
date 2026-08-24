@@ -181,12 +181,15 @@ class DecisionSignalOutcomeRepository:
         engine_version: str,
         horizons: Optional[List[str]] = None,
         statuses: Optional[List[str]] = None,
+        stock_code: Optional[str] = None,
     ) -> List[OutcomeStatsRow]:
         conditions = [DecisionSignalOutcomeRecord.engine_version == engine_version]
         if horizons:
             conditions.append(DecisionSignalOutcomeRecord.horizon.in_(horizons))
         if statuses:
             conditions.append(DecisionSignalRecord.status.in_(statuses))
+        if stock_code:
+            conditions.append(DecisionSignalRecord.stock_code == stock_code)
         with self.db.get_session() as session:
             rows = session.execute(
                 select(

@@ -325,6 +325,7 @@ class DecisionSignalOutcomeService:
         horizons: Optional[List[str]] = None,
         engine_version: Optional[str] = None,
         statuses: Optional[List[str]] = None,
+        stock_code: Optional[str] = None,
     ) -> Dict[str, Any]:
         engine_version_norm = str(engine_version or DECISION_SIGNAL_OUTCOME_ENGINE_VERSION).strip()
         horizons_norm = self._normalize_horizons(horizons)
@@ -333,10 +334,12 @@ class DecisionSignalOutcomeService:
             if statuses
             else list(DEFAULT_STATS_STATUSES)
         )
+        stock_code_norm = str(stock_code or "").strip() or None
         stats_rows = self.repo.list_stats_rows(
             engine_version=engine_version_norm,
             horizons=horizons_norm,
             statuses=statuses_norm,
+            stock_code=stock_code_norm,
         )
         rows = [stats_row.outcome for stats_row in stats_rows]
         dimensions = (

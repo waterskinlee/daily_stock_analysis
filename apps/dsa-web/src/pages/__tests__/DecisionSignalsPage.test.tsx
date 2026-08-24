@@ -439,13 +439,17 @@ describe('DecisionSignalsPage', () => {
     });
     expect(screen.getByText('贵州茅台')).toBeInTheDocument();
     expect(await screen.findByText('信号表现统计')).toBeInTheDocument();
+    // Stats card starts collapsed: summary line instead of full metrics.
+    expect(screen.getByText('已复盘 2/3，命中率 50%。展开查看分桶明细。')).toBeInTheDocument();
+    expect(screen.queryByText('决策风格历史表现')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /展开详情/ }));
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '查看 贵州茅台 AI 建议详情' })).toBeInTheDocument();
     expect(screen.getByText('贵州茅台').closest('button')).toBeNull();
     expect(screen.getByText('放量下跌风险')).toBeInTheDocument();
     expect(screen.getByText(formattedCreatedAt)).toBeInTheDocument();
-    expect(screen.getByText('当前统计为全局已复盘 outcome 口径，不等于当前可见信号数量，也不随当前股票过滤。')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '决策风格历史表现' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /收起/ }));
+    expect(screen.queryByText('决策风格历史表现')).not.toBeInTheDocument();
     expect(decisionSignalsApi.getOutcomeStats).toHaveBeenCalledTimes(1);
   });
 
@@ -458,6 +462,7 @@ describe('DecisionSignalsPage', () => {
     renderPage();
 
     expect(await screen.findByText('信号表现统计')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /展开详情/ }));
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '决策风格历史表现' })).not.toBeInTheDocument();
   });
@@ -477,7 +482,8 @@ describe('DecisionSignalsPage', () => {
 
     renderPage();
 
-    expect(await screen.findByText('暂无已复盘样本')).toBeInTheDocument();
+    expect(await screen.findByText('暂无已复盘样本。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /展开详情/ }));
     expect(screen.getByText('当前统计为全局已复盘 outcome 口径，不等于当前可见信号数量，也不随当前股票过滤。')).toBeInTheDocument();
     expect(screen.queryByText('0%')).not.toBeInTheDocument();
   });
