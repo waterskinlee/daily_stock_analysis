@@ -8,10 +8,12 @@ interface consumed by the AgentExecutor, via LiteLLM.
 
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from types import SimpleNamespace
 
 import litellm
 from litellm import Router
@@ -236,6 +238,121 @@ def _extract_provider_blocks(choice: Any) -> Tuple[List[Dict[str, Any]], Optiona
             if block_type == "text" and text:
                 text_parts.append(str(text))
     return blocks, ("".join(text_parts).strip() or None)
+
+
+def _analysis_stream_enabled() -> bool:
+    """Streaming on by default; LLM_ANALYSIS_STREAM=0/false/no/off opts out."""
+    return os.getenv("LLM_ANALYSIS_STREAM", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _stream_field(obj: Any, name: str) -> Any:
+    """Read a field from dict- or object-shaped provider chunks."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _accumulate_stream_response(stream: Any) -> Any:
+    """Consume a chat-completions stream into a non-stream response shape.
+
+    Handles object/dict chunks, delta.tool_calls fragment assembly by index,
+    reasoning_content deltas, finish_reason, and final usage extraction via
+    extract_usage_payload (public fields plus LiteLLM private fallback).
+    Raises RuntimeError when the stream ends with no usable output so the
+    model-chain fallback can pick the next attempt — mirrors gateways that
+    drop all content on finish_reason=length.
+    """
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    tool_buffers: Dict[Any, Dict[str, Any]] = {}
+    tool_order: List[Any] = []
+    finish_reason: Any = None
+    usage_payload: Any = None
+
+    for chunk in stream:
+        usage_candidate = extract_usage_payload(chunk)
+        if usage_candidate:
+            usage_payload = usage_candidate
+        choices = _stream_field(chunk, "choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices[:1]:
+            if choice is None:
+                continue
+            fr = _stream_field(choice, "finish_reason")
+            if fr:
+                finish_reason = fr
+            delta = _stream_field(choice, "delta")
+            if delta is None:
+                delta = _stream_field(choice, "message")
+            piece = _stream_field(delta, "content")
+            if isinstance(piece, str):
+                content_parts.append(piece)
+            reasoning_piece = (
+                _stream_field(delta, "reasoning_content")
+                or _stream_field(delta, "reasoning")
+            )
+            if isinstance(reasoning_piece, str):
+                reasoning_parts.append(reasoning_piece)
+            fragments = _stream_field(delta, "tool_calls") or []
+            for fragment in fragments:
+                index = _stream_field(fragment, "index")
+                key = index if index is not None else len(tool_order)
+                if key not in tool_buffers:
+                    tool_order.append(key)
+                    tool_buffers[key] = {
+                        "id": "",
+                        "name": "",
+                        "arguments": [],
+                        "provider_specific_fields": {},
+                    }
+                slot = tool_buffers[key]
+                fragment_id = _stream_field(fragment, "id")
+                if fragment_id and not slot["id"]:
+                    slot["id"] = fragment_id
+                function = _stream_field(fragment, "function")
+                name_piece = _stream_field(function, "name")
+                if name_piece:
+                    slot["name"] += name_piece
+                argument_piece = _stream_field(function, "arguments")
+                if isinstance(argument_piece, str):
+                    slot["arguments"].append(argument_piece)
+                extra_fields = _provider_specific_fields_from(
+                    _stream_field(fragment, "provider_specific_fields")
+                )
+                if extra_fields:
+                    slot["provider_specific_fields"].update(extra_fields)
+
+    content = "".join(content_parts)
+    reasoning_content = "".join(reasoning_parts) or None
+    tool_calls = []
+    for key in tool_order:
+        buf = tool_buffers[key]
+        provider_specific_fields = dict(buf["provider_specific_fields"])
+        tool_calls.append(SimpleNamespace(
+            id=buf["id"],
+            function=SimpleNamespace(
+                name=buf["name"],
+                arguments="".join(buf["arguments"]),
+            ),
+            provider_specific_fields=provider_specific_fields,
+            thought_signature=provider_specific_fields.get("thought_signature"),
+        ))
+    if not content and not tool_calls:
+        raise RuntimeError(
+            f"LLM streaming produced no usable output (finish_reason={finish_reason!r})"
+        )
+    message = SimpleNamespace(
+        content=content,
+        tool_calls=tool_calls or None,
+        reasoning_content=reasoning_content,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+        usage=usage_payload,
+    )
 
 
 def _message_trace_matches_target(
@@ -747,6 +864,11 @@ class LLMToolAdapter:
             self._get_temperature() if temperature is None else temperature,
             model_list=recovery_model_list,
         )
+        stream_requested = _analysis_stream_enabled()
+        if stream_requested:
+            call_kwargs["stream"] = True
+            call_kwargs["stream_options"] = {"include_usage": True}
+
         diagnostics_level = normalize_prompt_cache_diagnostics_level(
             getattr(self._config, "llm_prompt_cache_diagnostics_level", "off")
         )
@@ -797,6 +919,10 @@ class LLMToolAdapter:
                 model_list=recovery_model_list,
                 logger=logger,
             )
+        # Only consume iterator-style streams; providers that ignore the
+        # stream flag and return a complete response keep the legacy path.
+        if stream_requested and (hasattr(response, "__iter__") or hasattr(response, "__next__")):
+            response = _accumulate_stream_response(response)
 
         return self._parse_litellm_response(
             response,
