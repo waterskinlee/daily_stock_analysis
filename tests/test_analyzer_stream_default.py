@@ -54,3 +54,27 @@ def test_explicit_stream_false_overrides_default(monkeypatch) -> None:
     captured: dict = {}
     _make_inst(captured)._call_litellm("p", {}, stream=False)
     assert captured["stream"] is False
+
+
+
+def test_consume_litellm_stream_captures_final_usage_chunk() -> None:
+    from types import SimpleNamespace as NS
+
+    inst = GeminiAnalyzer.__new__(GeminiAnalyzer)
+    inst._normalize_usage = lambda usage, **_kw: (
+        {"total_tokens": usage["total_tokens"]} if usage else {}
+    )
+
+    def chunk(delta=None, usage=None):
+        return NS(choices=[NS(delta=NS(content=delta))], usage=usage)
+    text, usage = inst._consume_litellm_stream(
+        [
+            chunk("hel"),
+            chunk("lo"),
+            chunk(usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}),
+        ],
+        model="openai/x-preview-f-free",
+    )
+
+    assert text == "hello"
+    assert usage == {"total_tokens": 5}

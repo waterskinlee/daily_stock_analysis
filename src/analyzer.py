@@ -4072,7 +4072,11 @@ class GeminiAnalyzer:
                                 router_model_names=router_model_names,
                             ),
                             model=model,
-                            call_kwargs={**call_kwargs, "stream": True},
+                            call_kwargs={
+                                **call_kwargs,
+                                "stream": True,
+                                "stream_options": {"include_usage": True},
+                            },
                             model_list=recovery_model_list,
                             cache_recovery=False,
                             logger=logger,
