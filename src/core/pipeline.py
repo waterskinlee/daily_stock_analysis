@@ -1116,13 +1116,17 @@ class StockAnalysisPipeline:
                     realtime_today['amount'] = amt
                 if pct is not None:
                     realtime_today['pct_chg'] = pct
-                # Issue #234：盘中把今日标注为实时估算；盘后/非交易日今日 bar 已
-                # 定稿，覆盖数值保留但不再打估算标，避免技术块被误判为
-                # partial + intraday_realtime_overlay。相位缺失时保守打标。
-                phase_partial_bar = True
-                if isinstance(market_phase_context, dict) and "is_partial_bar" in market_phase_context:
-                    phase_partial_bar = bool(market_phase_context.get("is_partial_bar"))
-                if phase_partial_bar:
+                # Issue #234：盘中把今日标注为实时估算。免打标需同时满足：
+                # phase 判定今日 bar 已定稿（盘后/非交易日）且覆盖前存储里确有
+                # 今日 bar（orig_today 非空）。收盘后 EOD 未发布的窗口内是拿实时
+                # 值合成今日，必须保留估算标，避免技术块误报可用。
+                drop_estimation_markers = (
+                    isinstance(market_phase_context, dict)
+                    and "is_partial_bar" in market_phase_context
+                    and not market_phase_context.get("is_partial_bar")
+                    and bool(orig_today)
+                )
+                if not drop_estimation_markers:
                     realtime_today['data_source'] = f"realtime:{source_name}"
                     realtime_today['realtime_source'] = source_name
                     realtime_today['is_estimated'] = True
@@ -3158,6 +3162,7 @@ class StockAnalysisPipeline:
     def _build_agent_intraday_overlay(
         initial_context: Dict[str, Any],
         phase: Optional[Dict[str, Any]],
+        base_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Agent 路径的轻量盘中覆盖标记。
 
@@ -3167,18 +3172,23 @@ class StockAnalysisPipeline:
         is_estimated/is_partial_bar），不伪造 OHLC 数值。realtime_quote 兼容
         UnifiedRealtimeQuote 对象与 dict 两种形态。
 
-        仅当日线未完结（phase.is_partial_bar）时注入；盘后/非交易日今日 bar
-        已定稿，继续打标会把技术块误判为估算（partial +
-        intraday_realtime_overlay）。相位信息缺失时保持旧行为（保守打标）。
+        免打标需同时满足：phase.is_partial_bar 为 False（盘后/非交易日）且
+        base_context 里确有今日 bar（EOD 已发布）。收盘后 EOD 未发布的窗口
+        内今日 bar 缺失，趋势/均线只算到昨日，此时仍保守打标，避免技术块
+        把缺今日数据的趋势误报为可用。相位或 bar 信息缺失时同样保守打标。
         """
         quote = initial_context.get("realtime_quote")
         if not quote:
             return {}
-        if (
+        phase_bar_final = (
             isinstance(phase, dict)
             and "is_partial_bar" in phase
             and not phase.get("is_partial_bar")
-        ):
+        )
+        stored_today = (
+            base_context.get("today") if isinstance(base_context, dict) else None
+        )
+        if phase_bar_final and isinstance(stored_today, dict) and stored_today:
             return {}
 
         def _get(name: str) -> Any:
@@ -3267,7 +3277,7 @@ class StockAnalysisPipeline:
             market=market,
             phase=phase,
             base_context=daily_context,
-            enhanced_context=self._build_agent_intraday_overlay(initial_context, phase),
+            enhanced_context=self._build_agent_intraday_overlay(initial_context, phase, daily_context),
             realtime_quote=initial_context.get("realtime_quote"),
             trend_result=initial_context.get("trend_result"),
             chip_data=initial_context.get("chip_distribution"),

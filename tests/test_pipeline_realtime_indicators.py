@@ -422,6 +422,105 @@ class TestEnhanceContextRealtimeOverride(unittest.TestCase):
         self.assertEqual(enhanced["today"]["close"], 15.0)
         self.assertEqual(enhanced["today"]["ma5"], 14.8)
 
+    def test_today_keeps_values_but_drops_estimation_markers_postmarket(self) -> None:
+        """盘后（is_partial_bar=False）覆盖数值保留，估算标记不再注入。"""
+        context = {
+            "code": "600519",
+            "today": {"close": 15.0, "ma5": 14.8},
+            "yesterday": {"close": 14.5, "volume": 1000000},
+        }
+        quote = _make_realtime_quote(price=15.72, volume=2000000)
+        trend = TrendAnalysisResult(
+            code="600519",
+            trend_status=TrendStatus.BULL,
+            ma5=15.5,
+            ma10=15.2,
+            ma20=14.9,
+        )
+        enhanced = self.pipeline._enhance_context(
+            context,
+            quote,
+            None,
+            trend,
+            "贵州茅台",
+            market_phase_context={"phase": "postmarket", "is_partial_bar": False},
+        )
+        self.assertEqual(enhanced["today"]["close"], 15.72)
+        self.assertEqual(enhanced["today"]["volume"], 2000000)
+        self.assertNotIn("data_source", enhanced["today"])
+        self.assertNotIn("realtime_source", enhanced["today"])
+        self.assertNotIn("is_estimated", enhanced["today"])
+        self.assertNotIn("estimated_fields", enhanced["today"])
+
+    def test_today_keeps_estimation_markers_when_stored_bar_missing(self) -> None:
+        """盘后但存储缺今日 bar（EOD 未发布）：实时值合成今日，保留估算标。"""
+        context = {
+            "code": "600519",
+            "today": {},
+            "yesterday": {"close": 14.5, "volume": 1000000},
+        }
+        quote = _make_realtime_quote(price=15.72, volume=2000000)
+        trend = TrendAnalysisResult(
+            code="600519",
+            trend_status=TrendStatus.BULL,
+            ma5=15.5,
+            ma10=15.2,
+            ma20=14.9,
+        )
+        enhanced = self.pipeline._enhance_context(
+            context,
+            quote,
+            None,
+            trend,
+            "贵州茅台",
+            market_phase_context={"phase": "postmarket", "is_partial_bar": False},
+        )
+        self.assertEqual(enhanced["today"]["close"], 15.72)
+        self.assertEqual(enhanced["today"]["data_source"], "realtime:tencent")
+        self.assertTrue(enhanced["today"]["is_estimated"])
+
+
+class TestAgentIntradayOverlayPhaseGate(unittest.TestCase):
+    """_build_agent_intraday_overlay 仅在日线未完结时打标。"""
+
+    def test_skips_markers_when_bar_final_and_stored(self) -> None:
+        """盘后且存储已有今日 bar（EOD 已发布）才免打标。"""
+        overlay = StockAnalysisPipeline._build_agent_intraday_overlay(
+            {"realtime_quote": _make_realtime_quote(price=15.72)},
+            {"phase": "postmarket", "is_partial_bar": False},
+            {"today": {"date": "2026-08-24", "close": 15.72}},
+        )
+        self.assertEqual(overlay, {})
+
+    def test_marks_when_postmarket_but_today_bar_missing(self) -> None:
+        """收盘后 EOD 未发布窗口：今日 bar 缺失，趋势只算到昨日，保守打标。"""
+        overlay = StockAnalysisPipeline._build_agent_intraday_overlay(
+            {"realtime_quote": _make_realtime_quote(price=15.72)},
+            {"phase": "postmarket", "is_partial_bar": False},
+            {"today": {}},
+        )
+        self.assertTrue((overlay.get("today") or {}).get("is_estimated"))
+
+    def test_marks_when_partial_bar(self) -> None:
+        overlay = StockAnalysisPipeline._build_agent_intraday_overlay(
+            {"realtime_quote": _make_realtime_quote(price=15.72)},
+            {"phase": "intraday", "is_partial_bar": True},
+        )
+        today = overlay.get("today") or {}
+        self.assertEqual(today.get("data_source"), "realtime:tencent")
+        self.assertTrue(today.get("is_estimated"))
+
+    def test_marks_conservatively_when_phase_missing(self) -> None:
+        """相位信息缺失时保持旧行为（保守打标）。"""
+        overlay_none = StockAnalysisPipeline._build_agent_intraday_overlay(
+            {"realtime_quote": _make_realtime_quote(price=15.72)}, None
+        )
+        self.assertTrue((overlay_none.get("today") or {}).get("is_estimated"))
+        overlay_no_key = StockAnalysisPipeline._build_agent_intraday_overlay(
+            {"realtime_quote": _make_realtime_quote(price=15.72)}, {"phase": "intraday"}
+        )
+        self.assertTrue((overlay_no_key.get("today") or {}).get("is_estimated"))
+
 
 if __name__ == "__main__":
     unittest.main()
