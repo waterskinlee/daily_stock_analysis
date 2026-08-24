@@ -16,8 +16,58 @@ from src.services.screening.ranker import (
     _effective_max_tokens,
     _fit_candidate_prompt_lines,
     _format_candidate_for_prompt,
+    _render_ranking_prompt,
     rank_candidates_with_metadata,
 )
+
+def _response(content: str = "ok") -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
+
+
+def _ranking_response(*codes: str) -> str:
+    ranked = [
+        {
+            "code": code,
+            "llm_score": 90 - index,
+            "confidence": 0.8,
+            "reason": f"reason-{code}",
+            "risk": "risk",
+        }
+        for index, code in enumerate(codes)
+    ]
+    import json
+
+    return json.dumps({"ranked": ranked}, ensure_ascii=False)
+
+
+def test_ranking_prompt_uses_compact_output_contract_without_dropping_semantics() -> None:
+    prompt = _render_ranking_prompt("hints", "context", "- 600519 贵州茅台")
+
+    assert '"market_view"' in prompt
+    assert '"selection_logic"' in prompt
+    assert '"portfolio_risk"' in prompt
+    for field in (
+        "code",
+        "llm_score",
+        "confidence",
+        "sector",
+        "theme",
+        "thesis",
+        "reason",
+        "risk",
+        "catalysts",
+        "risk_flags",
+        "tags",
+        "style_fit",
+        "watch_items",
+        "invalidators",
+    ):
+        assert f'"{field}"' in prompt
+    assert "reason/risk/thesis 不超过36字" in prompt
+    assert "数组字段每项最多1条" in prompt
+    assert "不要增加字段" in prompt
 
 
 def _response(content: str = "ok") -> SimpleNamespace:

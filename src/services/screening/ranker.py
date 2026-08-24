@@ -285,32 +285,14 @@ def _render_ranking_prompt(hints: str, context: str, candidates_text: str) -> st
 ## 候选列表
 {candidates_text}
 
-## 输出要求
-只返回 JSON，不要 Markdown，不要解释 JSON 以外的文本。
-格式：
-{{
-  "market_view": "一句话概括当前候选池和市场背景是否适合该策略",
-  "selection_logic": "说明本次排序最主要的2-3个判断维度",
-  "portfolio_risk": "说明最终名单可能存在的集中风险或共同风险",
-  "ranked": [
-    {{
-      "code": "股票代码",
-      "llm_score": 0-100,
-      "confidence": 0-1,
-      "sector": "行业/主题短标签，优先参考候选的 industry/concepts，并尽量统一，如 券商、银行、医药、AI算力",
-      "theme": "主要交易逻辑或主题",
-      "thesis": "该候选入选的核心投资假设",
-      "reason": "一句话排序理由",
-      "risk": "一句话主要风险",
-      "catalysts": ["潜在催化1", "潜在催化2"],
-      "risk_flags": ["风险标签1"],
-      "tags": ["价值", "趋势", "防守", "事件", "流动性"],
-      "style_fit": "与策略风格的匹配度说明",
-      "watch_items": ["后续应跟踪的数据或事件"],
-      "invalidators": ["会推翻该候选逻辑的观察点"]
-    }}
-  ]
-}}
+    ## 输出要求（紧凑 JSON）
+    只返回 JSON，不要 Markdown，不要解释 JSON 以外的文本；不要增加字段。
+    ranked 必须覆盖候选池内的股票，每只股票只出现一次，并按相对优先级排序。
+    market_view、selection_logic、portfolio_risk 各不超过60字；sector、theme、style_fit各不超过16字。
+    除 tags 外，上述数组字段每项最多1条；tags最多2条。
+    reason/risk/thesis 不超过36字；catalysts、risk_flags、watch_items、invalidators 数组每项最多1条、每条不超过12字；tags最多2条。
+    使用紧凑 JSON，避免无意义重复和长篇解释。格式：
+    {{"market_view":"≤60字","selection_logic":"≤60字","portfolio_risk":"≤60字","ranked":[{{"code":"股票代码","llm_score":0-100,"confidence":0-1,"sector":"≤16字","theme":"≤16字","thesis":"≤36字","reason":"≤36字","risk":"≤36字","catalysts":["≤12字，最多1条"],"risk_flags":["≤12字，最多1条"],"tags":["≤12字，最多2条"],"style_fit":"≤16字","watch_items":["≤12字，最多1条"],"invalidators":["≤12字，最多1条"]}}]}}
 """
 
 
