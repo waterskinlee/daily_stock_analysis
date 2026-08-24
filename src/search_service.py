@@ -2276,11 +2276,18 @@ class SinaNewsSearchProvider(BaseSearchProvider):
     def __init__(self, enabled: bool = True):
         super().__init__([], "SinaNews")
         self._enabled = bool(enabled)
+        # Rate-limit circuit breaker: after an HTTP 429 the remote endpoint
+        # keeps throttling, so skip this provider for a cooldown window
+        # instead of burning one failing request per query.
+        self._cooldown_seconds = 120.0
+        self._cooldown_until = 0.0
 
     @property
     def is_available(self) -> bool:
-        """No API key required — availability is governed by the enable flag."""
-        return self._enabled
+        """Enabled flag AND not currently in the post-429 cooldown window."""
+        if not self._enabled:
+            return False
+        return time.time() >= self._cooldown_until
 
     @staticmethod
     def _clean_title(raw: Any) -> str:
@@ -2415,7 +2422,24 @@ class SinaNewsSearchProvider(BaseSearchProvider):
                 error_message="新浪新闻搜索未启用",
                 search_time=time.time() - start_time,
             )
+        if not self.is_available:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"SinaNews 限流熔断中（剩余 {max(0, int(self._cooldown_until - time.time()))}s）",
+                search_time=time.time() - start_time,
+            )
         response = self._do_search(query, max_results=max_results, days=days)
+        if "HTTP 429" in (response.error_message or ""):
+            self._cooldown_until = time.time() + self._cooldown_seconds
+            logger.warning(
+                "[%s] 触发限流熔断，%ss 内跳过该引擎",
+                self.name,
+                int(self._cooldown_seconds),
+            )
+            response.error_message = f"SinaNews HTTP 429 限流（熔断 {int(self._cooldown_seconds)}s）"
         response.search_time = time.time() - start_time
         if response.success:
             logger.info(

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
 from src.services.screening.models import Pick
+from src.services.screening import ranker as ranker_module
 from src.services.screening.ranker import (
     _PROMPT_TRIM_MARKER,
     _call_llm,
@@ -613,11 +614,13 @@ def test_fit_candidate_prompt_lines_tiny_budget_keeps_identity_omission() -> Non
     assert result == identities[0] + f"\n...{_PROMPT_TRIM_MARKER}:candidate_omitted=2"
 
 
-def _stream_chunks(*texts: str):
+def _stream_chunks(*texts: str, usage: dict | None = None):
     chunks: list[dict] = []
     for text in texts:
         chunks.append({"choices": [{"delta": {"content": text}}]})
     chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    if usage is not None:
+        chunks.append({"choices": [], "usage": usage})
     return iter(chunks)
 
 
@@ -642,6 +645,32 @@ def test_screening_ranker_streams_and_accumulates_delta_content() -> None:
 
     assert result == "hello"
     assert completion_calls[0]["stream"] is True
+
+
+def test_screening_ranker_stream_requests_and_logs_usage() -> None:
+    clear_litellm_generation_param_recovery_cache()
+    completion_calls: list[dict[str, object]] = []
+
+    def completion(**kwargs):
+        completion_calls.append(dict(kwargs))
+        return _stream_chunks("he", "llo", usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18})
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False), patch.object(
+        ranker_module, "logger"
+    ) as logger_mock:
+        result = _call_llm(
+            "rank candidates",
+            api_key="test-key",
+            model="openai/x-preview-f-free",
+            base_url="",
+            json_mode=False,
+        )
+
+    value_sets = [tuple(call.args[1:4]) for call in logger_mock.info.call_args_list]
+    assert (18, 11, 7) in value_sets
+    assert completion_calls[0]["stream_options"] == {"include_usage": True}
 
 
 def test_screening_ranker_stream_skips_reasoning_only_deltas() -> None:

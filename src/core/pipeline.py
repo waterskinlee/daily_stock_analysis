@@ -48,7 +48,12 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
 )
-from src.search_service import SearchService, reset_active_search_service, set_active_search_service
+from src.search_service import (
+    SearchService,
+    get_search_service,
+    reset_active_search_service,
+    set_active_search_service,
+)
 from src.analysis_context_pack_prompt import format_analysis_context_pack_prompt_section
 from src.analysis_context_pack_overview import render_analysis_context_pack_overview
 from src.market_phase_summary import MARKET_PHASE_SUMMARY_KEY, render_market_phase_summary
@@ -289,26 +294,11 @@ class StockAnalysisPipeline:
         self._concept_rankings_cache_lock = threading.Lock()
         self._concept_rankings_cache: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
         
-        # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
+        # Reuse the process-wide search service singleton so prefetch and
+        # agent tools share one cache instead of fetching the same news
+        # chains twice. Initialization failure still degrades to no-search.
         try:
-            self.search_service = SearchService(
-                bocha_keys=self.config.bocha_api_keys,
-                tavily_keys=self.config.tavily_api_keys,
-                anspire_keys=self.config.anspire_api_keys,
-                brave_keys=self.config.brave_api_keys,
-                serpapi_keys=self.config.serpapi_keys,
-                minimax_keys=self.config.minimax_api_keys,
-                searxng_base_urls=self.config.searxng_base_urls,
-                searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
-                news_max_age_days=self.config.news_max_age_days,
-                news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
-                cls_wire_enabled=getattr(self.config, "cls_wire_enabled", False),
-                sina_news_enabled=getattr(self.config, "sina_news_enabled", False),
-                em_data_news_enabled=getattr(self.config, "em_data_news_enabled", False),
-                ths_news_enabled=getattr(self.config, "ths_news_enabled", False),
-                cninfo_irm_enabled=getattr(self.config, "cninfo_irm_enabled", False),
-                sina_news_prefer_for_cn=getattr(self.config, "sina_news_prefer_for_cn", True),
-            )
+            self.search_service = get_search_service()
         except Exception as exc:
             logger.warning("搜索服务初始化失败，将以无搜索模式运行: %s", exc, exc_info=True)
             self.search_service = None

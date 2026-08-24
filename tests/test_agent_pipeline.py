@@ -1717,7 +1717,7 @@ class TestPipelineRouting(unittest.TestCase):
             pipeline.fetcher_manager.get_realtime_quote.return_value = None
             pipeline.fetcher_manager.get_chip_distribution.return_value = None
             # Mock search service
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             # Mock DB context
             pipeline.db.get_analysis_context.return_value = None
             # Mock analyzer
@@ -1811,7 +1811,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             )
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline.db.save_analysis_history.return_value = 2044
             pipeline._extract_decision_signal_after_history_save = MagicMock()
 
@@ -1923,7 +1923,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             )
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline.db.save_analysis_history.return_value = 2044
             pipeline._extract_decision_signal_after_history_save = MagicMock()
 
@@ -2042,7 +2042,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             news_response.success = True
             news_response.results = [{"title": "test"}]
             news_response.query = "test query"
-            pipeline.search_service.is_available = True
+            pipeline.search_service = MagicMock(is_available=True)
             pipeline.search_service.search_stock_news.return_value = news_response
 
             result = pipeline._analyze_with_agent(
@@ -2251,7 +2251,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             from src.enums import ReportType
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline._ensure_agent_history = MagicMock()
             pipeline._build_analysis_context_pack_outputs = MagicMock(
                 return_value=(
@@ -2361,7 +2361,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             from src.enums import ReportType
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline._ensure_agent_history = MagicMock()
             pipeline._build_analysis_context_pack_outputs = MagicMock(
                 return_value=("", {"blocks": [], "data_quality": {"limitations": []}})
@@ -2462,7 +2462,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             from src.services.daily_market_context import DailyMarketContext
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline.db.save_analysis_history.return_value = 1
             pipeline._extract_decision_signal_after_history_save = MagicMock()
 
@@ -2596,7 +2596,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             from src.agent.executor import AgentResult
             from src.enums import ReportType
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
 
             agent_result = AgentResult(
                 success=True,
@@ -2675,7 +2675,7 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             from src.enums import ReportType
 
             pipeline = StockAnalysisPipeline(config=mock_cfg)
-            pipeline.search_service.is_available = False
+            pipeline.search_service = SimpleNamespace(is_available=False)
             pipeline._ensure_agent_history = MagicMock()
             pipeline._agent_result_to_analysis_result = MagicMock(
                 return_value=SimpleNamespace(

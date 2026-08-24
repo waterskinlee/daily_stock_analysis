@@ -53,7 +53,7 @@ def _build_initialized_pipeline(
          patch("src.core.pipeline.StockTrendAnalyzer", return_value=MagicMock()), \
          patch("src.core.pipeline.GeminiAnalyzer", return_value=MagicMock()), \
          patch("src.core.pipeline.NotificationService", return_value=MagicMock()), \
-         patch("src.core.pipeline.SearchService", return_value=search_service), \
+         patch("src.core.pipeline.get_search_service", return_value=search_service), \
          patch("src.core.pipeline.SocialSentimentService", return_value=social_sentiment_service):
         return StockAnalysisPipeline(config=config, **kwargs)
 

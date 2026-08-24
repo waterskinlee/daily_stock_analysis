@@ -531,15 +531,25 @@ def _accumulate_stream_text(response: object) -> str:
     non-stream responses whose output hits ``max_tokens`` come back with the
     entire content dropped, and Responses-surface payloads containing only
     reasoning items crash LiteLLM's non-stream assembly ("Unknown items").
-    Non-iterable responses fall back to the legacy extractor.
+    Non-iterable responses fall back to the legacy extractor. A terminal
+    usage chunk (requested via ``stream_options.include_usage``) is logged
+    for token telemetry parity with the analysis path.
     """
     try:
         iterator = iter(response)
     except TypeError:
         return _extract_completion_text(response)
     parts: list[str] = []
+    usage: dict[str, object] | None = None
     for chunk in iterator:
         try:
+            chunk_usage = chunk.get("usage") if isinstance(chunk, dict) else getattr(chunk, "usage", None)
+            if chunk_usage:
+                usage = {
+                    "prompt_tokens": getattr(chunk_usage, "prompt_tokens", None) if not isinstance(chunk_usage, dict) else chunk_usage.get("prompt_tokens"),
+                    "completion_tokens": getattr(chunk_usage, "completion_tokens", None) if not isinstance(chunk_usage, dict) else chunk_usage.get("completion_tokens"),
+                    "total_tokens": getattr(chunk_usage, "total_tokens", None) if not isinstance(chunk_usage, dict) else chunk_usage.get("total_tokens"),
+                }
             choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
             if not choices:
                 continue
@@ -552,7 +562,15 @@ def _accumulate_stream_text(response: object) -> str:
                 parts.append(content)
         except Exception:
             continue
-    return "".join(parts)
+    text = "".join(parts)
+    if usage and any(usage.get(key) for key in ("total_tokens", "completion_tokens", "prompt_tokens")):
+        logger.info(
+            "Screening LLM ranking stream usage model_tokens total=%s prompt=%s completion=%s",
+            usage.get("total_tokens"),
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+        )
+    return text
 
 
 def _call_llm(
@@ -616,6 +634,7 @@ def _call_llm(
             use_stream = _ranking_stream_enabled()
             if use_stream:
                 kwargs["stream"] = True
+                kwargs["stream_options"] = {"include_usage": True}
             try:
                 response = _call_screening_litellm_completion(
                     lambda request_kwargs: litellm.completion(**request_kwargs),
@@ -1005,6 +1024,7 @@ def _call_litellm_router(
             use_stream = _ranking_stream_enabled()
             if use_stream:
                 kwargs["stream"] = True
+                kwargs["stream_options"] = {"include_usage": True}
             try:
                 response = _call_screening_litellm_completion(
                     lambda request_kwargs: router.completion(**request_kwargs),

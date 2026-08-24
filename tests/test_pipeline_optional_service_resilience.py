@@ -43,7 +43,7 @@ def test_search_service_init_failure_logs_traceback_and_failure_state(caplog):
     social_service = MagicMock()
     social_service.is_available = False
 
-    with patch("src.core.pipeline.SearchService", side_effect=RuntimeError("search init boom")), \
+    with patch("src.core.pipeline.get_search_service", side_effect=RuntimeError("search init boom")), \
          patch("src.core.pipeline.SocialSentimentService", return_value=social_service), \
          caplog.at_level(logging.WARNING, logger="src.core.pipeline"):
         pipeline = _build_pipeline(config)
@@ -64,7 +64,7 @@ def test_social_sentiment_init_failure_logs_traceback(caplog):
     search_service = MagicMock()
     search_service.is_available = False
 
-    with patch("src.core.pipeline.SearchService", return_value=search_service), \
+    with patch("src.core.pipeline.get_search_service", return_value=search_service), \
          patch("src.core.pipeline.SocialSentimentService", side_effect=RuntimeError("social init boom")), \
          caplog.at_level(logging.WARNING, logger="src.core.pipeline"):
         pipeline = _build_pipeline(config)
