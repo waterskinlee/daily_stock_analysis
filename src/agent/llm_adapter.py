@@ -8,7 +8,6 @@ interface consumed by the AgentExecutor, via LiteLLM.
 
 import json
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,7 +43,11 @@ from src.llm.backend_registry import (
     resolve_agent_generation_backend_id,
 )
 from src.llm.generation_backend import GenerationError, GenerationErrorCode
-from src.llm.generation_params import apply_litellm_generation_params, resolve_litellm_wire_model
+from src.llm.generation_params import (
+    apply_litellm_generation_params,
+    litellm_analysis_stream_enabled,
+    resolve_litellm_wire_model,
+)
 from src.llm.usage import attach_message_hmacs, extract_usage_payload, normalize_litellm_usage
 from src.llm.provider_cache import (
     build_provider_cache_route_context,
@@ -241,8 +244,7 @@ def _extract_provider_blocks(choice: Any) -> Tuple[List[Dict[str, Any]], Optiona
 
 
 def _analysis_stream_enabled() -> bool:
-    """Streaming on by default; LLM_ANALYSIS_STREAM=0/false/no/off opts out."""
-    return os.getenv("LLM_ANALYSIS_STREAM", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return litellm_analysis_stream_enabled()
 
 
 def _stream_field(obj: Any, name: str) -> Any:

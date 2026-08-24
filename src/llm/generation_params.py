@@ -561,6 +561,11 @@ def clear_litellm_generation_param_recovery_cache() -> None:
     _GENERATION_PARAM_RECOVERY_CACHE.clear()
 
 
+def litellm_analysis_stream_enabled() -> bool:
+    """Analysis-style completions stream by default; LLM_ANALYSIS_STREAM opts out."""
+    return os.getenv("LLM_ANALYSIS_STREAM", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def apply_litellm_generation_params(
     call_kwargs: Dict[str, Any],
     model: str,

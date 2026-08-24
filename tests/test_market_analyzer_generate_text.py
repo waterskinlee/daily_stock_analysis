@@ -2112,7 +2112,12 @@ class TestAnalyzerGenerateText:
         assert text == "fallback ok"
         assert model_used == "openai/gpt-4o-mini"
         _assert_usage_contains(usage, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+        # Streaming is now the default: the primary model is attempted once
+        # via the stream branch, and its before-first-chunk failure triggers
+        # the designed same-model non-stream retry before falling to the
+        # next model.
         assert temperatures == [
+            ("openai/kimi-k2.6", 1.0),
             ("openai/kimi-k2.6", 1.0),
             ("openai/gpt-4o-mini", 0.2),
         ]
@@ -2162,7 +2167,9 @@ class TestAnalyzerGenerateText:
         assert text == "fallback ok"
         assert model_used == "openai/fallback-model"
         _assert_usage_contains(usage, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+        # Same streaming-default retry semantics as the temperature test.
         assert efforts == [
+            ("openai/primary-model", "xhigh"),
             ("openai/primary-model", "xhigh"),
             ("openai/fallback-model", "low"),
         ]

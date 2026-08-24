@@ -51,7 +51,7 @@ from src.llm.hermes import (
     route_has_hermes,
     sanitize_hermes_error_text,
 )
-from src.llm.generation_params import apply_litellm_generation_params
+from src.llm.generation_params import apply_litellm_generation_params, litellm_analysis_stream_enabled
 from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     LOCAL_CLI_GENERATION_BACKEND_IDS,
@@ -3816,7 +3816,7 @@ class GeminiAnalyzer:
         generation_config: dict,
         *,
         system_prompt: Optional[str] = None,
-        stream: bool = False,
+        stream: Optional[bool] = None,
         stream_progress_callback: Optional[Callable[[int], None]] = None,
         response_validator: Optional[Callable[[str], None]] = None,
         audit_context: Optional[Dict[str, Any]] = None,
@@ -3826,12 +3826,16 @@ class GeminiAnalyzer:
         if preflight_error is not None and not self._can_use_generation_fallback(preflight_error):
             raise preflight_error
         backend_id, fallback_backend_id = self._resolve_generation_backend_config()
+        # Default to streaming for every legacy-path caller unless explicitly
+        # overridden; the impl's fallback chain degrades to non-stream on
+        # provider failure, and Hermes routes force non-stream downstream.
+        effective_stream = litellm_analysis_stream_enabled() if stream is None else bool(stream)
         try:
             result = self._get_generation_backend(backend_id).generate(
                 prompt,
                 generation_config,
                 system_prompt=system_prompt,
-                stream=stream,
+                stream=effective_stream,
                 stream_progress_callback=stream_progress_callback,
                 response_validator=response_validator,
                 audit_context=audit_context,
@@ -3865,7 +3869,7 @@ class GeminiAnalyzer:
                     prompt,
                     generation_config,
                     system_prompt=system_prompt,
-                    stream=stream,
+                    stream=effective_stream,
                     stream_progress_callback=stream_progress_callback,
                     response_validator=response_validator,
                     audit_context=audit_context,
@@ -4055,6 +4059,7 @@ class GeminiAnalyzer:
 
                 _stream_text: Optional[str] = None
                 _stream_usage: Dict[str, Any] = {}
+                _passthrough_response: Any = None
 
                 if model_stream:
                     try:
@@ -4072,13 +4077,19 @@ class GeminiAnalyzer:
                             cache_recovery=False,
                             logger=logger,
                         )
-                        _stream_text, _stream_usage = self._consume_litellm_stream(
-                            stream_response,
-                            model=model,
-                            usage_model=usage_model,
-                            provider=usage_provider,
-                            progress_callback=stream_progress_callback,
-                        )
+                        if hasattr(stream_response, "__iter__") or hasattr(stream_response, "__next__"):
+                            _stream_text, _stream_usage = self._consume_litellm_stream(
+                                stream_response,
+                                model=model,
+                                usage_model=usage_model,
+                                provider=usage_provider,
+                                progress_callback=stream_progress_callback,
+                            )
+                        else:
+                            # Provider ignored stream=True and returned a full
+                            # response; consume it as-is instead of paying for
+                            # a duplicate non-stream request.
+                            _passthrough_response = stream_response
                     except _LiteLLMStreamError as exc:
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         if exc.partial_received:
@@ -4111,19 +4122,22 @@ class GeminiAnalyzer:
                         response_validator(_stream_text)
                     return _stream_text, model, _stream_usage
 
-                response = call_litellm_with_param_recovery(
-                    lambda kwargs: self._dispatch_litellm_completion(
-                        model,
-                        kwargs,
-                        config=config,
-                        use_channel_router=use_channel_router,
-                        router_model_names=router_model_names,
-                    ),
-                    model=model,
-                    call_kwargs=call_kwargs,
-                    model_list=recovery_model_list,
-                    logger=logger,
-                )
+                if _passthrough_response is not None:
+                    response = _passthrough_response
+                else:
+                    response = call_litellm_with_param_recovery(
+                        lambda kwargs: self._dispatch_litellm_completion(
+                            model,
+                            kwargs,
+                            config=config,
+                            use_channel_router=use_channel_router,
+                            router_model_names=router_model_names,
+                        ),
+                        model=model,
+                        call_kwargs=call_kwargs,
+                        model_list=recovery_model_list,
+                        logger=logger,
+                    )
 
                 content = self._extract_completion_text(response)
                 if content:
