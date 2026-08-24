@@ -159,16 +159,6 @@ class StockRepository:
             ).scalar_one_or_none()
             return row
 
-    def get_daily_on_or_before(self, *, code: str, target_date: date) -> Optional[StockDaily]:
-        """Return the latest StockDaily on or before target_date (trading-day fallback)."""
-        with self.db.get_session() as session:
-            return session.execute(
-                select(StockDaily)
-                .where(and_(StockDaily.code == code, StockDaily.date <= target_date))
-                .order_by(StockDaily.date.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-
     def get_forward_bars(self, *, code: str, analysis_date: date, eval_window_days: int) -> List[StockDaily]:
         """Return forward daily bars after analysis_date, up to eval_window_days."""
         with self.db.get_session() as session:
