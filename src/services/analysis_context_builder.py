@@ -290,6 +290,11 @@ def _build_technical_block(
             status=block_status,
             items=items,
             warnings=warnings,
+            source=(
+                (_realtime_overlay_source(artifacts.enhanced_context) or "realtime")
+                if has_realtime_overlay
+                else "storage.get_analysis_context"
+            ),
             metadata={
                 key: value
                 for key, value in {
@@ -377,7 +382,7 @@ def _build_fundamentals_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisC
     )
     coverage = context.get("coverage") if isinstance(context.get("coverage"), dict) else {}
     source_chain = context.get("source_chain") if isinstance(context.get("source_chain"), list) else []
-    source = _source_from_chain(source_chain)
+    source = _fundamental_sources(source_chain)
     metadata = {
         "status": raw_status or None,
         "coverage": coverage,
@@ -787,10 +792,29 @@ def _fundamental_payload_missing_reason(
     return missing_reason
 
 
-def _source_from_chain(source_chain: Any) -> Optional[str]:
+def _fundamental_sources(source_chain: Any) -> Optional[str]:
+    """Aggregate distinct provider families from a fundamental source chain.
+
+    基本面是多源聚合（realtime_quote/tushare/ths/eastmoney...），块级"来源"
+    取首项会把整体误读为单一来源；按 provider 家族去重汇总更贴近事实。
+    """
     if not isinstance(source_chain, list) or not source_chain:
         return None
-    first = source_chain[0]
-    if isinstance(first, dict):
-        return _source_text(first.get("provider") or first.get("source"))
-    return _source_text(first)
+    families: List[str] = []
+    for entry in source_chain:
+        provider = entry.get("provider") if isinstance(entry, dict) else None
+        text = str(provider or "").strip().lower()
+        if not text:
+            continue
+        family = text.split(":", 1)[-1]
+        if family.startswith("tushare"):
+            family = "tushare"
+        elif family.startswith("eastmoney"):
+            family = "eastmoney"
+        if family and family not in families:
+            families.append(family)
+    if not families:
+        return None
+    shown = families[:4]
+    suffix = f"+{len(families) - len(shown)}" if len(families) > len(shown) else ""
+    return ", ".join(shown) + suffix

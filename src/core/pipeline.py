@@ -1109,23 +1109,33 @@ class StockAnalysisPipeline:
                     'ma10': trend_result.ma10,
                     'ma20': trend_result.ma20,
                     'date': market_today,
-                    'data_source': f"realtime:{source_name}",
-                    'realtime_source': source_name,
-                    'is_estimated': True,
                 }
-                estimated_fields = [
-                    'close', 'open', 'high', 'low', 'ma5', 'ma10', 'ma20',
-                ]
                 if vol is not None:
                     realtime_today['volume'] = vol
-                    estimated_fields.append('volume')
                 if amt is not None:
                     realtime_today['amount'] = amt
-                    estimated_fields.append('amount')
                 if pct is not None:
                     realtime_today['pct_chg'] = pct
-                    estimated_fields.append('pct_chg')
-                realtime_today['estimated_fields'] = estimated_fields
+                # Issue #234：盘中把今日标注为实时估算；盘后/非交易日今日 bar 已
+                # 定稿，覆盖数值保留但不再打估算标，避免技术块被误判为
+                # partial + intraday_realtime_overlay。相位缺失时保守打标。
+                phase_partial_bar = True
+                if isinstance(market_phase_context, dict) and "is_partial_bar" in market_phase_context:
+                    phase_partial_bar = bool(market_phase_context.get("is_partial_bar"))
+                if phase_partial_bar:
+                    realtime_today['data_source'] = f"realtime:{source_name}"
+                    realtime_today['realtime_source'] = source_name
+                    realtime_today['is_estimated'] = True
+                    estimated_fields = [
+                        'close', 'open', 'high', 'low', 'ma5', 'ma10', 'ma20',
+                    ]
+                    if vol is not None:
+                        estimated_fields.append('volume')
+                    if amt is not None:
+                        estimated_fields.append('amount')
+                    if pct is not None:
+                        estimated_fields.append('pct_chg')
+                    realtime_today['estimated_fields'] = estimated_fields
                 if isinstance(market_phase_context, dict) and "is_partial_bar" in market_phase_context:
                     realtime_today['is_partial_bar'] = market_phase_context.get("is_partial_bar")
                 if fetched_at is not None:
@@ -3156,9 +3166,19 @@ class StockAnalysisPipeline:
         盘中运行标成纯日线 AVAILABLE。这里只注入覆盖标记（data_source/
         is_estimated/is_partial_bar），不伪造 OHLC 数值。realtime_quote 兼容
         UnifiedRealtimeQuote 对象与 dict 两种形态。
+
+        仅当日线未完结（phase.is_partial_bar）时注入；盘后/非交易日今日 bar
+        已定稿，继续打标会把技术块误判为估算（partial +
+        intraday_realtime_overlay）。相位信息缺失时保持旧行为（保守打标）。
         """
         quote = initial_context.get("realtime_quote")
         if not quote:
+            return {}
+        if (
+            isinstance(phase, dict)
+            and "is_partial_bar" in phase
+            and not phase.get("is_partial_bar")
+        ):
             return {}
 
         def _get(name: str) -> Any:
@@ -3166,7 +3186,11 @@ class StockAnalysisPipeline:
                 return quote.get(name)
             return getattr(quote, name, None)
 
-        source = _get("source") or "unknown"
+        raw_source = _get("source")
+        # UnifiedRealtimeQuote.source 是 Enum；f-string 直接插值会得到
+        # "RealtimeSource.TENCENT"，与 legacy 路径一致取 .value。
+        source_value = getattr(raw_source, "value", raw_source)
+        source = str(source_value) if source_value else "unknown"
         today_overlay: Dict[str, Any] = {
             "data_source": f"realtime:{source}",
             "is_estimated": True,

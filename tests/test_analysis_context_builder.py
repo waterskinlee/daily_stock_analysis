@@ -391,6 +391,44 @@ def test_fundamentals_maps_supported_statuses_without_raw_errors(
         )
 
 
+def test_technical_block_records_provenance_source() -> None:
+    plain = AnalysisContextBuilder.build(_artifacts()).blocks["technical"]
+    assert plain.source == "storage.get_analysis_context"
+
+    overlay = AnalysisContextBuilder.build(
+        _artifacts(
+            enhanced_context={
+                "today": {
+                    "close": 1880.0,
+                    "data_source": "realtime:akshare_em",
+                    "is_estimated": True,
+                    "estimated_fields": ["close", "high", "low"],
+                }
+            }
+        )
+    ).blocks["technical"]
+    assert overlay.source == "realtime:akshare_em"
+
+
+def test_fundamentals_block_aggregates_source_families() -> None:
+    block = AnalysisContextBuilder.build(
+        _artifacts(
+            fundamental_context={
+                "status": "ok",
+                "coverage": {"valuation": "ok", "growth": "ok"},
+                "source_chain": [
+                    {"provider": "realtime_quote", "result": "ok", "duration_ms": 425},
+                    {"provider": "growth:tushare_fina_indicator", "result": "partial"},
+                    {"provider": "earnings_consensus:ths", "result": "ok"},
+                    {"provider": "institution:eastmoney_zlsj", "result": "partial"},
+                    {"provider": "fundamental_pipeline", "result": "failed"},
+                ],
+            }
+        )
+    ).blocks["fundamentals"]
+    assert block.source == "realtime_quote, tushare, ths, eastmoney+1"
+
+
 def test_builder_does_not_hide_broken_artifact_to_dict() -> None:
     with pytest.raises(RuntimeError, match="broken trend artifact"):
         AnalysisContextBuilder.build(_artifacts(trend_result=_BrokenTrend()))
