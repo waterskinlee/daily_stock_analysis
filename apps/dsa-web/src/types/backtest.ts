@@ -37,6 +37,7 @@ export interface BacktestResultItem {
   code: string;
   stockName?: string;
   analysisDate?: string;
+  analysisCreatedAt?: string;
   evalWindowDays: number;
   engineVersion: string;
   evalStatus: string;

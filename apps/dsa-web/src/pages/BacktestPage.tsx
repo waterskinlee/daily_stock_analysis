@@ -38,6 +38,17 @@ function pct(value?: number | null): string {
   return `${value.toFixed(1)}%`;
 }
 
+function price(value?: number | null): string {
+  if (value == null) return '--';
+  return value.toFixed(2);
+}
+
+function analysisTime(createdAt?: string): string {
+  if (!createdAt) return '';
+  const match = createdAt.match(/T(\d{2}:\d{2})/);
+  return match ? match[1] : '';
+}
+
 function phaseLabel(row: BacktestResultItem, language: UiLanguage): string {
   const label = getMarketPhaseSummaryLabel(row.marketPhaseSummary, language);
   if (label) {
@@ -654,7 +665,14 @@ const BacktestPage: React.FC = () => {
                               <span className="text-xs text-muted-text">{row.stockName || '--'}</span>
                             </div>
                           </td>
-                          <td className="backtest-table-cell text-secondary-text">{row.analysisDate || '--'}</td>
+                          <td className="backtest-table-cell text-secondary-text">
+                            <div className="flex flex-col">
+                              <span>{row.analysisDate || '--'}</span>
+                              {analysisTime(row.analysisCreatedAt) && (
+                                <span className="text-xs text-muted-text">{analysisTime(row.analysisCreatedAt)}</span>
+                              )}
+                            </div>
+                          </td>
                           <td className="backtest-table-cell text-secondary-text">{phaseLabel(row, language)}</td>
                           <td className="backtest-table-cell max-w-[220px] text-foreground">
                             {predictionParts.length ? (
@@ -677,16 +695,37 @@ const BacktestPage: React.FC = () => {
                             )}
                           </td>
                           <td className="backtest-table-cell">
-                            <div className="flex items-center gap-2">
-                              {actualMovementBadge(row.actualMovement, language)}
-                              <span className={
-                                row.actualReturnPct != null
-                                  ? row.actualReturnPct > 0 ? 'text-success' : row.actualReturnPct < 0 ? 'text-danger' : 'text-secondary-text'
-                                  : 'text-muted-text'
-                              }>
-                                {pct(row.actualReturnPct)}
-                              </span>
-                            </div>
+                            <Tooltip
+                              focusable
+                              content={
+                                [
+                                  `${text.anchorLabel}: ${price(row.startPrice)}`,
+                                  `${text.endLabel}: ${price(row.endClose)}`,
+                                  `${text.returnLabel}: ${pct(row.actualReturnPct)}`,
+                                  row.firstHitDate ? `${text.firstHitLabel}: ${row.firstHit} @ ${row.firstHitDate}` : null,
+                                  row.hitStopLoss ? `${text.stopLossLabel}: ${price(row.stopLoss)}` : null,
+                                  row.hitTakeProfit ? `${text.takeProfitLabel}: ${price(row.takeProfit)}` : null,
+                                ].filter(Boolean).map((line, idx) => (
+                                  <span key={idx} className="block whitespace-nowrap">{line}</span>
+                                ))
+                              }
+                            >
+                              <div className="flex items-center gap-2">
+                                {actualMovementBadge(row.actualMovement, language)}
+                                <span className={
+                                  row.actualReturnPct != null
+                                    ? row.actualReturnPct > 0 ? 'text-success' : row.actualReturnPct < 0 ? 'text-danger' : 'text-secondary-text'
+                                    : 'text-muted-text'
+                                }>
+                                  {price(row.startPrice)} → {price(row.endClose)}
+                                  {row.actualReturnPct != null && (
+                                    <span className="ml-1">
+                                      ({pct(row.actualReturnPct)})
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            </Tooltip>
                           </td>
                           <td className="backtest-table-cell">
                             <span className="flex items-center gap-2">

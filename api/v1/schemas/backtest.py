@@ -41,6 +41,7 @@ class BacktestResultItem(BaseModel):
     code: str
     stock_name: Optional[str] = None
     analysis_date: Optional[str] = None
+    analysis_created_at: Optional[str] = None
     eval_window_days: int
     engine_version: str
     eval_status: str

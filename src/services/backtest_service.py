@@ -543,7 +543,7 @@ class BacktestService:
             limit=limit,
         )
         items = []
-        for result, stock_name, trend_prediction, _created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
+        for result, stock_name, trend_prediction, created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
             summary = extract_market_phase_summary(context_snapshot)
             items.append(
                 self._result_to_dict(
@@ -555,6 +555,7 @@ class BacktestService:
                     raw_result=raw_result,
                     report_type=report_type,
                     analysis_sentiment_score=analysis_sentiment_score,
+                    analysis_created_at=created_at,
                 )
             )
         return {"total": total, "page": page, "limit": limit, "items": items}
@@ -756,7 +757,7 @@ class BacktestService:
                 result,
                 stock_name,
                 trend_prediction,
-                _created_at,
+                created_at,
                 context_snapshot,
                 raw_result,
                 report_type,
@@ -767,7 +768,7 @@ class BacktestService:
                 if bucket != phase_bucket:
                     continue
                 if matched_total >= page_offset and len(page_rows) < limit:
-                    page_rows.append((result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score))
+                    page_rows.append((result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score, created_at))
                 matched_total += 1
             if len(batch) < batch_limit:
                 break
@@ -782,8 +783,9 @@ class BacktestService:
                 raw_result=raw_result,
                 report_type=report_type,
                 analysis_sentiment_score=analysis_sentiment_score,
+                analysis_created_at=created_at,
             )
-            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score in page_rows
+            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score, created_at in page_rows
         ]
         return {"total": matched_total, "page": page, "limit": limit, "items": items}
 
@@ -938,6 +940,7 @@ class BacktestService:
         raw_result: Optional[Any] = None,
         report_type: Optional[str] = None,
         analysis_sentiment_score: Optional[int] = None,
+        analysis_created_at: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         parsed_raw_result = parse_json_field(raw_result)
         raw = parsed_raw_result if isinstance(parsed_raw_result, dict) else {}
@@ -957,6 +960,7 @@ class BacktestService:
         return {
             "analysis_history_id": row.analysis_history_id,
             "code": row.code,
+            "analysis_created_at": analysis_created_at.isoformat() if analysis_created_at else None,
             "stock_name": stock_name,
             "analysis_date": row.analysis_date.isoformat() if row.analysis_date else None,
             "eval_window_days": row.eval_window_days,
