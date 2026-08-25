@@ -260,11 +260,24 @@ def _legacy_audit_marker_specs(
 
 
 class _LiteLLMStreamError(RuntimeError):
-    """Internal error wrapper that records whether any text was streamed."""
+    """Internal error wrapper that records how the stream failed.
 
-    def __init__(self, message: str, *, partial_received: bool = False):
+    ``truncated`` marks a deterministic max_tokens cut: retrying the same
+    model (stream or non-stream) would hit the same budget, so callers skip
+    straight to the next model. ``partial_received`` covers transient stream
+    interruptions where a same-model non-stream retry still makes sense.
+    """
+
+    def __init__(
+        self,
+        message: str,
+    *,
+        partial_received: bool = False,
+        truncated: bool = False,
+    ):
         super().__init__(message)
         self.partial_received = partial_received
+        self.truncated = truncated
 
 
 class _AllModelsFailedError(Exception):
@@ -3803,15 +3816,14 @@ class GeminiAnalyzer:
 
         if progress_callback and chars_received > 0:
             progress_callback(chars_received)
-
         if finish_reason == "length":
-            # max_tokens cut mid-stream: the partial text would otherwise be
-            # stitched into the report as if complete. Surface it through the
-            # existing partial-received path so the caller retries non-stream
-            # for the same model and then falls through the model chain.
+            # max_tokens cut mid-stream: deterministic budget failure. Retry
+            # would re-hit the same limit, so mark truncated — the catch site
+            # skips same-model retries entirely and moves to the next model.
             raise _LiteLLMStreamError(
                 f"{model} stream truncated by max_tokens (chars={chars_received})",
                 partial_received=True,
+                truncated=True,
             )
         return response_text, usage
 
@@ -4111,6 +4123,18 @@ class GeminiAnalyzer:
                             _passthrough_response = stream_response
                     except _LiteLLMStreamError as exc:
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
+                        if getattr(exc, "truncated", False):
+                            # Deterministic max_tokens cut: a same-model retry
+                            # would re-truncate, and this gateway returns EMPTY
+                            # content for non-stream length responses anyway.
+                            # Skip straight to the next model.
+                            logger.warning(
+                                "[LiteLLM] %s stream truncated by max_tokens, skipping same-model retries: %s",
+                                model,
+                                safe_error,
+                            )
+                            last_error = RuntimeError(f"{type(exc).__name__}: {safe_error}")
+                            continue
                         if exc.partial_received:
                             logger.warning(
                                 "[LiteLLM] %s stream failed after partial output, retrying non-stream for same model: %s",

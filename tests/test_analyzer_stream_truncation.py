@@ -65,3 +65,39 @@ def test_consume_accepts_stop_finished_stream() -> None:
     ]
     text, _usage = inst._consume_litellm_stream(stream, model="openai/x-preview-f-free")
     assert text == "complete answer"
+
+
+
+def test_impl_skips_same_model_retry_on_truncated_stream() -> None:
+    """Truncation is deterministic: next model must be tried with NO
+    intermediate same-model non-stream attempt.
+    """
+    inst = GeminiAnalyzer.__new__(GeminiAnalyzer)
+    calls: list[str] = []
+
+    def fake_dispatch(model, call_kwargs, **_kwargs):
+        calls.append(model)
+        if model == "openai/primary":
+
+            def gen():
+                yield _chunk(SimpleNamespace(content="half"))
+                yield _chunk(SimpleNamespace(content=""), finish_reason="length")
+
+            return iter(gen())
+        message = SimpleNamespace(content="fallback ok", tool_calls=None, reasoning_content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+    inst._dispatch_litellm_completion = fake_dispatch
+    inst._config_override = SimpleNamespace(
+        litellm_model="openai/primary",
+        litellm_fallback_models=["openai/fallback"],
+        llm_model_list=[],
+    )
+    inst._router = None
+    inst._legacy_router_model_list = []
+
+    text, model_used, _usage = inst._call_litellm("prompt", {"max_tokens": 128})
+
+    assert text == "fallback ok"
+    assert model_used == "openai/fallback"
+    assert calls == ["openai/primary", "openai/fallback"]
