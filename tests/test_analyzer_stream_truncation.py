@@ -37,6 +37,7 @@ def test_consume_raises_partial_received_on_length_final_chunk() -> None:
     with pytest.raises(_LiteLLMStreamError) as exc_info:
         inst._consume_litellm_stream(stream, model="openai/x-preview-f-free")
     assert exc_info.value.partial_received is True
+    assert exc_info.value.truncated is True
     assert "truncated by max_tokens" in str(exc_info.value)
 
 
@@ -54,6 +55,7 @@ def test_consume_captures_finish_reason_before_empty_delta_skip() -> None:
     with pytest.raises(_LiteLLMStreamError) as exc_info:
         inst._consume_litellm_stream(stream, model="openai/x-preview-f-free")
     assert exc_info.value.partial_received is True
+    assert exc_info.value.truncated is True
 
 
 def test_consume_accepts_stop_finished_stream() -> None:
