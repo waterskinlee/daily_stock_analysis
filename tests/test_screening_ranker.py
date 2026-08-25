@@ -671,6 +671,30 @@ def test_screening_ranker_stream_truncation_raises_for_model_fallback() -> None:
                 json_mode=False,
             )
 
+
+def test_screening_ranker_stream_captures_finish_reason_without_delta() -> None:
+    """A length frame with NO delta body must still abort the stream."""
+    clear_litellm_generation_param_recovery_cache()
+
+    def completion(**kwargs):
+        chunks = [
+            {"choices": [{"delta": {"content": '{"ranked":['}}]},
+            {"choices": [{"finish_reason": "length"}]},  # delta missing entirely
+        ]
+        return iter(chunks)
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False):
+        with pytest.raises(RuntimeError, match="truncated by max_tokens"):
+            _call_llm(
+                "rank candidates",
+                api_key="test-key",
+                model="openai/x-preview-f-free",
+                base_url="",
+                json_mode=False,
+            )
+
 def test_screening_ranker_stream_requests_and_logs_usage() -> None:
     clear_litellm_generation_param_recovery_cache()
     completion_calls: list[dict[str, object]] = []
