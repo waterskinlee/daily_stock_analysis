@@ -8,6 +8,7 @@ interface consumed by the AgentExecutor, via LiteLLM.
 
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -254,6 +255,31 @@ def _stream_field(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
     return getattr(obj, name, None)
+
+
+_AGENT_MAX_OUTPUT_TOKENS_DEFAULT = 8192
+
+
+def _resolve_agent_max_output_tokens() -> int:
+    """Explicit per-call output budget for agent completions.
+
+    AGENT_MAX_OUTPUT_TOKENS overrides; 8192 covers modern chat models and
+    keeps headroom for hidden reasoning tokens that count toward the same
+    completion budget on this gateway.
+    """
+    raw = (os.getenv("AGENT_MAX_OUTPUT_TOKENS") or "").strip()
+    if not raw:
+        return _AGENT_MAX_OUTPUT_TOKENS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid AGENT_MAX_OUTPUT_TOKENS=%r, using default %d",
+            raw,
+            _AGENT_MAX_OUTPUT_TOKENS_DEFAULT,
+        )
+        return _AGENT_MAX_OUTPUT_TOKENS_DEFAULT
+    return max(256, value)
 
 
 def _accumulate_stream_response(stream: Any) -> Any:
@@ -840,6 +866,11 @@ class LLMToolAdapter:
         }
         if max_tokens is not None:
             call_kwargs["max_tokens"] = max_tokens
+        else:
+            # The agent loop leaves max_tokens unset; without an explicit
+            # budget the gateway/model default applies, which has already
+            # truncated report fields mid-JSON (finish_reason=length).
+            call_kwargs["max_tokens"] = _resolve_agent_max_output_tokens()
         if timeout is not None:
             call_kwargs["timeout"] = timeout
         if reasoning_effort is not None:

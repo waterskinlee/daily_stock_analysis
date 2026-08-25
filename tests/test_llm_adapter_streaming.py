@@ -135,6 +135,94 @@ def test_parse_litellm_response_accepts_synthetic_stream_result() -> None:
     assert response.usage
 
 
+def test_call_litellm_model_injects_default_max_tokens_when_unset(monkeypatch) -> None:
+    """Agent loop passes max_tokens=None; the wire call must carry an explicit
+    environment-tunable budget instead of trusting gateway defaults.
+    """
+    monkeypatch.delenv("AGENT_MAX_OUTPUT_TOKENS", raising=False)
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    def completion(**kwargs):
+        captured.update(kwargs)
+
+        def gen():
+            yield _chunk(delta={"content": "ok"}, finish_reason="stop")
+
+        return iter(gen())
+
+    with mock.patch("src.agent.llm_adapter.litellm.completion", side_effect=completion), \
+            mock.patch("src.agent.llm_adapter.get_api_keys_for_model", return_value=[]), \
+            mock.patch("src.agent.llm_adapter.extra_litellm_params", return_value={}), \
+            mock.patch("src.agent.llm_adapter.register_fallback_model_pricing"), \
+            mock.patch("src.agent.llm_adapter.get_effective_agent_primary_model", return_value=None):
+        adapter._call_litellm_model(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "openai/x-preview-f-free",
+            models_tried=["openai/x-preview-f-free"],
+        )
+
+    assert captured.get("max_tokens") == 8192
+
+
+def test_agent_max_output_tokens_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", "16384")
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    def completion(**kwargs):
+        captured.update(kwargs)
+
+        def gen():
+            yield _chunk(delta={"content": "ok"}, finish_reason="stop")
+
+        return iter(gen())
+
+    with mock.patch("src.agent.llm_adapter.litellm.completion", side_effect=completion), \
+            mock.patch("src.agent.llm_adapter.get_api_keys_for_model", return_value=[]), \
+            mock.patch("src.agent.llm_adapter.extra_litellm_params", return_value={}), \
+            mock.patch("src.agent.llm_adapter.register_fallback_model_pricing"), \
+            mock.patch("src.agent.llm_adapter.get_effective_agent_primary_model", return_value=None):
+        adapter._call_litellm_model(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "openai/x-preview-f-free",
+            models_tried=["openai/x-preview-f-free"],
+        )
+
+    assert captured.get("max_tokens") == 16384
+
+
+def test_call_litellm_model_passes_explicit_max_tokens_through(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", "16384")
+    adapter = _make_adapter()
+    captured: dict = {}
+
+    def completion(**kwargs):
+        captured.update(kwargs)
+
+        def gen():
+            yield _chunk(delta={"content": "ok"}, finish_reason="stop")
+
+        return iter(gen())
+
+    with mock.patch("src.agent.llm_adapter.litellm.completion", side_effect=completion), \
+            mock.patch("src.agent.llm_adapter.get_api_keys_for_model", return_value=[]), \
+            mock.patch("src.agent.llm_adapter.extra_litellm_params", return_value={}), \
+            mock.patch("src.agent.llm_adapter.register_fallback_model_pricing"), \
+            mock.patch("src.agent.llm_adapter.get_effective_agent_primary_model", return_value=None):
+        adapter._call_litellm_model(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "openai/x-preview-f-free",
+            max_tokens=2048,
+            models_tried=["openai/x-preview-f-free"],
+        )
+
+    assert captured.get("max_tokens") == 2048
+
+
 def _make_adapter():
     adapter = LLMToolAdapter.__new__(LLMToolAdapter)
     adapter._config = SimpleNamespace(
