@@ -541,6 +541,7 @@ def _accumulate_stream_text(response: object) -> str:
         return _extract_completion_text(response)
     parts: list[str] = []
     usage: dict[str, object] | None = None
+    finish_reason: str | None = None
     for chunk in iterator:
         try:
             chunk_usage = chunk.get("usage") if isinstance(chunk, dict) else getattr(chunk, "usage", None)
@@ -554,6 +555,10 @@ def _accumulate_stream_text(response: object) -> str:
             if not choices:
                 continue
             first = choices[0]
+            if first:
+                fr = first.get("finish_reason") if isinstance(first, dict) else getattr(first, "finish_reason", None)
+                if fr:
+                    finish_reason = str(fr)
             delta = first.get("delta") if isinstance(first, dict) else getattr(first, "delta", None)
             if delta is None:
                 continue
@@ -569,6 +574,10 @@ def _accumulate_stream_text(response: object) -> str:
             usage.get("total_tokens"),
             usage.get("prompt_tokens"),
             usage.get("completion_tokens"),
+        )
+    if finish_reason == "length":
+        raise RuntimeError(
+            f"Screening LLM ranking stream truncated by max_tokens (chars={len(text)})"
         )
     return text
 

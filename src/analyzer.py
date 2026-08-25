@@ -3761,6 +3761,7 @@ class GeminiAnalyzer:
         usage: Dict[str, Any] = {}
         chars_received = 0
         next_emit_at = 1
+        finish_reason: Optional[str] = None
 
         try:
             for chunk in stream_response:
@@ -3772,6 +3773,11 @@ class GeminiAnalyzer:
                 )
                 if normalized_usage:
                     usage = normalized_usage
+                choice_list = getattr(chunk, "choices", None)
+                if isinstance(choice_list, list) and choice_list:
+                    fr = getattr(choice_list[0], "finish_reason", None)
+                    if fr:
+                        finish_reason = str(fr)
 
                 delta_text = self._extract_stream_text(chunk)
                 if not delta_text:
@@ -3798,6 +3804,15 @@ class GeminiAnalyzer:
         if progress_callback and chars_received > 0:
             progress_callback(chars_received)
 
+        if finish_reason == "length":
+            # max_tokens cut mid-stream: the partial text would otherwise be
+            # stitched into the report as if complete. Surface it through the
+            # existing partial-received path so the caller retries non-stream
+            # for the same model and then falls through the model chain.
+            raise _LiteLLMStreamError(
+                f"{model} stream truncated by max_tokens (chars={chars_received})",
+                partial_received=True,
+            )
         return response_text, usage
 
     def _get_generation_backend(self, backend_id: Optional[str] = None) -> GenerationBackend:

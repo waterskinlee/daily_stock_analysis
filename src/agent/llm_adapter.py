@@ -346,6 +346,14 @@ def _accumulate_stream_response(stream: Any) -> Any:
         raise RuntimeError(
             f"LLM streaming produced no usable output (finish_reason={finish_reason!r})"
         )
+    if finish_reason == "length":
+        # A max_tokens cut mid-stream leaves a half-finished answer; returning
+        # it would stitch truncated prose (or broken JSON) into the report.
+        # Fail so the model-chain falls through to the next attempt.
+        raise RuntimeError(
+            "LLM streaming output was truncated by max_tokens "
+            f"(finish_reason='length', chars={len(content)}, tool_fragments={len(tool_calls)})"
+        )
     message = SimpleNamespace(
         content=content,
         tool_calls=tool_calls or None,

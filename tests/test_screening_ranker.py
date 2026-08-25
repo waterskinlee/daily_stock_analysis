@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -646,6 +647,29 @@ def test_screening_ranker_streams_and_accumulates_delta_content() -> None:
     assert result == "hello"
     assert completion_calls[0]["stream"] is True
 
+
+
+def test_screening_ranker_stream_truncation_raises_for_model_fallback() -> None:
+    clear_litellm_generation_param_recovery_cache()
+
+    def completion(**kwargs):
+        chunks = [
+            {"choices": [{"delta": {"content": '{"ranked":[{"code":"6"}}'}}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        ]
+        return iter(chunks)
+
+    fake_litellm = SimpleNamespace(completion=completion)
+
+    with patch.dict(sys.modules, {"litellm": fake_litellm}, clear=False):
+        with pytest.raises(RuntimeError, match="truncated by max_tokens"):
+            _call_llm(
+                "rank candidates",
+                api_key="test-key",
+                model="openai/x-preview-f-free",
+                base_url="",
+                json_mode=False,
+            )
 
 def test_screening_ranker_stream_requests_and_logs_usage() -> None:
     clear_litellm_generation_param_recovery_cache()

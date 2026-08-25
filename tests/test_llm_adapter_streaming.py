@@ -100,6 +100,17 @@ def test_accumulate_stream_raises_on_truncated_empty_output() -> None:
         _accumulate_stream_response(stream)
 
 
+def test_accumulate_stream_raises_on_truncated_partial_output() -> None:
+    import pytest
+
+    stream = [
+        _chunk(delta={"content": "partial answer that got cut"}),
+        _chunk(finish_reason="length"),
+    ]
+    with pytest.raises(RuntimeError, match="truncated by max_tokens"):
+        _accumulate_stream_response(stream)
+
+
 def test_parse_litellm_response_accepts_synthetic_stream_result() -> None:
     adapter = LLMToolAdapter.__new__(LLMToolAdapter)
     adapter._config = SimpleNamespace(llm_model_list=[])
