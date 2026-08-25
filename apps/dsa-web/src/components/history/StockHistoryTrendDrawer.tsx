@@ -335,7 +335,7 @@ export const StockHistoryTrendDrawer: React.FC<StockHistoryTrendDrawerProps> = (
                         <td className="whitespace-nowrap px-3 py-3 font-mono text-sm text-secondary-text">
                           {formatHistoryTime(item.createdAt)}
                         </td>
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-3" title={formatAdvice(item, actionLabels)}>
                           <div className="max-w-full overflow-hidden">
                             <Badge
                               variant={getDecisionActionTone(item.action, item.actionLabel, item.operationAdvice)}
