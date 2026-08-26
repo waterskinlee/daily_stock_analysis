@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 飞书 App Bot 长消息分批改为「先按原始 Markdown 的 `---` 股票分隔线切块、再逐块转 lark_md」：此前先格式化再分块会丢失股票边界，导致分片随机落入某股「数据透视」段落中间（观感为量能段后内容消失、下一条开头是另一只股票）。现在每只股票的完整小节始终落在同一条消息内；个别格式化后仍超限的块回退旧式二次切分兜底，页码标记保留。
 - [修复] 交易日检查不再被带交易所后缀的 A 股代码绕过：`get_market_for_stock` 现可识别 `600519.SH` / `002428.SZ` / `.SS` / `.BJ` 后缀与 `SH600519` / `SZ000001` / `BJ920493` 前缀形式，此前这些代码被当作无法识别（fail-open）保留，导致周六等非交易日仍执行定时个股分析（Issue #373 回归）。
 - [新功能] 后台定时分析任务写入共享事件总线：analyzer 每次定时批处理在 `scheduled_run_status`/`scheduled_run_events` 记录运行状态与实时 run-flow 事件（复用 query_id 作为 run_id，写入 fail-open），server 新增只读端点 `GET /api/v1/analysis/scheduled-runs` 与 `GET /api/v1/analysis/scheduled-runs/{run_id}/flow`；Web 首页新增「定时分析进行中」横幅，3 秒轮询展示活跃批次与股票总数。旧单 Agent/手动分析路径不写入，保持 unscoped。
 - [新功能] 个股与定时分析支持协作式取消：新增 `POST /api/v1/analysis/tasks/{task_id}/cancel` 与 `POST /api/v1/analysis/scheduled-runs/{run_id}/cancel`，任务队列和 SQLite 定时状态具备幂等竞态保护，执行链在安全检查点停止并广播 `task_cancel_requested` / `task_cancelled`；Web 首页任务面板与定时分析横幅提供取消入口，并在停止完成前保留状态反馈。
