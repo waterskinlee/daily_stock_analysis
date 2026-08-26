@@ -1005,7 +1005,7 @@ def run_full_analysis(
                 if results:
                     dashboard_content = pipeline.notifier.generate_aggregate_report(
                         results,
-                        getattr(config, 'report_type', 'simple'),
+                        'full',
                     )
                     full_content += f"# 🚀 个股决策仪表盘\n\n{dashboard_content}"
 
