@@ -25,6 +25,7 @@ from src.config import Config
 from src.formatters import (
     MIN_MAX_BYTES,
     PAGE_MARKER_SAFE_BYTES,
+    _page_marker,
     chunk_content_by_max_bytes,
     format_feishu_markdown,
     strip_hidden_markdown_metadata,
@@ -232,34 +233,57 @@ class FeishuSender:
         if client is None:
             return False
 
-        formatted = format_feishu_markdown(content)
-        content_bytes = len(formatted.encode("utf-8"))
+        raw_bytes = len(content.encode("utf-8"))
+        if raw_bytes <= self._feishu_max_bytes:
+            return self._app_send_once(client, format_feishu_markdown(content))
 
-        if content_bytes > self._feishu_max_bytes:
-            logger.info(
-                "App Bot 消息超长 (%d 字节)，将分批发送", content_bytes
-            )
-            return self._app_send_chunked(client, formatted)
-
-        return self._app_send_once(client, formatted)
+        logger.info("App Bot 消息超长 (%d 字节)，将分批发送", raw_bytes)
+        return self._app_send_chunked(client, content)
 
     def _app_send_chunked(self, client: Any, content: str) -> bool:
-        """Chunk and send long content through App Bot."""
+        """Chunk and send long content through App Bot.
+
+        Splitting happens on the RAW markdown (before format_feishu_markdown)
+        so the ``---`` stock separators and ``##`` headings survive and chunk
+        boundaries land BETWEEN stocks instead of mid-section. Formatting a
+        section can grow it (tables become bullet lines), so the split budget
+        keeps headroom; any formatted chunk that still overflows falls back to
+        the legacy post-format splitting.
+        """
         try:
-            chunks = chunk_content_by_max_bytes(
-                content, self._feishu_max_bytes, add_page_marker=True
+            split_budget = max(1000, int(self._feishu_max_bytes * 0.8))
+            raw_chunks = chunk_content_by_max_bytes(
+                content, split_budget, add_page_marker=False
             )
         except (ValueError, TypeError, Exception) as e:
             logger.error("App Bot 分片失败: %s", e)
             return False
 
+        chunks: list[str] = []
+        for raw_chunk in raw_chunks:
+            formatted = format_feishu_markdown(raw_chunk)
+            formatted_bytes = len(formatted.encode("utf-8"))
+            if formatted_bytes > self._feishu_max_bytes:
+                # Extreme growth (e.g. huge tables): fall back to legacy
+                # post-format splitting for this piece only.
+                sub_chunks = chunk_content_by_max_bytes(
+                    formatted,
+                    self._feishu_max_bytes,
+                    add_page_marker=False,
+                )
+                chunks.extend(sub_chunks)
+            else:
+                chunks.append(formatted)
+
+        total = len(chunks)
         success = True
         for i, chunk in enumerate(chunks):
+            chunk = chunk + _page_marker(i, total)
             ok = self._app_send_once(client, chunk)
             if not ok:
-                logger.error("App Bot 第 %d/%d 批发送失败", i + 1, len(chunks))
+                logger.error("App Bot 第 %d/%d 批发送失败", i + 1, total)
                 success = False
-            if i < len(chunks) - 1:
+            if i < total - 1:
                 time.sleep(1)
         return success
 
