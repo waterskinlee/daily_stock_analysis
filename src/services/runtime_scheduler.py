@@ -209,12 +209,25 @@ class RuntimeSchedulerService:
         self._config_provider = config_provider
         self._task_runner = task_runner
         if owns_schedule is None:
-            owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
+            # A serve-only process (DSA_RUNTIME_SCHEDULER_SUPPRESS_START) never
+            # owns scheduled batches: it must stay a manual-trigger worker even
+            # when settings-save later calls reconcile_from_config(). Otherwise
+            # a hidden scheduler thread boots inside the API process and fires
+            # batches in parallel with the CLI scheduler (--schedule).
+            if os.getenv(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, "").strip().lower() in {
                 "1",
                 "true",
                 "yes",
                 "on",
-            }
+            }:
+                owns_schedule = False
+            else:
+                owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
         self._owns_schedule = owns_schedule
         self._force_enabled = force_enabled
         self._run_immediately_in_background = run_immediately_in_background

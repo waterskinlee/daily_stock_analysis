@@ -275,7 +275,7 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
     runtime_scheduler_service = RuntimeSchedulerService(
-        owns_schedule=runtime_owns_schedule,
+        owns_schedule=runtime_owns_schedule and not runtime_suppress_start,
         force_enabled=runtime_force_enabled,
         run_immediately_in_background=True,
         schedule_args_overrides=runtime_scheduler_args,

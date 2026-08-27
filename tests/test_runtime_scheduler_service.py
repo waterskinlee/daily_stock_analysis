@@ -548,6 +548,31 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             self.assertFalse(service.status()["enabled"])
             self.assertEqual(fake_schedule.get_jobs(), [])
 
+    def test_suppress_env_denies_schedule_ownership_by_default(self) -> None:
+        config = SimpleNamespace(
+            schedule_enabled=True,
+            schedule_time="17:00",
+            schedule_times=["11:45", "17:00"],
+        )
+        with patch.dict(
+            os.environ,
+            {RUNTIME_SCHEDULER_SUPPRESS_START_ENV: "true"},
+            clear=False,
+        ), patch(
+            "src.services.runtime_scheduler.get_config",
+            return_value=config,
+        ):
+            service = RuntimeSchedulerService()
+
+            # serve-only process: settings-save must NOT spawn a scheduler thread.
+            self.assertFalse(service._owns_schedule)
+            service.reconcile_from_config(run_immediately=False)
+            self.assertFalse(service.status()["enabled"])
+
+            # Ownership stays denied even after a later reconcile request.
+            service.reconcile_from_config(clear_enabled_override=True)
+            self.assertFalse(service.status()["enabled"])
+
     def test_lifespan_disables_runtime_scheduler_when_cli_owns_schedule(self) -> None:
         from api.app import create_app
 
@@ -651,7 +676,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV))
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV))
 
-    def test_lifespan_suppresses_initial_start_without_losing_runtime_ownership(self) -> None:
+    def test_lifespan_suppress_start_denies_runtime_ownership(self) -> None:
         from api.app import create_app
 
         events = []
@@ -693,7 +718,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 pass
 
         self.assertEqual(events, [
-            ("init", True, False, True),
+            ("init", False, False, True),
             ("stop",),
         ])
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_SUPPRESS_START_ENV))
